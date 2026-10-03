@@ -6,7 +6,12 @@ import type { ClientMessage } from "./protocol.ts";
 // Step 3 added the broadcast; Step 4 adds the other direction (input/shoot).
 // Still one logical connection at a time — no player id, no room, no
 // broadcast-to-many, no reconnection handling, all deliberately crit 9's job.
-const BROADCAST_INTERVAL_MS = 200;
+//
+// 20Hz, matching the game loop's own tick rate — this timer only ever reads
+// gameLoop.getSnapshot() (no game logic lives here), so running it at the
+// same cadence as the tick is the simplest choice, not a second copy of any
+// simulation logic.
+const BROADCAST_INTERVAL_MS = 50;
 
 function parseClientMessage(data: unknown): ClientMessage | undefined {
   let parsed: unknown;

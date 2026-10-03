@@ -21,7 +21,12 @@ import {
   type Zombie,
 } from "./game-state.ts";
 
-const TICK_MS = 200;
+// 20Hz: fine-grained enough that client-side prediction rarely needs more
+// than a tiny, barely-visible correction. Nothing in the tick body changed —
+// every interval here (attack cadence, day duration, spawn spacing) is
+// expressed in absolute ms, so running it 4x more often doesn't change any
+// gameplay rule, just the granularity it's checked at.
+const TICK_MS = 50;
 
 // Server-authoritative, in-memory tick loop. Zombie/player positions and HP
 // live only here — day/baseHp/baseLevel/sharedXp are the only things that go

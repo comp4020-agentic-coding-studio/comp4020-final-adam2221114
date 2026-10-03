@@ -4,7 +4,7 @@ import type { ClientMessage } from "./protocol.ts";
 // Never moves anything locally and never decides a hit — position, HP, XP
 // all come back from the server's own state broadcast. getAimAngle() and
 // getMouseWorldPos() are exposed only so the renderer can draw local cues
-// (aim line, crosshair); neither is a game decision.
+// (aim line, crosshair, the oriented character); neither is a game decision.
 export class InputController {
   readonly #canvas: HTMLCanvasElement;
   readonly #worldSize: number;
@@ -12,7 +12,6 @@ export class InputController {
   readonly #getPlayerPos: () => { x: number; y: number };
   readonly #onShoot: (origin: { x: number; y: number }, aimAngle: number) => void;
   readonly #keys = { up: false, down: false, left: false, right: false };
-  #aimAngle = 0;
   #mouseWorldPos: { x: number; y: number } | undefined;
 
   constructor(opts: {
@@ -35,12 +34,25 @@ export class InputController {
 
     // Held-key state and aim angle change continuously; sending on an
     // interval (rather than wiring every single keydown/mousemove to its own
-    // send) keeps this simple and gives the server a steady stream either way.
-    setInterval(() => this.#sendInput(), 100);
+    // send) keeps this simple. 50ms matches the server's own 20Hz tick, so a
+    // held key shows up server-side within one tick instead of lagging
+    // noticeably behind the new, much faster simulation.
+    setInterval(() => this.#sendInput(), 50);
   }
 
+  // Recomputed from the latest mouse position and the CURRENT player
+  // position every time this is called, not cached from whenever the mouse
+  // last moved — the player now moves every animation frame (prediction), so
+  // a cached angle would visibly drift off the mouse while walking without
+  // touching it.
   getAimAngle(): number {
-    return this.#aimAngle;
+    if (!this.#mouseWorldPos) return 0;
+    const player = this.#getPlayerPos();
+    return Math.atan2(this.#mouseWorldPos.y - player.y, this.#mouseWorldPos.x - player.x);
+  }
+
+  getMoveState(): { up: boolean; down: boolean; left: boolean; right: boolean } {
+    return { ...this.#keys };
   }
 
   // undefined until the first mousemove — nothing to draw a crosshair at yet.
@@ -72,11 +84,10 @@ export class InputController {
   #onMouseMove(e: MouseEvent): void {
     const rect = this.#canvas.getBoundingClientRect();
     const scale = this.#canvas.width / this.#worldSize;
-    const mouseWorldX = (e.clientX - rect.left) / scale;
-    const mouseWorldY = (e.clientY - rect.top) / scale;
-    this.#mouseWorldPos = { x: mouseWorldX, y: mouseWorldY };
-    const player = this.#getPlayerPos();
-    this.#aimAngle = Math.atan2(mouseWorldY - player.y, mouseWorldX - player.x);
+    this.#mouseWorldPos = {
+      x: (e.clientX - rect.left) / scale,
+      y: (e.clientY - rect.top) / scale,
+    };
   }
 
   #onClick(): void {
@@ -84,10 +95,10 @@ export class InputController {
     // Fired immediately on click rather than waiting for the server's next
     // broadcast to confirm — the hit is resolved server-side regardless; this
     // is purely so the tracer/muzzle-flash feel instant.
-    this.#onShoot(this.#getPlayerPos(), this.#aimAngle);
+    this.#onShoot(this.#getPlayerPos(), this.getAimAngle());
   }
 
   #sendInput(): void {
-    this.#send({ type: "input", move: { ...this.#keys }, aimAngle: this.#aimAngle });
+    this.#send({ type: "input", move: this.getMoveState(), aimAngle: this.getAimAngle() });
   }
 }

@@ -63,17 +63,28 @@ export function render(
     ctx.fill();
   }
 
-  // Player
+  // Player: a simple oriented body/head/gun shape, not a bare dot — rotated
+  // to face aimAngle. Flat shapes and colour only, same as everything else
+  // here; no sprite sheet, no animation frames.
   const player = toScreen(state.player.x, state.player.y);
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  ctx.rotate(aimAngle);
   ctx.fillStyle = "#ffcc00";
   ctx.beginPath();
-  ctx.arc(player.x, player.y, 10, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, 11, 8, 0, 0, Math.PI * 2); // body, facing +x before rotation
   ctx.fill();
+  ctx.beginPath();
+  ctx.arc(6, 0, 5, 0, Math.PI * 2); // head, offset toward the facing direction
+  ctx.fill();
+  ctx.fillStyle = "#333";
+  ctx.fillRect(8, -2, 15, 4); // gun, extending further forward
+  ctx.restore();
 
   // Aim direction — a short line from the player along the client's own
   // current aim angle. A UI cue for what the next shot would target, not a
   // game decision: the server resolves the actual hit independently.
-  const aimLength = 26;
+  const aimLength = 30;
   ctx.strokeStyle = "#ffcc00";
   ctx.lineWidth = 2;
   ctx.beginPath();
