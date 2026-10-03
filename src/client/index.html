@@ -4,13 +4,65 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Zombie base defence</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #111;
+        color: #eee;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #game {
+        display: block;
+        border: 1px solid #333;
+      }
+      #hud {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        font-size: 14px;
+        line-height: 1.6;
+        background: rgb(0 0 0 / 55%);
+        padding: 8px 12px;
+        border-radius: 4px;
+      }
+      #conn {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        font-size: 13px;
+        padding: 4px 10px;
+        border-radius: 4px;
+      }
+      #conn.connected {
+        background: #1f5c1f;
+      }
+      #conn.connecting,
+      #conn.disconnected {
+        background: #5c1f1f;
+      }
+      footer {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        font-size: 12px;
+      }
+      footer a {
+        color: #8ab4ff;
+      }
+    </style>
   </head>
   <body>
-    <main>
-      <h1>Zombie base defence</h1>
-      <!-- STEP 0: routing shell only — the game itself lands in a later step. -->
-      <p>The server is up. The game isn't built yet.</p>
-      <p><a href="/readme/">About this app</a></p>
-    </main>
+    <canvas id="game"></canvas>
+    <div id="hud"></div>
+    <div id="conn" class="connecting">connecting…</div>
+    <footer><a href="/readme/">About this app</a></footer>
+    <script type="module" src="/main.js"></script>
   </body>
 </html>

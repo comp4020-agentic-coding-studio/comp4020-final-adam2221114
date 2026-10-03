@@ -14,13 +14,32 @@ import { attachWebSocketServer } from "./ws-server.ts";
 // STEP 2: the game loop runs server-side, in memory — zombies approach and
 // hit the base, day advances.
 // STEP 3: a /ws endpoint broadcasts the authoritative state at a stable rate.
-// Still no client input (no WASD, no shoot) and no real client view — that's
-// Step 4/5.
+// STEP 4: the client can send input/shoot; the server resolves them.
+// STEP 5: the real canvas client replaces the Step 0 shell page, served from
+// dist/client (built from src/client by tsconfig.client.json).
 
 const port = Number(process.env.PORT ?? 8080);
 const cwd = process.cwd();
 
 const clientIndex = readFileSync(path.join(cwd, "src", "client", "index.html"), "utf8");
+const distClientDir = path.join(cwd, "dist", "client");
+
+// Reads fresh each request (like renderReadme()) rather than caching, so a
+// rebuild (`pnpm run build`) is visible without restarting the server. Only
+// ever serves *.js under dist/client — nothing else is exposed this way.
+function serveClientScript(url: string, res: import("node:http").ServerResponse): boolean {
+  if (!url.endsWith(".js")) return false;
+  const resolved = path.resolve(path.join(distClientDir, url));
+  if (!resolved.startsWith(distClientDir + path.sep)) return false; // no path traversal
+  try {
+    const js = readFileSync(resolved, "utf8");
+    res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+    res.end(js);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const db = openDatabase();
 const progress = new PersistedState(db);
@@ -43,6 +62,8 @@ const server = createServer((req, res) => {
     res.end(clientIndex);
     return;
   }
+
+  if (serveClientScript(url, res)) return;
 
   res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
   res.end("not found");

@@ -1,0 +1,16 @@
+// Emits the browser client to plain JS, loaded by index.html as native ES
+// modules — no bundler. Type-checking runs through the root tsconfig.json
+// (`pnpm typecheck`); this config only exists to produce dist/client.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "dist/client",
+    "rootDir": "src/client",
+    "types": [] // no Node ambient globals in browser code
+  },
+  "include": ["src/client"]
+}
