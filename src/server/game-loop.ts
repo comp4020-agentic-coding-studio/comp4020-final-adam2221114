@@ -41,6 +41,22 @@ const SPAWN_INTERVAL_MS = 2000;
 // gameplay rule, just the granularity it's checked at.
 const TICK_MS = 50;
 
+// What phase a process boots into, given what was last persisted. A stored
+// "running" never means "really resume" — it only ever means the previous
+// process stopped (crash, SIGKILL, `flyctl machine restart`, a redeploy)
+// while a round was live, with no chance to pause cleanly first. Mapping it
+// to "paused" here, unconditionally, on every boot, is what makes correctness
+// NOT depend on SIGTERM/shutdown having run: even a hard kill leaves the game
+// safe to resume manually next time, because the boot-time read is the one
+// place that decides, not whatever happened (or didn't) on the way out.
+const STARTUP_PHASE: Record<GamePhase, GamePhase> = {
+  waiting: "waiting",
+  paused: "paused",
+  running: "paused",
+  game_over: "game_over",
+  victory: "victory",
+};
+
 // Server-authoritative, in-memory tick loop. Zombie/player positions, the
 // turret's current target and its fire timer live only here —
 // day/baseHp/sharedXp/wallLevel/wallHp/turret* are the only things that go
@@ -67,12 +83,19 @@ const TICK_MS = 50;
 //
 // Playability polish: a round phase gates the tick (waiting/paused/game_over/
 // victory all freeze zombies, spawning, day and the player — only "running"
-// ticks). phase itself is NOT persisted: every process boot starts at
-// "waiting" regardless of what day/baseHp/etc were left at, so a stranger
-// always gets a deliberate Start moment, and whatever was persisted is just
-// what they see on the HUD until they press it. restart() is the only thing
-// that resets day/baseHp/sharedXp/wallLevel/turret* themselves — a plain
-// boot leaves them exactly as persisted.
+// ticks). restart() is the only thing that resets day/baseHp/sharedXp/
+// wallLevel/turret* themselves — every other phase transition leaves them
+// exactly as persisted.
+//
+// Disconnect-pause fix: phase IS persisted now (reversing the earlier
+// decision), so the game can be paused the instant the last client
+// disconnects and have that stick even through a crash or a machine restart.
+// The constructor never trusts a stored phase as-is, though — see
+// STARTUP_PHASE above. Every transition below (play/pause/restart, and the
+// game_over/victory edges) updates and flushes progress.phase immediately,
+// the same "worth not losing" treatment a build or a day change already
+// gets, so correctness never depends on the periodic save timer or on
+// SIGTERM having a chance to run.
 export class GameLoop {
   readonly #progress: PersistedState;
   readonly #zombies: Zombie[] = [];
@@ -94,7 +117,18 @@ export class GameLoop {
 
   constructor(progress: PersistedState) {
     this.#progress = progress;
-    this.#totalZombiesForDay = zombiesForDay(progress.get().day);
+    const stored = progress.get();
+    this.#totalZombiesForDay = zombiesForDay(stored.day);
+    this.#phase = STARTUP_PHASE[stored.phase];
+    if (this.#phase !== stored.phase) {
+      // Correct the stored value on disk immediately, not just in memory —
+      // so a second crash before any real transition still boots safely.
+      this.#progress.update({ phase: this.#phase });
+      this.#progress.flush();
+      console.log(`startup: stored phase was "${stored.phase}", starting as "${this.#phase}" instead`);
+    } else {
+      console.log(`startup: phase = "${this.#phase}"`);
+    }
   }
 
   // "start" and "resume" are the same edge: waiting/paused -> running. A
@@ -103,13 +137,21 @@ export class GameLoop {
   play(): void {
     if (this.#phase === "waiting" || this.#phase === "paused") {
       this.#phase = "running";
+      this.#progress.update({ phase: "running" });
+      this.#progress.flush();
       console.log(`phase -> running`);
     }
   }
 
+  // Also the disconnect handler's own fix: ws-server calls this unconditionally
+  // whenever the active connection closes (including a plain refresh replacing
+  // it a moment later), and this no-ops unless a round was actually running —
+  // so it's always safe to call, never something that needs its own guard.
   pause(): void {
     if (this.#phase === "running") {
       this.#phase = "paused";
+      this.#progress.update({ phase: "paused" });
+      this.#progress.flush();
       console.log("phase -> paused");
     }
   }
@@ -309,6 +351,7 @@ export class GameLoop {
     const completedDay = this.#progress.get().day;
     if (completedDay >= DAY_VICTORY) {
       this.#phase = "victory";
+      this.#progress.update({ phase: "victory" });
       this.#progress.flush();
       console.log(`day ${completedDay} complete: phase -> victory`);
       return; // frozen at the victorious day, not advanced past it
@@ -444,6 +487,7 @@ export class GameLoop {
     console.log(`zombie ${zombie.id} hits the base: baseHp ${progress.baseHp} -> ${baseHp}`);
     if (baseHp <= 0) {
       this.#phase = "game_over";
+      this.#progress.update({ phase: "game_over" });
       this.#progress.flush();
       console.log("base destroyed: phase -> game_over");
     }

@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { BASE_MAX_HP } from "./game-state.ts";
+import type { GamePhase } from "./protocol.ts";
 
 // What this project persists: current day, base HP, shared XP, and the
 // defensive buildings' own level/HP. baseLevel is gone — the old "100 XP
@@ -10,6 +11,16 @@ import { BASE_MAX_HP } from "./game-state.ts";
 // is the only thing that changes wallLevel/turretBuilt. Player position and
 // zombie positions, and anything about the turret's current target, stay in
 // memory and are rebuilt on restart — see PersistedState for why.
+//
+// phase is persisted too, as of the disconnect-pause fix — reversing the
+// earlier "phase is never persisted" decision. The raw stored value is never
+// trusted as-is on boot, though: GameLoop's constructor maps a stored
+// "running" to a startup phase of "paused" unconditionally (see its
+// STARTUP_PHASE table), because a stored "running" only ever means the
+// process stopped (crash, SIGKILL, machine stop) while the round was live —
+// there is no event that means "really do resume automatically." Persisting
+// the real phase and correcting it on load, rather than never persisting it,
+// is what makes this safe without depending on SIGTERM running first.
 export interface Progress {
   day: number;
   baseHp: number;
@@ -24,6 +35,7 @@ export interface Progress {
   turretBuilt: boolean;
   turretX: number; // player-chosen placement (GameLoop.placeTurret) — meaningless while !turretBuilt
   turretY: number;
+  phase: GamePhase;
 }
 
 // Exported so GameLoop.restart() resets to exactly this, rather than a second
@@ -42,6 +54,7 @@ export const DEFAULT_PROGRESS: Progress = {
   turretBuilt: false,
   turretX: 0,
   turretY: 0,
+  phase: "waiting",
 };
 
 interface GameStateRow {
@@ -58,6 +71,7 @@ interface GameStateRow {
   turret_built: number; // SQLite has no boolean type; 0/1
   turret_x: number;
   turret_y: number;
+  phase: string; // stored verbatim; GameLoop decides what's safe to boot into
 }
 
 export function defaultDataDir(): string {
@@ -78,6 +92,10 @@ const MIGRATIONS: Array<{ column: string; ddl: string }> = [
   { column: "turret_built", ddl: "ALTER TABLE game_state ADD COLUMN turret_built INTEGER NOT NULL DEFAULT 0" },
   { column: "turret_x", ddl: "ALTER TABLE game_state ADD COLUMN turret_x REAL NOT NULL DEFAULT 0" },
   { column: "turret_y", ddl: "ALTER TABLE game_state ADD COLUMN turret_y REAL NOT NULL DEFAULT 0" },
+  // Databases from before the disconnect-pause fix have no phase column at
+  // all — defaulting to "waiting" is safe (the same as every pre-fix boot
+  // already behaved, since phase used to not persist at all).
+  { column: "phase", ddl: "ALTER TABLE game_state ADD COLUMN phase TEXT NOT NULL DEFAULT 'waiting'" },
 ];
 
 // One table, one row (id = 1). Crit 9's players and crit 10's event log are
@@ -104,6 +122,7 @@ export function openDatabase(dir: string = defaultDataDir()): Database.Database 
       turret_built INTEGER NOT NULL DEFAULT 0,
       turret_x REAL NOT NULL DEFAULT 0,
       turret_y REAL NOT NULL DEFAULT 0,
+      phase TEXT NOT NULL DEFAULT 'waiting',
       updated_at TEXT NOT NULL
     )
   `);
@@ -124,13 +143,13 @@ export function openDatabase(dir: string = defaultDataDir()): Database.Database 
          id, current_day, base_hp, base_max_hp, shared_xp,
          wall_level, wall_hp, wall_max_hp,
          turret_level, turret_hp, turret_max_hp, turret_built, turret_x, turret_y,
-         updated_at
+         phase, updated_at
        )
        VALUES (
          1, @day, @baseHp, @baseMaxHp, @sharedXp,
          @wallLevel, @wallHp, @wallMaxHp,
          @turretLevel, @turretHp, @turretMaxHp, @turretBuilt, @turretX, @turretY,
-         @updatedAt
+         @phase, @updatedAt
        )`,
     ).run({
       ...DEFAULT_PROGRESS,
@@ -147,7 +166,8 @@ export function loadState(db: Database.Database): Progress {
     .prepare(
       `SELECT current_day, base_hp, base_max_hp, shared_xp,
               wall_level, wall_hp, wall_max_hp,
-              turret_level, turret_hp, turret_max_hp, turret_built, turret_x, turret_y
+              turret_level, turret_hp, turret_max_hp, turret_built, turret_x, turret_y,
+              phase
        FROM game_state WHERE id = 1`,
     )
     .get() as GameStateRow | undefined;
@@ -168,6 +188,10 @@ export function loadState(db: Database.Database): Progress {
     turretBuilt: row.turret_built === 1,
     turretX: row.turret_x,
     turretY: row.turret_y,
+    // Returned verbatim — whatever was actually on disk. Deciding whether
+    // it's safe to boot into is GameLoop's job (STARTUP_PHASE), not this
+    // function's; loadState only reports the truth.
+    phase: row.phase as GamePhase,
   };
 }
 
@@ -177,7 +201,8 @@ export function saveState(db: Database.Database, state: Progress): void {
      SET current_day = @day, base_hp = @baseHp, base_max_hp = @baseMaxHp, shared_xp = @sharedXp,
          wall_level = @wallLevel, wall_hp = @wallHp, wall_max_hp = @wallMaxHp,
          turret_level = @turretLevel, turret_hp = @turretHp, turret_max_hp = @turretMaxHp,
-         turret_built = @turretBuilt, turret_x = @turretX, turret_y = @turretY, updated_at = @updatedAt
+         turret_built = @turretBuilt, turret_x = @turretX, turret_y = @turretY,
+         phase = @phase, updated_at = @updatedAt
      WHERE id = 1`,
   ).run({
     ...state,

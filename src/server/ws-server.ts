@@ -108,8 +108,24 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
     });
 
     socket.on("close", () => {
-      if (current === socket) current = null;
-      console.log("ws: client disconnected (game loop keeps running)");
+      // Only pause when this socket was still the one actually being tracked
+      // — i.e. this really was the last/active connection going away (a tab
+      // closing, a network drop, or a plain refresh's old socket closing
+      // before the new one opens). If `current` has already moved on to a
+      // newer connection by the time this fires, a slow-to-arrive close event
+      // for an already-superseded socket must NOT pause the session that
+      // replaced it. gameLoop.pause() is a no-op unless phase is currently
+      // "running", so it's always safe to call whenever this check passes.
+      // There is no auto-resume anywhere: the next connection (even the
+      // refreshed page itself) just sees "paused" and the player has to click
+      // Resume themselves.
+      if (current === socket) {
+        current = null;
+        gameLoop.pause();
+        console.log("ws: last client disconnected — game paused if it was running");
+      } else {
+        console.log("ws: a superseded connection closed (already replaced) — not pausing");
+      }
     });
   });
 
