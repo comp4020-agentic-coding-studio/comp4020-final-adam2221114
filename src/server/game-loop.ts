@@ -2,33 +2,38 @@ import type { PersistedState } from "./persisted-state.ts";
 import type { StateMessage } from "./protocol.ts";
 import {
   DAY_DURATION_MS,
+  LEVEL_UP_THRESHOLDS,
+  PISTOL_DAMAGE,
   PLAYER_MAX_HP,
   PLAYER_START_POS,
+  XP_PER_KILL,
   ZOMBIE_ATTACK_DAMAGE,
   ZOMBIE_ATTACK_INTERVAL_MS,
+  movePlayer,
+  resolveShot,
   spawnZombie,
   spawnsForDay,
   stepZombie,
+  type InputState,
   type Player,
   type Zombie,
 } from "./game-state.ts";
 
 const TICK_MS = 200;
 
-// Server-authoritative, in-memory, single tick loop. Zombie positions and HP
-// live only here — day/baseHp/level/XP are the only things that go through
-// PersistedState, and only day-change calls flush() directly; base HP
-// changes go through the dirty-state path like everything else.
+// Server-authoritative, in-memory tick loop. Zombie/player positions and HP
+// live only here — day/baseHp/baseLevel/sharedXp are the only things that go
+// through PersistedState, and only day-change and level-up flush directly;
+// everything else goes through the dirty-state path.
 //
-// No networking, no rendering, no player, no walls or turrets this step —
-// those are Step 4/5/final, not this one. Logged to the console so the loop
-// is observable without either of those.
+// Step 4: WASD moves the player (continuous, driven by stored input) and
+// shoot() resolves a shot instantly against it. Still no real client view,
+// no walls/turret logic, no second player — those are Step 5/final/crit 9.
 export class GameLoop {
   readonly #progress: PersistedState;
   readonly #zombies: Zombie[] = [];
-  // Static this step — no WASD/shoot until Step 4, so nothing moves or
-  // damages it yet. Present so getSnapshot() has a real player to report.
   readonly #player: Player = { pos: { ...PLAYER_START_POS }, hp: PLAYER_MAX_HP };
+  #input: InputState = { up: false, down: false, left: false, right: false, aimAngle: 0 };
   #dayElapsedMs = 0;
   #spawnedThisDay = 0;
   #spawnTargetThisDay: number;
@@ -39,8 +44,51 @@ export class GameLoop {
     this.#spawnTargetThisDay = spawnsForDay(progress.get().day);
   }
 
+  // Replaces the stored input wholesale — the client sends its full held-key
+  // state and current aim angle on every "input" message, so there's nothing
+  // to merge. Applied on the next tick, not immediately.
+  setInput(input: InputState): void {
+    this.#input = input;
+  }
+
+  // One shot, resolved instantly against whatever input is currently stored.
+  // No bullet entity, no queue — this runs synchronously the moment the
+  // "shoot" message arrives, ahead of the next tick if one's close.
+  shoot(): void {
+    const target = resolveShot(this.#player.pos, this.#input.aimAngle, this.#zombies);
+    if (!target) {
+      console.log("shoot: no zombie in range/cone");
+      return;
+    }
+    target.hp -= PISTOL_DAMAGE;
+    console.log(`shoot: hit ${target.id}, hp -> ${target.hp}`);
+    if (target.hp <= 0) {
+      this.#zombies.splice(this.#zombies.indexOf(target), 1);
+      console.log(`zombie ${target.id} died`);
+      this.#awardXp(XP_PER_KILL);
+    }
+  }
+
+  // Shared XP always marks dirty (periodic save picks it up); a level-up
+  // crossed in the same award flushes immediately after, same as day change.
+  #awardXp(amount: number): void {
+    const before = this.#progress.get();
+    const sharedXp = before.sharedXp + amount;
+    let baseLevel = before.baseLevel;
+    while (LEVEL_UP_THRESHOLDS[baseLevel] !== undefined && sharedXp >= LEVEL_UP_THRESHOLDS[baseLevel]) {
+      baseLevel++;
+    }
+    this.#progress.update({ sharedXp, baseLevel });
+    const leveledUp = baseLevel > before.baseLevel;
+    console.log(
+      `sharedXp ${before.sharedXp} -> ${sharedXp}` +
+        (leveledUp ? `, baseLevel ${before.baseLevel} -> ${baseLevel} (wall unlocked)` : ""),
+    );
+    if (leveledUp) this.#progress.flush(); // level-up flushes immediately, like day change
+  }
+
   // Read-only view for the WS layer to broadcast. Never mutates anything —
-  // the only writer of game state is the tick loop itself.
+  // the only writers of game state are shoot() and the tick loop itself.
   getSnapshot(): StateMessage {
     const progress = this.#progress.get();
     return {
@@ -50,6 +98,7 @@ export class GameLoop {
       baseMaxHp: progress.baseMaxHp,
       baseLevel: progress.baseLevel,
       sharedXp: progress.sharedXp,
+      wallUnlocked: progress.baseLevel >= 1,
       player: { x: this.#player.pos.x, y: this.#player.pos.y, hp: this.#player.hp },
       zombies: this.#zombies.map((z) => ({ id: z.id, x: z.pos.x, y: z.pos.y, hp: z.hp })),
     };
@@ -67,6 +116,7 @@ export class GameLoop {
   }
 
   #tick(dtMs: number): void {
+    movePlayer(this.#player, this.#input, dtMs);
     this.#maybeSpawn();
     this.#updateZombies();
     this.#advanceDay(dtMs);

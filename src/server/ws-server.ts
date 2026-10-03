@@ -1,13 +1,44 @@
 import type { Server } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import type { GameLoop } from "./game-loop.ts";
+import type { ClientMessage } from "./protocol.ts";
 
-// Step 3: one logical connection at a time. No player id, no room, no
-// broadcast-to-many, no reconnection handling — crit 9's job, not this
-// step's. This module only ever reads GameLoop's snapshot and pushes it out;
-// there's no client input to apply yet (that's Step 4), so it never touches
-// game state.
+// Step 3 added the broadcast; Step 4 adds the other direction (input/shoot).
+// Still one logical connection at a time — no player id, no room, no
+// broadcast-to-many, no reconnection handling, all deliberately crit 9's job.
 const BROADCAST_INTERVAL_MS = 200;
+
+function parseClientMessage(data: unknown): ClientMessage | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(data));
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || !("type" in parsed)) return undefined;
+
+  if (parsed.type === "input") {
+    const { move, aimAngle } = parsed as { move?: unknown; aimAngle?: unknown };
+    if (typeof move !== "object" || move === null || typeof aimAngle !== "number") return undefined;
+    const m = move as Record<string, unknown>;
+    return {
+      type: "input",
+      move: {
+        up: m.up === true,
+        down: m.down === true,
+        left: m.left === true,
+        right: m.right === true,
+      },
+      aimAngle,
+    };
+  }
+
+  if (parsed.type === "shoot") {
+    return { type: "shoot" };
+  }
+
+  return undefined;
+}
 
 export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): void {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
@@ -20,6 +51,19 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
     }
     current = socket;
     console.log("ws: client connected");
+
+    socket.on("message", (data) => {
+      const msg = parseClientMessage(data);
+      if (!msg) {
+        console.warn("ws: dropped an unrecognised message");
+        return;
+      }
+      if (msg.type === "input") {
+        gameLoop.setInput({ ...msg.move, aimAngle: msg.aimAngle });
+      } else {
+        gameLoop.shoot();
+      }
+    });
 
     socket.on("close", () => {
       if (current === socket) current = null;
