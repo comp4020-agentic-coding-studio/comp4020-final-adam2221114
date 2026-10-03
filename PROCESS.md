@@ -1,20 +1,33 @@
 # Process overview
 
-<!-- TEMPLATE: replace everything in this file with your own account, this
-     comment included --- `pnpm check:evidence` fails while it's still here. -->
+A cooperative zombie base-defence game with the server as the sole source of truth and the client limited to rendering, input, prediction and interpolation. I used Claude Code as a pair-programmer: I defined the scope and constraints for each round, reviewed the result in the running game, corrected behaviour that did not match my intent, and had Claude implement and verify the resulting changes. Each round landed as its own commit so regressions could be traced back to one scoped change. This account focuses on corrections that changed the design rather than listing every feature.
 
-How you got from the brief to the harness, agentic workflow and stack behind
-this app, told however suits the work. The
-[final project brief](https://comp.anu.edu.au/courses/comp4020-agentic-coding-studio/assessments/final-project/#what-you-submit)
-says what it covers and how long it runs.
+## Stack
 
-Markers follow the links you give them; they don't trawl the repo for evidence
-you didn't point at. A link to the record is one whose text is the commit hash,
-and it can sit anywhere in a sentence:
-[`a1b2c3d`](https://github.com/YOUR-ORG/YOUR-REPO/commit/a1b2c3d) for one
-commit, or
-[`a1b2c3d...e4f5a6b`](https://github.com/YOUR-ORG/YOUR-REPO/compare/a1b2c3d...e4f5a6b)
-for a range.
+Node and TypeScript run on both sides, with a raw `ws` WebSocket connection instead of a higher-level realtime framework, `better-sqlite3` for persistence, and a hand-rolled Canvas2D renderer rather than a game engine or UI framework. The project started from the course placeholder container; the first step replaced it with a minimal Node HTTP server that still satisfied the starter contract at `/` and `/readme/` before any game logic existed, so later work built on something already known to deploy correctly ([`5b680de`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/5b680de)). The server owns authoritative gameplay values. The client mirrors only the small subset of configuration it needs for previews and display, while the server independently validates costs, ranges and placement rules.
 
-`pnpm check:evidence` checks that this comment is gone and that every commit you
-link exists in this repo. Whether the account is any good is the marker's call.
+## Workflow
+
+Each round began with a narrow, explicit scope: a short numbered brief plus a list of what not to add. After implementation, I verified behaviour against a real running instance rather than relying on unit tests alone. The most useful habit was checking authoritative WebSocket state directly whenever a claim concerned server truth, using a headless browser when the claim concerned what a player actually saw, and querying SQLite directly to confirm persistence rather than trusting a restart that merely looked correct. This prevented several test mistakes from being mislabelled as product bugs and kept corrections focused on the actual problem.
+
+## Corrections that changed the design
+
+**Dev server never built the client.** `pnpm dev` only watched `src/server`, so a fresh checkout had no `dist/client` and `/main.js` returned 404 even though the HTML and route were correct. I changed the dev workflow so the client is built before the server watch starts ([`4fd7d41`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/4fd7d41)). This mattered because a marker will run the project from a cold state, so the development command needed to work without relying on stale build output.
+
+**CI's `/data` mount and `DATA_DIR` disagreed.** The workflow mounted a temporary `/data` directory for checks but did not set `DATA_DIR`, so the application would have fallen back to another path and silently ignored the mounted database location ([`7760964`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/7760964)). It had not failed yet, but it would have hidden persistence bugs later. Fixing the environment contract early made local, CI and Fly behaviour agree.
+
+**Snapshot interpolation alone did not feel right.** Interpolating between server snapshots made movement visually smoother, but the local player still waited for a round trip before movement appeared, so the controls felt delayed. I replaced that with client-side prediction for the local player and reconciliation against server snapshots ([`537e681`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/537e681)). The server still decides the real position; prediction only improves responsiveness before the next authoritative correction arrives.
+
+**Days advanced on a timer.** The first design allowed a day to end while zombies were still alive, which did not match the idea of defending against a wave. I changed progression so the next day begins only when the full zombie quota has spawned and been defeated ([`a9c79c6`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/a9c79c6)). This made the progression rule match the player's mental model of clearing a wave rather than simply surviving a clock.
+
+**The wall was cosmetic.** The original wall was only a drawn ring and did not stop zombies from reaching the base. That made the word "wall" misleading and gave the upgrade no meaningful defensive role. I changed it into real combat state with its own HP that physically blocks zombies and absorbs damage until destroyed ([`a9c79c6`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/a9c79c6)). A named defence mechanic should actually alter the game's survival logic before more systems are layered on top of it.
+
+**Wall-building was automatic.** Reaching 100 shared XP originally created a wall automatically, which removed any decision from the shared economy. I replaced that with an explicit `X` interaction near the base, where the player chooses how to spend XP and the server independently validates range, cost and current building state ([`3e680c9`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/3e680c9)). This turned shared XP from a passive threshold into a resource that supports deliberate defensive choices.
+
+**Turret placement was fixed.** The first turret worked, but it always appeared at one hardcoded position, so building it involved no placement decision. I changed it so the player chooses a location and the server validates that the requested position falls inside the allowed build area around the base ([`33c50c0`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/33c50c0)). The same server-authority rule that already governed combat and purchases therefore also applies to building placement.
+
+**"Turret damage has no effect" was not a logic bug.** During playtesting the turret looked ineffective, but before changing damage values I inspected authoritative zombie HP while the turret fired and confirmed the damage was already being applied correctly. The real problem was presentation: zombies had no visible health feedback, so slow damage looked like no damage at all ([`33c50c0`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/33c50c0)). The correction was to add zombie health bars rather than arbitrarily increasing turret damage. This reinforced a useful rule for the project: diagnose state first, then decide whether the problem is logic or feedback.
+
+## What was deliberately left out
+
+I deliberately kept the scope smaller than the full final-project idea. There are no multiple turrets, turret repair or refund, extra weapons, drops, multiple zombie types, crafting, public lobby or multiplayer yet. Multiplayer is a later requirement and was not forced into C8 just to increase scope. Some future balance values are intentionally still unset: Wall Level 3 and Turret Levels 2–3 do not have invented costs or stats yet. Leaving those decisions open is preferable to adding arbitrary numbers before there is enough playtesting evidence to justify them.
