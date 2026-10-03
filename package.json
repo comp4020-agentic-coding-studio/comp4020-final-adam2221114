@@ -4,8 +4,9 @@
   "type": "module",
   "scripts": {
     "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
-    "dev": "tsx watch src/server/index.ts",
-    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json",
+    "dev": "pnpm run build:client && tsx watch src/server/index.ts",
+    "build": "tsc -p tsconfig.server.json && pnpm run build:client",
+    "build:client": "tsc -p tsconfig.client.json",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test",
     "check:evidence": "node scripts/check-evidence.ts",
