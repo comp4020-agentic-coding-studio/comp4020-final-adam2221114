@@ -11,8 +11,17 @@ export interface Vec2 {
 export interface Zombie {
   id: string;
   pos: Vec2;
+  hp: number;
   attacking: boolean;
   lastAttackAt: number; // ms, relative to the current day's own clock
+}
+
+// Static this step — nothing mutates it yet (no WASD, no shooting; that's
+// Step 4). It exists now because the Step 3 state snapshot needs a shape for
+// it, not because the player can do anything yet.
+export interface Player {
+  pos: Vec2;
+  hp: number;
 }
 
 export const MAP_SIZE = 1000;
@@ -21,7 +30,10 @@ export const BASE_ATTACK_RANGE = 40;
 export const ZOMBIE_SPEED = 40; // units/second
 export const ZOMBIE_ATTACK_DAMAGE = 5;
 export const ZOMBIE_ATTACK_INTERVAL_MS = 1000;
+export const ZOMBIE_MAX_HP = 30; // ~3 pistol shots once Step 4 adds shooting
 export const DAY_DURATION_MS = 60_000; // ~45-60s/day; using the top of that range
+export const PLAYER_MAX_HP = 100;
+export const PLAYER_START_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 + 60 };
 
 // A day-over-day bump, not the full 28-day curve — that's later work.
 export function spawnsForDay(day: number): number {
@@ -49,6 +61,7 @@ export function spawnZombie(): Zombie {
   return {
     id: `z${nextZombieId++}`,
     pos: randomEdgePosition(),
+    hp: ZOMBIE_MAX_HP,
     attacking: false,
     lastAttackAt: -Infinity,
   };

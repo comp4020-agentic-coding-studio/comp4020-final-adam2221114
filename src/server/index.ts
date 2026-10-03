@@ -5,14 +5,17 @@ import { renderReadme } from "./render-readme.ts";
 import { openDatabase } from "./persistence.ts";
 import { PersistedState } from "./persisted-state.ts";
 import { GameLoop } from "./game-loop.ts";
+import { attachWebSocketServer } from "./ws-server.ts";
 
 // STEP 0: just enough of a server to replace the placeholder container and
 // keep the two fixed invariants (spec/invariants.test.ts) green.
 // STEP 1: persistence is wired into the process lifecycle here (loaded at
 // startup, flushed on shutdown).
 // STEP 2: the game loop runs server-side, in memory — zombies approach and
-// hit the base, day advances. Still no networking and no client view of any
-// of it; that's Step 3 onwards.
+// hit the base, day advances.
+// STEP 3: a /ws endpoint broadcasts the authoritative state at a stable rate.
+// Still no client input (no WASD, no shoot) and no real client view — that's
+// Step 4/5.
 
 const port = Number(process.env.PORT ?? 8080);
 const cwd = process.cwd();
@@ -44,6 +47,8 @@ const server = createServer((req, res) => {
   res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
   res.end("not found");
 });
+
+attachWebSocketServer(server, gameLoop);
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`listening on :${port}`);

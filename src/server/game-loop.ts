@@ -1,11 +1,15 @@
 import type { PersistedState } from "./persisted-state.ts";
+import type { StateMessage } from "./protocol.ts";
 import {
   DAY_DURATION_MS,
+  PLAYER_MAX_HP,
+  PLAYER_START_POS,
   ZOMBIE_ATTACK_DAMAGE,
   ZOMBIE_ATTACK_INTERVAL_MS,
   spawnZombie,
   spawnsForDay,
   stepZombie,
+  type Player,
   type Zombie,
 } from "./game-state.ts";
 
@@ -22,6 +26,9 @@ const TICK_MS = 200;
 export class GameLoop {
   readonly #progress: PersistedState;
   readonly #zombies: Zombie[] = [];
+  // Static this step — no WASD/shoot until Step 4, so nothing moves or
+  // damages it yet. Present so getSnapshot() has a real player to report.
+  readonly #player: Player = { pos: { ...PLAYER_START_POS }, hp: PLAYER_MAX_HP };
   #dayElapsedMs = 0;
   #spawnedThisDay = 0;
   #spawnTargetThisDay: number;
@@ -30,6 +37,22 @@ export class GameLoop {
   constructor(progress: PersistedState) {
     this.#progress = progress;
     this.#spawnTargetThisDay = spawnsForDay(progress.get().day);
+  }
+
+  // Read-only view for the WS layer to broadcast. Never mutates anything —
+  // the only writer of game state is the tick loop itself.
+  getSnapshot(): StateMessage {
+    const progress = this.#progress.get();
+    return {
+      type: "state",
+      day: progress.day,
+      baseHp: progress.baseHp,
+      baseMaxHp: progress.baseMaxHp,
+      baseLevel: progress.baseLevel,
+      sharedXp: progress.sharedXp,
+      player: { x: this.#player.pos.x, y: this.#player.pos.y, hp: this.#player.hp },
+      zombies: this.#zombies.map((z) => ({ id: z.id, x: z.pos.x, y: z.pos.y, hp: z.hp })),
+    };
   }
 
   start(): void {
