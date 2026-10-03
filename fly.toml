@@ -25,6 +25,8 @@ dockerfile = "Dockerfile"
 
 [env]
 PORT = "8080"
+# matches the [mounts] destination below — where the sqlite file lives
+DATA_DIR = "/data"
 
 [http_service]
 internal_port = 8080

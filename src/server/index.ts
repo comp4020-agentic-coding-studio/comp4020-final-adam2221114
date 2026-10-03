@@ -2,15 +2,23 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { renderReadme } from "./render-readme.ts";
+import { openDatabase } from "./persistence.ts";
+import { PersistedState } from "./persisted-state.ts";
 
 // STEP 0: just enough of a server to replace the placeholder container and
-// keep the two fixed invariants (spec/invariants.test.ts) green. Game state,
-// persistence and the WS pipe land in later steps.
+// keep the two fixed invariants (spec/invariants.test.ts) green.
+// STEP 1: persistence is wired into the process lifecycle here (loaded at
+// startup, flushed on shutdown), but nothing mutates it yet — no game loop,
+// no zombies, no WS. That starts in Step 2.
 
 const port = Number(process.env.PORT ?? 8080);
 const cwd = process.cwd();
 
 const clientIndex = readFileSync(path.join(cwd, "src", "client", "index.html"), "utf8");
+
+const db = openDatabase();
+const progress = new PersistedState(db);
+console.log("loaded progress:", progress.get());
 
 const server = createServer((req, res) => {
   const url = req.url ?? "/";
@@ -34,3 +42,17 @@ const server = createServer((req, res) => {
 server.listen(port, "0.0.0.0", () => {
   console.log(`listening on :${port}`);
 });
+
+// Fly stops machines by sending SIGTERM; a redeploy's rolling update does the
+// same to the outgoing machine. Flush whatever hasn't hit the periodic save
+// yet before the process actually exits.
+function shutdown(signal: string): void {
+  console.log(`${signal}: flushing progress and exiting`);
+  progress.flush();
+  progress.stop();
+  db.close();
+  server.close(() => process.exit(0));
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

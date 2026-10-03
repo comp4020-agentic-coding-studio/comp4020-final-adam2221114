@@ -7,6 +7,10 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "noEmit": false,
+    // source imports say `./render-readme.ts` (Node's own ESM rule, and what
+    // the root tsconfig's allowImportingTsExtensions is there for); emitting
+    // rewrites those to `.js` so the compiled output actually resolves.
+    "rewriteRelativeImportExtensions": true,
     "outDir": "dist/server",
     "rootDir": "src/server"
   },
