@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { BASE_MAX_HP } from "./game-state.ts";
 
 // The only thing this project persists this week: current day, base HP/level
 // and shared XP. Everything else (player position, zombie positions) stays
@@ -13,10 +14,12 @@ export interface Progress {
   sharedXp: number;
 }
 
-const DEFAULT_PROGRESS: Progress = {
+// Exported so GameLoop.restart() resets to exactly this, rather than a second
+// hand-copied set of numbers that could drift from the real defaults.
+export const DEFAULT_PROGRESS: Progress = {
   day: 1,
-  baseHp: 100,
-  baseMaxHp: 100,
+  baseHp: BASE_MAX_HP,
+  baseMaxHp: BASE_MAX_HP,
   baseLevel: 0,
   sharedXp: 0,
 };

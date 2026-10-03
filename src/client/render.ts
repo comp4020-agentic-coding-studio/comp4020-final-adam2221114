@@ -81,3 +81,72 @@ export function render(
   ctx.lineTo(player.x + Math.cos(aimAngle) * aimLength, player.y + Math.sin(aimAngle) * aimLength);
   ctx.stroke();
 }
+
+// Crosshair at the mouse's own position — separate from the aim line (which
+// is anchored to the player). Together they make "where is the gun pointed"
+// unambiguous: the line says the angle, this says exactly where the cursor is.
+export function renderCrosshair(ctx: CanvasRenderingContext2D, canvasSize: number, mouseWorldPos: { x: number; y: number }): void {
+  const scale = canvasSize / WORLD_SIZE;
+  const x = mouseWorldPos.x * scale;
+  const y = mouseWorldPos.y * scale;
+  const inner = 4;
+  const outer = 11;
+  ctx.strokeStyle = "#ff5555";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x - outer, y);
+  ctx.lineTo(x - inner, y);
+  ctx.moveTo(x + inner, y);
+  ctx.lineTo(x + outer, y);
+  ctx.moveTo(x, y - outer);
+  ctx.lineTo(x, y - inner);
+  ctx.moveTo(x, y + inner);
+  ctx.lineTo(x, y + outer);
+  ctx.stroke();
+}
+
+// A fired shot, client-side only: drawn the instant the player clicks (see
+// input.ts's onShoot) and gone shortly after. Purely cosmetic — the server
+// already resolved the real hit before this ever gets drawn; there is no
+// bullet entity, no travel time and nothing here is sent over the wire.
+export interface ShotEffect {
+  x: number;
+  y: number;
+  angle: number;
+  firedAt: number;
+}
+
+export const TRACER_LIFETIME_MS = 130;
+const TRACER_LENGTH = 220; // world units — a visual streak length, not the real PISTOL_RANGE
+
+export function renderShotEffects(
+  ctx: CanvasRenderingContext2D,
+  canvasSize: number,
+  effects: readonly ShotEffect[],
+  now: number,
+): void {
+  const scale = canvasSize / WORLD_SIZE;
+  for (const e of effects) {
+    const age = now - e.firedAt;
+    if (age < 0 || age > TRACER_LIFETIME_MS) continue;
+    const alpha = 1 - age / TRACER_LIFETIME_MS;
+
+    const x1 = e.x * scale;
+    const y1 = e.y * scale;
+    const x2 = (e.x + Math.cos(e.angle) * TRACER_LENGTH) * scale;
+    const y2 = (e.y + Math.sin(e.angle) * TRACER_LENGTH) * scale;
+
+    ctx.strokeStyle = `rgba(255, 240, 150, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+
+    // Muzzle flash: a small fading circle at the origin.
+    ctx.fillStyle = `rgba(255, 220, 120, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x1, y1, 2 + 6 * alpha, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}

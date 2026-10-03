@@ -35,11 +35,13 @@ export interface InputState {
 export const MAP_SIZE = 1000;
 export const BASE_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 };
 export const BASE_ATTACK_RANGE = 40;
+export const BASE_MAX_HP = 100; // also persistence.ts's default — single source of truth
 export const ZOMBIE_SPEED = 40; // units/second
 export const ZOMBIE_ATTACK_DAMAGE = 5;
 export const ZOMBIE_ATTACK_INTERVAL_MS = 1000;
 export const ZOMBIE_MAX_HP = 90;
 export const DAY_DURATION_MS = 60_000; // ~45-60s/day; using the top of that range
+export const DAY_VICTORY = 28; // completing this day ends the round in victory
 export const PLAYER_MAX_HP = 100;
 export const PLAYER_SPEED = 150; // units/second
 export const PLAYER_START_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 + 60 };

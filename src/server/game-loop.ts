@@ -1,7 +1,9 @@
 import type { PersistedState } from "./persisted-state.ts";
-import type { StateMessage } from "./protocol.ts";
+import { DEFAULT_PROGRESS } from "./persistence.ts";
+import type { GamePhase, StateMessage } from "./protocol.ts";
 import {
   DAY_DURATION_MS,
+  DAY_VICTORY,
   LEVEL_UP_THRESHOLDS,
   PISTOL_DAMAGE,
   PLAYER_MAX_HP,
@@ -26,14 +28,20 @@ const TICK_MS = 200;
 // through PersistedState, and only day-change and level-up flush directly;
 // everything else goes through the dirty-state path.
 //
-// Step 4: WASD moves the player (continuous, driven by stored input) and
-// shoot() resolves a shot instantly against it. Still no real client view,
-// no walls/turret logic, no second player — those are Step 5/final/crit 9.
+// Playability polish: a round phase gates the tick (waiting/paused/game_over/
+// victory all freeze zombies, spawning, day and the player — only "running"
+// ticks). phase itself is NOT persisted: every process boot starts at
+// "waiting" regardless of what day/baseHp/etc were left at, so a stranger
+// always gets a deliberate Start moment, and whatever was persisted is just
+// what they see on the HUD until they press it. restart() is the only thing
+// that resets day/baseHp/baseLevel/sharedXp themselves — a plain boot leaves
+// them exactly as persisted.
 export class GameLoop {
   readonly #progress: PersistedState;
   readonly #zombies: Zombie[] = [];
   readonly #player: Player = { pos: { ...PLAYER_START_POS }, hp: PLAYER_MAX_HP };
   #input: InputState = { up: false, down: false, left: false, right: false, aimAngle: 0 };
+  #phase: GamePhase = "waiting";
   #dayElapsedMs = 0;
   #spawnedThisDay = 0;
   #spawnTargetThisDay: number;
@@ -42,6 +50,41 @@ export class GameLoop {
   constructor(progress: PersistedState) {
     this.#progress = progress;
     this.#spawnTargetThisDay = spawnsForDay(progress.get().day);
+  }
+
+  // "start" and "resume" are the same edge: waiting/paused -> running. A
+  // concluded round (game_over/victory) can't be resumed this way — only
+  // restart() gets out of those.
+  play(): void {
+    if (this.#phase === "waiting" || this.#phase === "paused") {
+      this.#phase = "running";
+      console.log(`phase -> running`);
+    }
+  }
+
+  pause(): void {
+    if (this.#phase === "running") {
+      this.#phase = "paused";
+      console.log("phase -> paused");
+    }
+  }
+
+  // Resets this round to its defaults from any phase, and lands back at
+  // "waiting" — the same state a fresh boot would show, so there's exactly
+  // one way into "running" (play()) regardless of how you got to "waiting".
+  // Flushes immediately: a deliberate reset is as worth not losing as a
+  // level-up or day change.
+  restart(): void {
+    this.#zombies.length = 0;
+    this.#spawnedThisDay = 0;
+    this.#dayElapsedMs = 0;
+    this.#player.pos = { ...PLAYER_START_POS };
+    this.#player.hp = PLAYER_MAX_HP;
+    this.#progress.update({ ...DEFAULT_PROGRESS });
+    this.#progress.flush();
+    this.#spawnTargetThisDay = spawnsForDay(DEFAULT_PROGRESS.day);
+    this.#phase = "waiting";
+    console.log("restart: round reset to defaults, phase -> waiting");
   }
 
   // Replaces the stored input wholesale — the client sends its full held-key
@@ -53,8 +96,10 @@ export class GameLoop {
 
   // One shot, resolved instantly against whatever input is currently stored.
   // No bullet entity, no queue — this runs synchronously the moment the
-  // "shoot" message arrives, ahead of the next tick if one's close.
+  // "shoot" message arrives, ahead of the next tick if one's close. A no-op
+  // outside "running" — no pre-start plinking, no shooting through a pause.
   shoot(): void {
+    if (this.#phase !== "running") return;
     const target = resolveShot(this.#player.pos, this.#input.aimAngle, this.#zombies);
     if (!target) {
       console.log("shoot: no zombie in range/cone");
@@ -93,6 +138,7 @@ export class GameLoop {
     const progress = this.#progress.get();
     return {
       type: "state",
+      phase: this.#phase,
       day: progress.day,
       baseHp: progress.baseHp,
       baseMaxHp: progress.baseMaxHp,
@@ -116,6 +162,9 @@ export class GameLoop {
   }
 
   #tick(dtMs: number): void {
+    // waiting/paused/game_over/victory: everything freezes, player included —
+    // "paused 时 game loop 停止推进" is simplest as one gate, not a per-system one.
+    if (this.#phase !== "running") return;
     movePlayer(this.#player, this.#input, dtMs);
     this.#maybeSpawn();
     this.#updateZombies();
@@ -147,6 +196,11 @@ export class GameLoop {
         const baseHp = Math.max(0, before - ZOMBIE_ATTACK_DAMAGE);
         this.#progress.update({ baseHp });
         console.log(`zombie ${z.id} hits the base: baseHp ${before} -> ${baseHp}`);
+        if (baseHp <= 0) {
+          this.#phase = "game_over";
+          this.#progress.flush();
+          console.log("base destroyed: phase -> game_over");
+        }
       }
     }
   }
@@ -158,11 +212,19 @@ export class GameLoop {
     this.#dayElapsedMs += dtMs;
     if (this.#dayElapsedMs < DAY_DURATION_MS) return;
 
+    const completedDay = this.#progress.get().day;
+    if (completedDay >= DAY_VICTORY) {
+      this.#phase = "victory";
+      this.#progress.flush();
+      console.log(`day ${completedDay} complete: phase -> victory`);
+      return; // frozen at the victorious day, not advanced past it
+    }
+
     this.#dayElapsedMs = 0;
     this.#zombies.length = 0;
     this.#spawnedThisDay = 0;
 
-    const nextDay = this.#progress.get().day + 1;
+    const nextDay = completedDay + 1;
     this.#progress.update({ day: nextDay });
     this.#progress.flush(); // day change flushes immediately, ahead of the timer
     this.#spawnTargetThisDay = spawnsForDay(nextDay);

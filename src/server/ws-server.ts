@@ -37,6 +37,10 @@ function parseClientMessage(data: unknown): ClientMessage | undefined {
     return { type: "shoot" };
   }
 
+  if (parsed.type === "start" || parsed.type === "pause" || parsed.type === "resume" || parsed.type === "restart") {
+    return { type: parsed.type };
+  }
+
   return undefined;
 }
 
@@ -58,10 +62,23 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
         console.warn("ws: dropped an unrecognised message");
         return;
       }
-      if (msg.type === "input") {
-        gameLoop.setInput({ ...msg.move, aimAngle: msg.aimAngle });
-      } else {
-        gameLoop.shoot();
+      switch (msg.type) {
+        case "input":
+          gameLoop.setInput({ ...msg.move, aimAngle: msg.aimAngle });
+          break;
+        case "shoot":
+          gameLoop.shoot();
+          break;
+        case "start":
+        case "resume":
+          gameLoop.play();
+          break;
+        case "pause":
+          gameLoop.pause();
+          break;
+        case "restart":
+          gameLoop.restart();
+          break;
       }
     });
 

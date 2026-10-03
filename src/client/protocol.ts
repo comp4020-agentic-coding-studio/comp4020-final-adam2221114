@@ -18,8 +18,11 @@ export interface ZombieSnapshot {
   hp: number;
 }
 
+export type GamePhase = "waiting" | "running" | "paused" | "game_over" | "victory";
+
 export interface StateMessage {
   type: "state";
+  phase: GamePhase;
   day: number;
   baseHp: number;
   baseMaxHp: number;
@@ -40,4 +43,8 @@ export interface ShootMessage {
   type: "shoot";
 }
 
-export type ClientMessage = InputMessage | ShootMessage;
+export interface ControlMessage {
+  type: "start" | "pause" | "resume" | "restart";
+}
+
+export type ClientMessage = InputMessage | ShootMessage | ControlMessage;

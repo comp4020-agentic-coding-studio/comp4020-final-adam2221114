@@ -14,9 +14,14 @@ export interface ZombieSnapshot {
   hp: number;
 }
 
+// The round's state machine. "waiting" is also every process's boot state —
+// see GameLoop's own comment on why phase itself is never persisted.
+export type GamePhase = "waiting" | "running" | "paused" | "game_over" | "victory";
+
 // Server -> client, broadcast at a stable rate (ws-server.ts).
 export interface StateMessage {
   type: "state";
+  phase: GamePhase;
   day: number;
   baseHp: number;
   baseMaxHp: number;
@@ -40,4 +45,10 @@ export interface ShootMessage {
   type: "shoot";
 }
 
-export type ClientMessage = InputMessage | ShootMessage;
+// Start and resume are the same transition server-side (GameLoop.play()) —
+// two buttons in the UI for clarity, one state-machine edge underneath.
+export interface ControlMessage {
+  type: "start" | "pause" | "resume" | "restart";
+}
+
+export type ClientMessage = InputMessage | ShootMessage | ControlMessage;

@@ -21,6 +21,9 @@
       #game {
         display: block;
         border: 1px solid #333;
+        /* the canvas draws its own crosshair at the mouse position; the OS
+           pointer would just be a redundant second one on top of it */
+        cursor: none;
       }
       #hud {
         position: fixed;
@@ -56,12 +59,58 @@
       footer a {
         color: #8ab4ff;
       }
+      #controls {
+        position: fixed;
+        bottom: 8px;
+        right: 8px;
+        display: flex;
+        gap: 8px;
+      }
+      #controls button {
+        font: inherit;
+        font-size: 14px;
+        padding: 6px 14px;
+        border-radius: 4px;
+        border: 1px solid #555;
+        background: #2a2a2a;
+        color: #eee;
+        cursor: pointer;
+      }
+      #controls button:hover {
+        background: #3a3a3a;
+      }
+      #controls button[hidden] {
+        display: none;
+      }
+      /* Centred over the canvas, never blocking the controls or HUD corners.
+         Empty text (the "running" phase) collapses the element entirely. */
+      #phase-banner {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 36px;
+        font-weight: bold;
+        letter-spacing: 0.05em;
+        text-shadow: 0 2px 8px rgb(0 0 0 / 70%);
+        pointer-events: none;
+      }
+      #phase-banner:empty {
+        display: none;
+      }
     </style>
   </head>
   <body>
     <canvas id="game"></canvas>
     <div id="hud"></div>
     <div id="conn" class="connecting">connecting…</div>
+    <div id="phase-banner"></div>
+    <div id="controls">
+      <button id="btn-start">Start Game</button>
+      <button id="btn-pause">Pause</button>
+      <button id="btn-resume">Resume</button>
+      <button id="btn-restart">Restart</button>
+    </div>
     <footer><a href="/readme/">About this app</a></footer>
     <script type="module" src="/main.js"></script>
   </body>
