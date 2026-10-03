@@ -1,18 +1,31 @@
 # syntax = docker/dockerfile:1
 
-# A placeholder, and yours to replace: it serves one page, plus README.md
-# verbatim at /readme/, which is enough to prove the deploy path end to end.
-# Whatever your app is built with, the image that replaces this one must serve
-# HTTP on 0.0.0.0:$PORT (fly.toml sets PORT) and publish README.md at /readme/
-# (spec/README.md says what's checked).
+# Server-authoritative Node app. Whatever this image runs must serve HTTP on
+# 0.0.0.0:$PORT (fly.toml sets PORT) and publish README.md at /readme/
+# (spec/README.md says what's checked) — src/server/index.ts does both.
+#
+# Single stage on purpose: better-sqlite3 compiles a native binding at install
+# time, so build and runtime share one image rather than risk an ABI mismatch
+# copying node_modules across stages. Image size isn't the constraint here —
+# fly.toml's 256MB machine is, and this fits it comfortably.
 
-FROM docker.io/library/busybox:1.38.0
-COPY placeholder/ /src/
-COPY README.md /src/
-# README.md goes into the page as-is, HTML-escaped, in place of @README@;
-# rendering it properly is your app's job
-RUN mkdir -p /site/readme \
-    && cp /src/index.html /site/ \
-    && sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' /src/README.md > /src/body \
-    && sed -e '/@README@/{r /src/body' -e 'd}' /src/readme.html > /site/readme/index.html
-CMD ["sh", "-c", "exec httpd -f -p 0.0.0.0:${PORT:-8080} -h /site"]
+FROM docker.io/library/node:24-slim
+
+# node-gyp's toolchain, needed once, to build better-sqlite3's native binding.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin the same pnpm the course's mise.toml pins, so local, CI and this image
+# all resolve dependencies the same way.
+RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
+
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+RUN pnpm run build
+
+ENV PORT=8080
+CMD ["node", "dist/server/index.js"]

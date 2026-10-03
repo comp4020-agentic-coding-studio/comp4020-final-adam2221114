@@ -1,0 +1,14 @@
+// Emits the server to plain JS for the Docker image. Type-checking itself
+// still runs through the root tsconfig.json (`pnpm typecheck`); this config
+// only exists to produce dist/server for `node` to run.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "outDir": "dist/server",
+    "rootDir": "src/server"
+  },
+  "include": ["src/server"]
+}
