@@ -25,10 +25,19 @@ export interface StateMessage {
   day: number;
   baseHp: number;
   baseMaxHp: number;
-  baseLevel: number;
   sharedXp: number;
+  wallLevel: number;
   wallHp: number;
   wallMaxHp: number;
+  turretLevel: number;
+  turretHp: number;
+  turretMaxHp: number;
+  turretBuilt: boolean;
+  // Not persisted (GameLoop's own comment explains why) — just this tick's
+  // targeting, so the client can draw the turret's barrel/aim line and tell
+  // a real shot apart from an idle turret via turretShotsFired increasing.
+  turretTarget: { x: number; y: number } | null;
+  turretShotsFired: number;
   // This day's wave: the client renders its progress bar straight from
   // these, nothing computed locally.
   killedZombies: number;
@@ -56,4 +65,13 @@ export interface ControlMessage {
   type: "start" | "pause" | "resume" | "restart";
 }
 
-export type ClientMessage = InputMessage | ShootMessage | ControlMessage;
+// The X-menu's actions. The server re-validates range/cost/current building
+// state independently every time — this message is a request, not a grant.
+export type InteractAction = "build_wall" | "upgrade_wall" | "build_turret";
+
+export interface InteractMessage {
+  type: "interact";
+  action: InteractAction;
+}
+
+export type ClientMessage = InputMessage | ShootMessage | ControlMessage | InteractMessage;

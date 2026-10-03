@@ -1,11 +1,15 @@
+import { BASE_POS, TURRET_LEVELS, TURRET_POS, WALL_RING_RADIUS, WORLD_SIZE } from "./defense-config.ts";
 import type { StateMessage } from "./protocol.ts";
 
-// Must match src/server/game-state.ts's MAP_SIZE/BASE_POS/BASE_ATTACK_RANGE —
-// duplicated for the same reason protocol.ts is (see that file's comment):
-// plain constants, not logic, and not worth a shared build for.
-const WORLD_SIZE = 1000;
-const BASE_POS = { x: WORLD_SIZE / 2, y: WORLD_SIZE / 2 };
-const BASE_ATTACK_RANGE = 40;
+// Just enough visual distinction per wall level — colour/thickness, plus
+// spikes once the level actually has the reflect-damage effect (WALL_LEVELS
+// in defense-config.ts says which levels that's true for; this table only
+// decides how to draw it, not whether it applies).
+const WALL_VISUALS: Record<number, { color: string; lineWidth: number; spikes: boolean }> = {
+  1: { color: "#9aa0a6", lineWidth: 4, spikes: false },
+  2: { color: "#7fa6c9", lineWidth: 5, spikes: true },
+  3: { color: "#c9a0ff", lineWidth: 6, spikes: true },
+};
 
 // Plain shapes and colour only — no sprites, no animation, no particles.
 // Renders exactly what the server sent; never infers or predicts anything.
@@ -37,17 +41,37 @@ export function render(
   }
 
   const base = toScreen(BASE_POS.x, BASE_POS.y);
+  const ringRadius = scale * WALL_RING_RADIUS;
 
-  // Wall: present once wallHp > 0 (it's gone again once destroyed — wallHp
-  // at 0 looks the same whether it never existed or fell, which this round
-  // doesn't need to tell apart). Same plain ring as before, just gated on
-  // wallHp now instead of the removed wallUnlocked flag.
-  if (state.wallHp > 0) {
-    ctx.strokeStyle = "#9aa0a6";
-    ctx.lineWidth = 4;
+  // Wall: present once wallHp > 0 — gone the instant it's destroyed (level
+  // drops to 0 server-side, so there's nothing ambiguous about "is it up").
+  // Drawn at WALL_RING_RADIUS, the exact radius zombies stop at while it's
+  // up — the ring is where the wall physically is, not just a decoration.
+  if (state.wallHp > 0 && state.wallLevel > 0) {
+    const visual = WALL_VISUALS[state.wallLevel] ?? WALL_VISUALS[1];
+    ctx.strokeStyle = visual.color;
+    ctx.lineWidth = visual.lineWidth;
     ctx.beginPath();
-    ctx.arc(base.x, base.y, scale * BASE_ATTACK_RANGE + 12, 0, Math.PI * 2);
+    ctx.arc(base.x, base.y, ringRadius, 0, Math.PI * 2);
     ctx.stroke();
+
+    // Level 2+: short spikes radiating outward, reading as "touch this and
+    // you get hurt" — the reflect-damage effect made visible.
+    if (visual.spikes) {
+      const spikeCount = 14;
+      const spikeLength = 7;
+      ctx.lineWidth = 2;
+      for (let i = 0; i < spikeCount; i++) {
+        const angle = (i / spikeCount) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.moveTo(base.x + Math.cos(angle) * ringRadius, base.y + Math.sin(angle) * ringRadius);
+        ctx.lineTo(
+          base.x + Math.cos(angle) * (ringRadius + spikeLength),
+          base.y + Math.sin(angle) * (ringRadius + spikeLength),
+        );
+        ctx.stroke();
+      }
+    }
   }
 
   // Base
@@ -55,6 +79,36 @@ export function render(
   ctx.beginPath();
   ctx.arc(base.x, base.y, 18, 0, Math.PI * 2);
   ctx.fill();
+
+  // Turret: a fixed fixture near the base, drawn whenever it's been built
+  // and still has HP. Range shown as a faint circle so the player can see
+  // what it actually covers.
+  if (state.turretBuilt && state.turretHp > 0) {
+    const turretScreen = toScreen(TURRET_POS.x, TURRET_POS.y);
+    const range = TURRET_LEVELS[state.turretLevel]?.range ?? TURRET_LEVELS[1].range;
+
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(turretScreen.x, turretScreen.y, scale * range, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = "#cc6633";
+    ctx.beginPath();
+    ctx.arc(turretScreen.x, turretScreen.y, 10, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Barrel, pointing at whatever it's currently tracking.
+    if (state.turretTarget) {
+      const angle = Math.atan2(state.turretTarget.y - TURRET_POS.y, state.turretTarget.x - TURRET_POS.x);
+      ctx.strokeStyle = "#cc6633";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(turretScreen.x, turretScreen.y);
+      ctx.lineTo(turretScreen.x + Math.cos(angle) * 14, turretScreen.y + Math.sin(angle) * 14);
+      ctx.stroke();
+    }
+  }
 
   // Zombies
   ctx.fillStyle = "#4caf50";

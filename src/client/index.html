@@ -98,6 +98,26 @@
       #phase-banner:empty {
         display: none;
       }
+      /* X-menu: plain monospace text block, no buttons — purely a keyboard
+         menu ([1]/[2]/X/Esc), so pointer-events stay off like the banner. */
+      #interact-menu {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgb(10 10 10 / 88%);
+        border: 1px solid #555;
+        border-radius: 6px;
+        padding: 16px 24px;
+        font-family: ui-monospace, monospace;
+        font-size: 15px;
+        line-height: 1.7;
+        white-space: pre;
+        pointer-events: none;
+      }
+      #interact-menu[hidden] {
+        display: none;
+      }
     </style>
   </head>
   <body>
@@ -105,6 +125,7 @@
     <div id="hud"></div>
     <div id="conn" class="connecting">connecting…</div>
     <div id="phase-banner"></div>
+    <div id="interact-menu" hidden></div>
     <div id="controls">
       <button id="btn-start">Start Game</button>
       <button id="btn-pause">Pause</button>

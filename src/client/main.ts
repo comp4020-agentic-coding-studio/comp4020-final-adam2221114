@@ -1,4 +1,5 @@
-import type { ClientMessage, ControlMessage, GamePhase, StateMessage } from "./protocol.ts";
+import { BASE_INTERACT_RANGE, BASE_POS, TURRET_LEVELS, TURRET_POS, WALL_LEVELS, WALL_MAX_LEVEL } from "./defense-config.ts";
+import type { ClientMessage, ControlMessage, GamePhase, InteractAction, StateMessage } from "./protocol.ts";
 import { InputController } from "./input.ts";
 import { interpolateState } from "./interpolate.ts";
 import { LocalPlayerPrediction } from "./prediction.ts";
@@ -27,6 +28,8 @@ const conn = document.querySelector<HTMLDivElement>("#conn");
 if (!conn) throw new Error("index.html is missing #conn");
 const banner = document.querySelector<HTMLDivElement>("#phase-banner");
 if (!banner) throw new Error("index.html is missing #phase-banner");
+const menu = document.querySelector<HTMLDivElement>("#interact-menu");
+if (!menu) throw new Error("index.html is missing #interact-menu");
 const btnStart = document.querySelector<HTMLButtonElement>("#btn-start");
 if (!btnStart) throw new Error("index.html is missing #btn-start");
 const btnPause = document.querySelector<HTMLButtonElement>("#btn-pause");
@@ -59,8 +62,12 @@ let currentReceivedAt = 0;
 const prediction = new LocalPlayerPrediction();
 
 // Fired shots, client-side only — see input.ts's onShoot and render.ts's
-// comment on ShotEffect. Pruned once their tracer has fully faded.
+// comment on ShotEffect. Pruned once their tracer has fully faded. The
+// turret's own shots are pushed into the same array (see the message
+// handler below) and rendered identically — same tracer/muzzle-flash code,
+// no reason for a second effect type.
 const effects: ShotEffect[] = [];
+let lastTurretShotsFired = 0;
 
 const setConnStatus = (status: "connecting" | "connected" | "disconnected"): void => {
   conn.textContent = status === "connected" ? "connected" : status === "connecting" ? "connecting…" : "disconnected";
@@ -83,6 +90,10 @@ btnPause.addEventListener("click", () => sendControl("pause"));
 btnResume.addEventListener("click", () => sendControl("resume"));
 btnRestart.addEventListener("click", () => sendControl("restart"));
 
+const sendInteract = (action: InteractAction): void => {
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "interact", action }));
+};
+
 const input = new InputController({
   canvas,
   worldSize: WORLD_SIZE,
@@ -97,25 +108,125 @@ const input = new InputController({
   },
 });
 
+// --- Base interact menu (X) ------------------------------------------------
+//
+// Opening/closing is a purely local UI decision (an approximate in-range
+// check against the predicted position is enough — it only controls whether
+// a menu is drawn). Every actual action still round-trips to the server,
+// which re-checks range against its own authoritative player position, so a
+// stale or wrong local guess can never spend XP or change a building by
+// itself; see GameLoop.interact() for every check that really matters.
+let menuOpen = false;
+let menuOptions: Array<{ key: string; action: InteractAction }> = [];
+
+// Arrow functions throughout (not `function` declarations), same reason as
+// the DOM-reference guards above: TS only carries non-null narrowing into
+// closures created after the guard, not into hoisted function declarations.
+const distance = (a: { x: number; y: number }, b: { x: number; y: number }): number => Math.hypot(a.x - b.x, a.y - b.y);
+
+const playerInBaseRange = (): boolean =>
+  distance(prediction.getDisplayPos(performance.now()), BASE_POS) <= BASE_INTERACT_RANGE;
+
+// Builds this frame's option list from the server's own wallLevel/turretBuilt
+// — never from anything the client decided on its own. "Rebuild" after a
+// destroyed wall and the very first "Build" look the same here on purpose
+// (wallLevel 0 either way, same cost, same effect) — not worth a second
+// persisted flag just to change one word in the menu.
+const computeMenuOptions = (state: StateMessage): Array<{ key: string; label: string; action: InteractAction }> => {
+  const options: Array<{ label: string; action: InteractAction }> = [];
+
+  if (state.wallLevel === 0) {
+    options.push({ label: `Build Wall — ${WALL_LEVELS[1].cost} XP`, action: "build_wall" });
+  } else if (state.wallLevel < WALL_MAX_LEVEL) {
+    const next = WALL_LEVELS[state.wallLevel + 1];
+    if (next && next.cost !== null) {
+      options.push({ label: `Upgrade Wall — ${next.cost} XP`, action: "upgrade_wall" });
+    }
+  }
+
+  if (!state.turretBuilt && TURRET_LEVELS[1].cost !== null) {
+    options.push({ label: `Build Turret — ${TURRET_LEVELS[1].cost} XP`, action: "build_turret" });
+  }
+
+  return options.map((opt, i) => ({ key: String(i + 1), ...opt }));
+};
+
+const renderMenu = (state: StateMessage | undefined): void => {
+  if (!menuOpen || !state) {
+    menu.hidden = true;
+    return;
+  }
+  const options = computeMenuOptions(state);
+  menuOptions = options.map(({ key, action }) => ({ key, action }));
+  const lines = ["BASE UPGRADES", "", ...options.map((o) => `[${o.key}] ${o.label}`), "[X / Esc] Close"];
+  menu.textContent = lines.join("\n");
+  menu.hidden = false;
+};
+
+const closeMenu = (): void => {
+  menuOpen = false;
+  menu.hidden = true;
+};
+
+window.addEventListener("keydown", (e) => {
+  const key = e.key.toLowerCase();
+  if (key === "x") {
+    if (menuOpen) {
+      closeMenu();
+    } else if (playerInBaseRange()) {
+      menuOpen = true;
+      renderMenu(currentState);
+    }
+    return;
+  }
+  if (key === "escape") {
+    if (menuOpen) closeMenu();
+    return;
+  }
+  if (menuOpen) {
+    const chosen = menuOptions.find((o) => o.key === key);
+    if (chosen) sendInteract(chosen.action);
+  }
+});
+
 socket.addEventListener("message", (ev) => {
   previousState = currentState;
   previousReceivedAt = currentReceivedAt;
   currentState = JSON.parse(ev.data) as StateMessage;
   currentReceivedAt = performance.now();
   prediction.reconcile(currentState.player, currentReceivedAt);
+
+  // A new turret shot this tick — give it the same tracer/muzzle-flash the
+  // player's own shots get. Only fires with a real target, same as the
+  // server (turretTarget is cleared whenever the turret doesn't have one).
+  if (currentState.turretShotsFired > lastTurretShotsFired && currentState.turretTarget) {
+    const angle = Math.atan2(
+      currentState.turretTarget.y - TURRET_POS.y,
+      currentState.turretTarget.x - TURRET_POS.x,
+    );
+    effects.push({ x: TURRET_POS.x, y: TURRET_POS.y, angle, firedAt: performance.now() });
+  }
+  lastTurretShotsFired = currentState.turretShotsFired;
+
   // Text/numbers update immediately on new data — only positions (handled in
   // the animation loop below) benefit from smoothing between snapshots.
   updateHud(currentState);
   updatePhaseUi(currentState.phase);
+  renderMenu(currentState); // re-render with fresh costs/availability if open
 });
 
 const updateHud = (state: StateMessage): void => {
+  const wallLine =
+    state.wallLevel > 0 ? `Wall Lv${state.wallLevel} HP ${state.wallHp} / ${state.wallMaxHp}` : "Wall: none";
+  const turretLine = state.turretBuilt
+    ? `Turret Lv${state.turretLevel} HP ${state.turretHp} / ${state.turretMaxHp}`
+    : "Turret: not built";
   hud.innerHTML = [
     `Day ${state.day}`,
     `Base HP ${state.baseHp} / ${state.baseMaxHp}`,
-    `Wall HP ${state.wallHp} / ${state.wallMaxHp}`,
-    `Base Level ${state.baseLevel}`,
-    `Shared XP ${state.sharedXp}`,
+    wallLine,
+    turretLine,
+    `Shared XP: ${state.sharedXp}`,
     `Player HP ${state.player.hp}`,
   ].join("<br>");
 };
@@ -135,6 +246,7 @@ const updatePhaseUi = (phase: GamePhase): void => {
   btnResume.hidden = phase !== "paused";
   // Restart stays visible in every phase — it's the one control that always
   // works, regardless of how the round ended or whether it's even started.
+  if (phase !== "running" && menuOpen) closeMenu(); // nothing to buy while frozen
 };
 
 // Render loop: requestAnimationFrame (~60fps), independent of the server's
@@ -182,6 +294,11 @@ const frame = (timestamp: number): void => {
 
     const mouse = input.getMouseWorldPos();
     if (mouse) renderCrosshair(ctx, CANVAS_SIZE, mouse);
+
+    // The menu auto-closes if the player walks out of range while it's open
+    // — attempting an action out there would just be rejected server-side,
+    // so there's nothing useful left for it to show.
+    if (menuOpen && !playerInBaseRange()) closeMenu();
   }
   requestAnimationFrame(frame);
 };

@@ -1,16 +1,22 @@
 import type { PersistedState } from "./persisted-state.ts";
-import { DEFAULT_PROGRESS } from "./persistence.ts";
-import type { GamePhase, StateMessage } from "./protocol.ts";
+import { DEFAULT_PROGRESS, type Progress } from "./persistence.ts";
+import type { GamePhase, InteractAction, StateMessage } from "./protocol.ts";
 import {
+  BASE_INTERACT_RANGE,
+  BASE_POS,
   DAY_VICTORY,
-  LEVEL_UP_THRESHOLDS,
   PISTOL_DAMAGE,
   PLAYER_MAX_HP,
   PLAYER_START_POS,
-  WALL_MAX_HP,
+  TURRET_LEVELS,
+  TURRET_POS,
+  WALL_LEVELS,
+  WALL_MAX_LEVEL,
   XP_PER_KILL,
   ZOMBIE_ATTACK_DAMAGE,
   ZOMBIE_ATTACK_INTERVAL_MS,
+  distance,
+  findNearestZombieInRange,
   movePlayer,
   resolveShot,
   spawnZombie,
@@ -33,9 +39,10 @@ const SPAWN_INTERVAL_MS = 2000;
 // gameplay rule, just the granularity it's checked at.
 const TICK_MS = 50;
 
-// Server-authoritative, in-memory tick loop. Zombie/player positions and HP
-// live only here — day/baseHp/baseLevel/sharedXp/wallHp are the only things
-// that go through PersistedState, and only day-change, level-up and wall/
+// Server-authoritative, in-memory tick loop. Zombie/player positions, the
+// turret's current target and its fire timer live only here —
+// day/baseHp/sharedXp/wallLevel/wallHp/turret* are the only things that go
+// through PersistedState, and only day-change, a build/upgrade, and wall/
 // base destruction flush directly; everything else goes through the
 // dirty-state path.
 //
@@ -46,25 +53,38 @@ const TICK_MS = 50;
 // more "day duration"; #spawnTimerMs just paces how often a new zombie joins
 // the day's remaining quota.
 //
+// Defences are now something the player actively buys with shared XP via
+// interact() (the X-menu), not something that appears on its own — there is
+// no more auto-wall-at-100-XP. The wall physically blocks zombies while it
+// has HP (stepZombie stops them at the wall's ring instead of the base's);
+// losing it drops wallLevel back to 0, so a rebuild always starts over at
+// level 1 regardless of what it was before.
+//
 // Playability polish: a round phase gates the tick (waiting/paused/game_over/
 // victory all freeze zombies, spawning, day and the player — only "running"
 // ticks). phase itself is NOT persisted: every process boot starts at
 // "waiting" regardless of what day/baseHp/etc were left at, so a stranger
 // always gets a deliberate Start moment, and whatever was persisted is just
 // what they see on the HUD until they press it. restart() is the only thing
-// that resets day/baseHp/baseLevel/sharedXp/wallHp themselves — a plain boot
-// leaves them exactly as persisted.
+// that resets day/baseHp/sharedXp/wallLevel/turret* themselves — a plain
+// boot leaves them exactly as persisted.
 export class GameLoop {
   readonly #progress: PersistedState;
   readonly #zombies: Zombie[] = [];
   readonly #player: Player = { pos: { ...PLAYER_START_POS }, hp: PLAYER_MAX_HP };
   #input: InputState = { up: false, down: false, left: false, right: false, aimAngle: 0 };
   #phase: GamePhase = "waiting";
-  #clockMs = 0; // monotonic; only ever used for zombie attack-cooldown timestamps
+  #clockMs = 0; // monotonic; attack/fire-cooldown timestamps for zombies and the turret
   #spawnTimerMs = 0;
   #spawnedZombies = 0;
   #killedZombies = 0;
   #totalZombiesForDay: number;
+  // Turret firing state — not persisted (GameLoop's own comment explains
+  // why): both reset to "idle" on every boot, which is fine, since they're
+  // only ever a few seconds of cooldown, not progress worth keeping.
+  #turretLastFiredAt = -Infinity;
+  #turretTarget: Zombie | undefined;
+  #turretShotsFired = 0;
   #timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(progress: PersistedState) {
@@ -93,13 +113,14 @@ export class GameLoop {
   // "waiting" — the same state a fresh boot would show, so there's exactly
   // one way into "running" (play()) regardless of how you got to "waiting".
   // Flushes immediately: a deliberate reset is as worth not losing as a
-  // level-up or day change. DEFAULT_PROGRESS.wallHp is 0 and baseLevel is 0
-  // together — the wall doesn't exist again until baseLevel is re-earned.
+  // build/upgrade or day change.
   restart(): void {
     this.#zombies.length = 0;
     this.#spawnedZombies = 0;
     this.#killedZombies = 0;
     this.#spawnTimerMs = 0;
+    this.#turretLastFiredAt = -Infinity;
+    this.#turretTarget = undefined;
     this.#player.pos = { ...PLAYER_START_POS };
     this.#player.hp = PLAYER_MAX_HP;
     this.#progress.update({ ...DEFAULT_PROGRESS });
@@ -129,46 +150,132 @@ export class GameLoop {
     }
     target.hp -= PISTOL_DAMAGE;
     console.log(`shoot: hit ${target.id}, hp -> ${target.hp}`);
-    if (target.hp <= 0) {
-      this.#zombies.splice(this.#zombies.indexOf(target), 1);
-      this.#killedZombies++;
-      console.log(`zombie ${target.id} died (${this.#killedZombies}/${this.#totalZombiesForDay})`);
-      this.#awardXp(XP_PER_KILL);
-      // Spawning can only ever make "all killed" harder to reach, never
-      // trigger it — a kill is the only event that can newly satisfy the
-      // wave-complete condition, so that's the only place it needs checking.
-      this.#checkWaveComplete();
+    if (target.hp <= 0) this.#killZombie(target, "player shot");
+  }
+
+  // The X-menu's actions. Every check the brief calls for happens here,
+  // server-side, regardless of what the client thinks is true: range against
+  // the server's own player position, XP against the server's own balance,
+  // and the current building state. A failed check just logs and returns —
+  // no partial effect, no XP spent on a rejected action.
+  interact(action: InteractAction): void {
+    if (this.#phase !== "running") return;
+    if (distance(this.#player.pos, BASE_POS) > BASE_INTERACT_RANGE) {
+      console.log(`interact(${action}): player out of range`);
+      return;
+    }
+
+    const progress = this.#progress.get();
+    switch (action) {
+      case "build_wall":
+        this.#buildWall(progress);
+        break;
+      case "upgrade_wall":
+        this.#upgradeWall(progress);
+        break;
+      case "build_turret":
+        this.#buildTurret(progress);
+        break;
     }
   }
 
-  // Shared XP always marks dirty (periodic save picks it up); a level-up
-  // crossed in the same award flushes immediately after, same as day change.
-  // Crossing into baseLevel 1 is also when the wall first exists — it starts
-  // at full HP the moment it's unlocked.
-  #awardXp(amount: number): void {
-    const before = this.#progress.get();
-    const sharedXp = before.sharedXp + amount;
-    let baseLevel = before.baseLevel;
-    while (LEVEL_UP_THRESHOLDS[baseLevel] !== undefined && sharedXp >= LEVEL_UP_THRESHOLDS[baseLevel]) {
-      baseLevel++;
+  #buildWall(progress: Readonly<Progress>): void {
+    if (progress.wallLevel !== 0) {
+      console.log("build_wall: a wall already stands (upgrade or wait for it to fall, not rebuild)");
+      return;
     }
-    const leveledUp = baseLevel > before.baseLevel;
-    const wallJustUnlocked = before.baseLevel < 1 && baseLevel >= 1;
+    const config = WALL_LEVELS[1];
+    if (progress.sharedXp < config.cost!) {
+      console.log(`build_wall: need ${config.cost} XP, have ${progress.sharedXp}`);
+      return;
+    }
     this.#progress.update({
-      sharedXp,
-      baseLevel,
-      ...(wallJustUnlocked ? { wallHp: WALL_MAX_HP } : {}),
+      sharedXp: progress.sharedXp - config.cost!,
+      wallLevel: 1,
+      wallHp: config.maxHp,
+      wallMaxHp: config.maxHp,
     });
-    console.log(
-      `sharedXp ${before.sharedXp} -> ${sharedXp}` +
-        (leveledUp ? `, baseLevel ${before.baseLevel} -> ${baseLevel}` : "") +
-        (wallJustUnlocked ? ` (wall up, wallHp -> ${WALL_MAX_HP})` : ""),
-    );
-    if (leveledUp) this.#progress.flush(); // level-up flushes immediately, like day change
+    this.#progress.flush();
+    console.log(`built wall level 1 (-${config.cost} XP)`);
+  }
+
+  #upgradeWall(progress: Readonly<Progress>): void {
+    const nextLevel = progress.wallLevel + 1;
+    const config = WALL_LEVELS[nextLevel];
+    if (progress.wallLevel === 0) {
+      console.log("upgrade_wall: no wall to upgrade — build one first");
+      return;
+    }
+    if (progress.wallLevel >= WALL_MAX_LEVEL || !config || config.cost === null) {
+      console.log("upgrade_wall: no further priced upgrade available");
+      return;
+    }
+    if (progress.sharedXp < config.cost) {
+      console.log(`upgrade_wall: need ${config.cost} XP, have ${progress.sharedXp}`);
+      return;
+    }
+    this.#progress.update({
+      sharedXp: progress.sharedXp - config.cost,
+      wallLevel: nextLevel,
+      wallMaxHp: config.maxHp,
+      wallHp: config.maxHp, // upgrading restores to the new level's full HP
+    });
+    this.#progress.flush();
+    console.log(`upgraded wall to level ${nextLevel} (-${config.cost} XP)`);
+  }
+
+  #buildTurret(progress: Readonly<Progress>): void {
+    if (progress.turretBuilt) {
+      console.log("build_turret: already built");
+      return;
+    }
+    const config = TURRET_LEVELS[1];
+    if (config.cost === null) {
+      console.log("build_turret: not priced yet");
+      return;
+    }
+    if (progress.sharedXp < config.cost) {
+      console.log(`build_turret: need ${config.cost} XP, have ${progress.sharedXp}`);
+      return;
+    }
+    this.#progress.update({
+      sharedXp: progress.sharedXp - config.cost,
+      turretBuilt: true,
+      turretLevel: 1,
+      turretHp: config.maxHp,
+      turretMaxHp: config.maxHp,
+    });
+    this.#progress.flush();
+    console.log(`built turret level 1 (-${config.cost} XP)`);
+  }
+
+  // Removes a dead zombie, counts the kill towards this day's wave, and
+  // awards XP — shared by every kill source (player shot, wall spikes,
+  // turret), so all three stay in sync with the same bookkeeping.
+  #killZombie(zombie: Zombie, source: string): void {
+    this.#zombies.splice(this.#zombies.indexOf(zombie), 1);
+    if (this.#turretTarget === zombie) this.#turretTarget = undefined;
+    this.#killedZombies++;
+    console.log(`zombie ${zombie.id} died (${source}) (${this.#killedZombies}/${this.#totalZombiesForDay})`);
+    this.#addSharedXp(XP_PER_KILL);
+    // Spawning can only ever make "all killed" harder to reach, never
+    // trigger it — a kill is the only event that can newly satisfy the
+    // wave-complete condition, so that's the only place it needs checking.
+    this.#checkWaveComplete();
+  }
+
+  // Shared XP is now purely a spendable resource (no more auto baseLevel/
+  // wall-unlock) — just add it and mark dirty, same as any other change.
+  #addSharedXp(amount: number): void {
+    const before = this.#progress.get().sharedXp;
+    const sharedXp = before + amount;
+    this.#progress.update({ sharedXp });
+    console.log(`sharedXp ${before} -> ${sharedXp}`);
   }
 
   // The only way "all of this day's zombies are spawned and dead" becomes
-  // true is a kill (see shoot()), so this only ever needs calling from there.
+  // true is a kill (see #killZombie), so this only ever needs calling from
+  // there.
   #checkWaveComplete(): void {
     const allSpawned = this.#spawnedZombies === this.#totalZombiesForDay;
     const noneLeft = this.#zombies.length === 0;
@@ -194,7 +301,8 @@ export class GameLoop {
   }
 
   // Read-only view for the WS layer to broadcast. Never mutates anything —
-  // the only writers of game state are shoot() and the tick loop itself.
+  // the only writers of game state are shoot(), interact() and the tick loop
+  // itself.
   getSnapshot(): StateMessage {
     const progress = this.#progress.get();
     return {
@@ -203,10 +311,16 @@ export class GameLoop {
       day: progress.day,
       baseHp: progress.baseHp,
       baseMaxHp: progress.baseMaxHp,
-      baseLevel: progress.baseLevel,
       sharedXp: progress.sharedXp,
+      wallLevel: progress.wallLevel,
       wallHp: progress.wallHp,
       wallMaxHp: progress.wallMaxHp,
+      turretLevel: progress.turretLevel,
+      turretHp: progress.turretHp,
+      turretMaxHp: progress.turretMaxHp,
+      turretBuilt: progress.turretBuilt,
+      turretTarget: this.#turretTarget ? { x: this.#turretTarget.pos.x, y: this.#turretTarget.pos.y } : null,
+      turretShotsFired: this.#turretShotsFired,
       killedZombies: this.#killedZombies,
       totalZombiesForDay: this.#totalZombiesForDay,
       player: { x: this.#player.pos.x, y: this.#player.pos.y, hp: this.#player.hp },
@@ -233,6 +347,7 @@ export class GameLoop {
     movePlayer(this.#player, this.#input, dtMs);
     this.#maybeSpawn(dtMs);
     this.#updateZombies();
+    this.#updateTurret();
   }
 
   // Paces spawning at a fixed interval until this day's quota is fully
@@ -252,40 +367,81 @@ export class GameLoop {
     );
   }
 
-  // Wall first, base second: the wall absorbs every hit while it still has
-  // HP, and only once it's at 0 does damage reach the base at all. One
-  // undivided wall HP pool this round — no per-segment wall, no repair.
+  // Wall first, base second: while wallHp > 0, stepZombie stops every zombie
+  // at the wall's ring instead of the base — they physically cannot reach
+  // the base at all, let alone attack it. Only once the wall is at 0 does a
+  // zombie's stop radius shrink to the base's own, and only then does damage
+  // reach baseHp.
   #updateZombies(): void {
     const now = this.#clockMs;
+    const progress = this.#progress.get();
+    const wallUp = progress.wallHp > 0;
     for (const z of this.#zombies) {
-      stepZombie(z, TICK_MS);
+      stepZombie(z, TICK_MS, wallUp);
       if (z.attacking && now - z.lastAttackAt >= ZOMBIE_ATTACK_INTERVAL_MS) {
         z.lastAttackAt = now;
-        this.#applyZombieHit(z.id);
+        this.#applyZombieHit(z);
       }
     }
   }
 
-  #applyZombieHit(zombieId: string): void {
+  #applyZombieHit(zombie: Zombie): void {
     const progress = this.#progress.get();
     if (progress.wallHp > 0) {
       const wallHp = Math.max(0, progress.wallHp - ZOMBIE_ATTACK_DAMAGE);
-      this.#progress.update({ wallHp });
-      console.log(`zombie ${zombieId} hits the wall: wallHp ${progress.wallHp} -> ${wallHp}`);
-      if (wallHp <= 0) {
-        this.#progress.flush(); // the wall falling is worth not losing, same as a level-up
-        console.log("wall destroyed: the base is exposed");
+      const destroyed = wallHp <= 0;
+      this.#progress.update({
+        wallHp,
+        // Destruction always drops the level back to 0 — a rebuild starts
+        // over at level 1, never free-upgrades back to whatever it was.
+        ...(destroyed ? { wallLevel: 0, wallMaxHp: 0 } : {}),
+      });
+      console.log(`zombie ${zombie.id} hits the wall: wallHp ${progress.wallHp} -> ${wallHp}`);
+      if (destroyed) {
+        this.#progress.flush(); // the wall falling is worth not losing, same as a build/upgrade
+        console.log("wall destroyed: wallLevel -> 0, the base is exposed");
+      }
+
+      // Level 2+ spikes: every attack the wall takes also hurts the zombie
+      // making it, on the same cadence as the attack itself.
+      const spikeDamage = WALL_LEVELS[progress.wallLevel]?.spikeDamage ?? 0;
+      if (spikeDamage > 0) {
+        zombie.hp -= spikeDamage;
+        console.log(`wall spikes hit ${zombie.id} back for ${spikeDamage}, hp -> ${zombie.hp}`);
+        if (zombie.hp <= 0) this.#killZombie(zombie, "wall spikes");
       }
       return;
     }
 
     const baseHp = Math.max(0, progress.baseHp - ZOMBIE_ATTACK_DAMAGE);
     this.#progress.update({ baseHp });
-    console.log(`zombie ${zombieId} hits the base: baseHp ${progress.baseHp} -> ${baseHp}`);
+    console.log(`zombie ${zombie.id} hits the base: baseHp ${progress.baseHp} -> ${baseHp}`);
     if (baseHp <= 0) {
       this.#phase = "game_over";
       this.#progress.flush();
       console.log("base destroyed: phase -> game_over");
     }
+  }
+
+  // Fully automatic: finds the nearest zombie in range, fires on its own
+  // cadence, no player input involved. Same instant-hit approach as the
+  // player's own shot — no bullet entity, no network-simulated projectile.
+  #updateTurret(): void {
+    const progress = this.#progress.get();
+    if (!progress.turretBuilt || progress.turretHp <= 0) {
+      this.#turretTarget = undefined;
+      return;
+    }
+    const config = TURRET_LEVELS[progress.turretLevel];
+    this.#turretTarget = findNearestZombieInRange(TURRET_POS, config.range, this.#zombies);
+    if (!this.#turretTarget) return;
+    if (this.#clockMs - this.#turretLastFiredAt < config.fireIntervalMs) return;
+
+    this.#turretLastFiredAt = this.#clockMs;
+    this.#turretShotsFired++;
+    const target = this.#turretTarget;
+    target.hp -= config.damage;
+    console.log(`turret hits ${target.id}, hp -> ${target.hp}`);
+    if (target.hp <= 0) this.#killZombie(target, "turret");
   }
 }

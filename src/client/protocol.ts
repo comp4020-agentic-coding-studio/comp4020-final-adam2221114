@@ -26,10 +26,16 @@ export interface StateMessage {
   day: number;
   baseHp: number;
   baseMaxHp: number;
-  baseLevel: number;
   sharedXp: number;
+  wallLevel: number;
   wallHp: number;
   wallMaxHp: number;
+  turretLevel: number;
+  turretHp: number;
+  turretMaxHp: number;
+  turretBuilt: boolean;
+  turretTarget: { x: number; y: number } | null;
+  turretShotsFired: number;
   killedZombies: number;
   totalZombiesForDay: number;
   player: PlayerSnapshot;
@@ -50,4 +56,11 @@ export interface ControlMessage {
   type: "start" | "pause" | "resume" | "restart";
 }
 
-export type ClientMessage = InputMessage | ShootMessage | ControlMessage;
+export type InteractAction = "build_wall" | "upgrade_wall" | "build_turret";
+
+export interface InteractMessage {
+  type: "interact";
+  action: InteractAction;
+}
+
+export type ClientMessage = InputMessage | ShootMessage | ControlMessage | InteractMessage;

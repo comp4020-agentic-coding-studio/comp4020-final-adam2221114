@@ -1,5 +1,5 @@
-// Pure world/zombie shapes and the little math the game loop needs. No
-// persistence here, no networking — just "where is this zombie now".
+// Pure world/zombie/building shapes and the little math the game loop needs.
+// No persistence here, no networking — just "where is this thing now".
 // Numbers below (speed, damage, map size) are placeholders to make the loop
 // observable, not the balance pass; that's final-polish work, not this step's.
 
@@ -34,9 +34,15 @@ export interface InputState {
 
 export const MAP_SIZE = 1000;
 export const BASE_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 };
+// Where zombies stop once the wall is gone — right up against the base.
 export const BASE_ATTACK_RANGE = 40;
+// Where zombies stop while the wall still has HP — must be further out than
+// BASE_ATTACK_RANGE (and is what the wall ring is drawn at client-side), or
+// a zombie would visually sit inside the wall instead of outside it.
+export const WALL_RING_RADIUS = 60;
+// How close the player has to be to the base to open the upgrade menu (X).
+export const BASE_INTERACT_RANGE = 80;
 export const BASE_MAX_HP = 100; // also persistence.ts's default — single source of truth
-export const WALL_MAX_HP = 30; // also persistence.ts's default, once baseLevel >= 1
 export const ZOMBIE_SPEED = 40; // units/second
 export const ZOMBIE_ATTACK_DAMAGE = 5; // applies to whichever of wall/base is currently absorbing hits
 export const ZOMBIE_ATTACK_INTERVAL_MS = 1000;
@@ -51,10 +57,48 @@ export const PISTOL_RANGE = 600;
 export const PISTOL_CONE_HALF_ANGLE = 0.15; // radians, ~8.6 degrees either side of aimAngle
 
 export const XP_PER_KILL = 50;
-// thresholds[level] is the cumulative sharedXp needed to reach level+1. One
-// entry is all this step needs ("base level 至少能升 1 次"); a further level
-// (turret/weapon unlocks) is just appending to this array later.
-export const LEVEL_UP_THRESHOLDS = [100];
+
+// Every wall level's numbers in one place, as asked — nothing about wall HP
+// or cost lives anywhere else. cost is what it takes to REACH that level
+// from the one below (build from 0, or upgrade from the previous level); a
+// level with cost: null isn't buyable yet (no price decided) — the interact
+// menu simply won't offer it. spikeDamage is the level-2+ reflect effect:
+// every time an attacking zombie hits the wall, it takes this much damage
+// back. Destroying the wall always drops it back to level 0 (see GameLoop's
+// comment on why) — getting back to level 2 means paying for 1 and 2 again.
+export interface WallLevelConfig {
+  maxHp: number;
+  cost: number | null;
+  spikeDamage: number;
+}
+
+export const WALL_LEVELS: Record<number, WallLevelConfig> = {
+  1: { maxHp: 30, cost: 100, spikeDamage: 0 },
+  2: { maxHp: 80, cost: 300, spikeDamage: 5 },
+  3: { maxHp: 150, cost: null, spikeDamage: 5 }, // reachable in principle, not priced yet
+};
+export const WALL_MAX_LEVEL = 3;
+
+// Fixed, single placement near the base — no picking a spot, no multiple
+// turrets this round.
+export const TURRET_POS: Vec2 = { x: BASE_POS.x + 60, y: BASE_POS.y - 60 };
+
+// Same one-table-for-the-numbers approach as the wall. Only level 1 is
+// priced and only level 1 is reachable right now — level 2/3 costs (and any
+// stat changes beyond level 1's) are the user's call, not invented here.
+export interface TurretLevelConfig {
+  maxHp: number;
+  damage: number;
+  range: number;
+  fireIntervalMs: number;
+  cost: number | null;
+}
+
+export const TURRET_LEVELS: Record<number, TurretLevelConfig> = {
+  1: { maxHp: 50, damage: 10, range: 300, fireIntervalMs: 2500, cost: 200 },
+  2: { maxHp: 50, damage: 10, range: 300, fireIntervalMs: 2500, cost: null }, // not decided yet
+  3: { maxHp: 50, damage: 10, range: 300, fireIntervalMs: 2500, cost: null }, // not decided yet
+};
 
 // How many zombies day N has in total. A day only ends once every one of
 // them has spawned AND been killed — see GameLoop's own comment on why this
@@ -92,7 +136,7 @@ export function spawnZombie(): Zombie {
   };
 }
 
-function distance(a: Vec2, b: Vec2): number {
+export function distance(a: Vec2, b: Vec2): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
@@ -152,12 +196,34 @@ export function resolveShot(playerPos: Vec2, aimAngle: number, zombies: readonly
   return best;
 }
 
+// Same "nearest in range" shape as resolveShot, but no aim cone — the turret
+// auto-targets, it doesn't get aimed.
+export function findNearestZombieInRange(origin: Vec2, range: number, zombies: readonly Zombie[]): Zombie | undefined {
+  let best: Zombie | undefined;
+  let bestDist = Infinity;
+  for (const z of zombies) {
+    const d = distance(origin, z.pos);
+    if (d <= range && d < bestDist) {
+      best = z;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
 // Moves one zombie a dtMs-sized step straight toward the base, or flips it
-// into "attacking" once it's in range. No pathfinding — there's nothing to
-// path around yet, and the brief's own call to keep this simple holds here.
-export function stepZombie(z: Zombie, dtMs: number): void {
+// into "attacking" once it hits its stop radius. Which radius depends on
+// whether the wall is currently up: WALL_RING_RADIUS while it has HP (stop
+// outside it, attack it, never cross), BASE_ATTACK_RANGE once it's down
+// (there's nothing left to stop at further out). Re-evaluated every tick, so
+// a zombie already holding at the wall ring resumes moving in the moment the
+// wall actually breaks — no separate "wall just fell" transition needed. No
+// pathfinding — there's nothing to path around yet, and the brief's own call
+// to keep this simple holds here.
+export function stepZombie(z: Zombie, dtMs: number, wallUp: boolean): void {
+  const stopRadius = wallUp ? WALL_RING_RADIUS : BASE_ATTACK_RANGE;
   const d = distance(z.pos, BASE_POS);
-  if (d <= BASE_ATTACK_RANGE) {
+  if (d <= stopRadius) {
     z.attacking = true;
     return;
   }

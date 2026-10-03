@@ -46,6 +46,14 @@ function parseClientMessage(data: unknown): ClientMessage | undefined {
     return { type: parsed.type };
   }
 
+  if (parsed.type === "interact") {
+    const { action } = parsed as { action?: unknown };
+    if (action === "build_wall" || action === "upgrade_wall" || action === "build_turret") {
+      return { type: "interact", action };
+    }
+    return undefined;
+  }
+
   return undefined;
 }
 
@@ -83,6 +91,9 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
           break;
         case "restart":
           gameLoop.restart();
+          break;
+        case "interact":
+          gameLoop.interact(msg.action);
           break;
       }
     });
