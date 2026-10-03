@@ -22,6 +22,8 @@ export interface Progress {
   turretHp: number;
   turretMaxHp: number;
   turretBuilt: boolean;
+  turretX: number; // player-chosen placement (GameLoop.placeTurret) — meaningless while !turretBuilt
+  turretY: number;
 }
 
 // Exported so GameLoop.restart() resets to exactly this, rather than a second
@@ -38,6 +40,8 @@ export const DEFAULT_PROGRESS: Progress = {
   turretHp: 0,
   turretMaxHp: 0,
   turretBuilt: false,
+  turretX: 0,
+  turretY: 0,
 };
 
 interface GameStateRow {
@@ -52,6 +56,8 @@ interface GameStateRow {
   turret_hp: number;
   turret_max_hp: number;
   turret_built: number; // SQLite has no boolean type; 0/1
+  turret_x: number;
+  turret_y: number;
 }
 
 export function defaultDataDir(): string {
@@ -70,6 +76,8 @@ const MIGRATIONS: Array<{ column: string; ddl: string }> = [
   { column: "turret_hp", ddl: "ALTER TABLE game_state ADD COLUMN turret_hp INTEGER NOT NULL DEFAULT 0" },
   { column: "turret_max_hp", ddl: "ALTER TABLE game_state ADD COLUMN turret_max_hp INTEGER NOT NULL DEFAULT 0" },
   { column: "turret_built", ddl: "ALTER TABLE game_state ADD COLUMN turret_built INTEGER NOT NULL DEFAULT 0" },
+  { column: "turret_x", ddl: "ALTER TABLE game_state ADD COLUMN turret_x REAL NOT NULL DEFAULT 0" },
+  { column: "turret_y", ddl: "ALTER TABLE game_state ADD COLUMN turret_y REAL NOT NULL DEFAULT 0" },
 ];
 
 // One table, one row (id = 1). Crit 9's players and crit 10's event log are
@@ -94,6 +102,8 @@ export function openDatabase(dir: string = defaultDataDir()): Database.Database 
       turret_hp INTEGER NOT NULL DEFAULT 0,
       turret_max_hp INTEGER NOT NULL DEFAULT 0,
       turret_built INTEGER NOT NULL DEFAULT 0,
+      turret_x REAL NOT NULL DEFAULT 0,
+      turret_y REAL NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL
     )
   `);
@@ -113,13 +123,13 @@ export function openDatabase(dir: string = defaultDataDir()): Database.Database 
       `INSERT INTO game_state (
          id, current_day, base_hp, base_max_hp, shared_xp,
          wall_level, wall_hp, wall_max_hp,
-         turret_level, turret_hp, turret_max_hp, turret_built,
+         turret_level, turret_hp, turret_max_hp, turret_built, turret_x, turret_y,
          updated_at
        )
        VALUES (
          1, @day, @baseHp, @baseMaxHp, @sharedXp,
          @wallLevel, @wallHp, @wallMaxHp,
-         @turretLevel, @turretHp, @turretMaxHp, @turretBuilt,
+         @turretLevel, @turretHp, @turretMaxHp, @turretBuilt, @turretX, @turretY,
          @updatedAt
        )`,
     ).run({
@@ -137,7 +147,7 @@ export function loadState(db: Database.Database): Progress {
     .prepare(
       `SELECT current_day, base_hp, base_max_hp, shared_xp,
               wall_level, wall_hp, wall_max_hp,
-              turret_level, turret_hp, turret_max_hp, turret_built
+              turret_level, turret_hp, turret_max_hp, turret_built, turret_x, turret_y
        FROM game_state WHERE id = 1`,
     )
     .get() as GameStateRow | undefined;
@@ -156,6 +166,8 @@ export function loadState(db: Database.Database): Progress {
     turretHp: row.turret_hp,
     turretMaxHp: row.turret_max_hp,
     turretBuilt: row.turret_built === 1,
+    turretX: row.turret_x,
+    turretY: row.turret_y,
   };
 }
 
@@ -165,7 +177,7 @@ export function saveState(db: Database.Database, state: Progress): void {
      SET current_day = @day, base_hp = @baseHp, base_max_hp = @baseMaxHp, shared_xp = @sharedXp,
          wall_level = @wallLevel, wall_hp = @wallHp, wall_max_hp = @wallMaxHp,
          turret_level = @turretLevel, turret_hp = @turretHp, turret_max_hp = @turretMaxHp,
-         turret_built = @turretBuilt, updated_at = @updatedAt
+         turret_built = @turretBuilt, turret_x = @turretX, turret_y = @turretY, updated_at = @updatedAt
      WHERE id = 1`,
   ).run({
     ...state,

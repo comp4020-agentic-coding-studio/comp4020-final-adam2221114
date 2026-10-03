@@ -34,6 +34,8 @@ export interface StateMessage {
   turretHp: number;
   turretMaxHp: number;
   turretBuilt: boolean;
+  turretX: number;
+  turretY: number;
   turretTarget: { x: number; y: number } | null;
   turretShotsFired: number;
   killedZombies: number;
@@ -56,11 +58,17 @@ export interface ControlMessage {
   type: "start" | "pause" | "resume" | "restart";
 }
 
-export type InteractAction = "build_wall" | "upgrade_wall" | "build_turret";
+export type InteractAction = "build_wall" | "upgrade_wall";
 
 export interface InteractMessage {
   type: "interact";
   action: InteractAction;
 }
 
-export type ClientMessage = InputMessage | ShootMessage | ControlMessage | InteractMessage;
+export interface PlaceTurretMessage {
+  type: "place_turret";
+  x: number;
+  y: number;
+}
+
+export type ClientMessage = InputMessage | ShootMessage | ControlMessage | InteractMessage | PlaceTurretMessage;

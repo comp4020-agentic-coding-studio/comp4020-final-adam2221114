@@ -33,6 +33,8 @@ export interface StateMessage {
   turretHp: number;
   turretMaxHp: number;
   turretBuilt: boolean;
+  turretX: number; // meaningless while !turretBuilt
+  turretY: number;
   // Not persisted (GameLoop's own comment explains why) — just this tick's
   // targeting, so the client can draw the turret's barrel/aim line and tell
   // a real shot apart from an idle turret via turretShotsFired increasing.
@@ -67,11 +69,24 @@ export interface ControlMessage {
 
 // The X-menu's actions. The server re-validates range/cost/current building
 // state independently every time — this message is a request, not a grant.
-export type InteractAction = "build_wall" | "upgrade_wall" | "build_turret";
+// build_turret isn't here any more — picking it client-side enters placement
+// mode instead (purely local UI, no message sent yet); only the follow-up
+// click, as a PlaceTurretMessage, is a real request.
+export type InteractAction = "build_wall" | "upgrade_wall";
 
 export interface InteractMessage {
   type: "interact";
   action: InteractAction;
 }
 
-export type ClientMessage = InputMessage | ShootMessage | ControlMessage | InteractMessage;
+// Sent once, when the player clicks a (client-side-judged) valid spot during
+// placement mode. The server re-validates all of it independently — range,
+// cost, "not already built", and whether (x, y) is actually inside the
+// allowed ring — the client's own validity check is only ever a preview.
+export interface PlaceTurretMessage {
+  type: "place_turret";
+  x: number;
+  y: number;
+}
+
+export type ClientMessage = InputMessage | ShootMessage | ControlMessage | InteractMessage | PlaceTurretMessage;

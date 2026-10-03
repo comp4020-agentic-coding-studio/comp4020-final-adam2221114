@@ -48,10 +48,16 @@ function parseClientMessage(data: unknown): ClientMessage | undefined {
 
   if (parsed.type === "interact") {
     const { action } = parsed as { action?: unknown };
-    if (action === "build_wall" || action === "upgrade_wall" || action === "build_turret") {
+    if (action === "build_wall" || action === "upgrade_wall") {
       return { type: "interact", action };
     }
     return undefined;
+  }
+
+  if (parsed.type === "place_turret") {
+    const { x, y } = parsed as { x?: unknown; y?: unknown };
+    if (typeof x !== "number" || typeof y !== "number") return undefined;
+    return { type: "place_turret", x, y };
   }
 
   return undefined;
@@ -94,6 +100,9 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
           break;
         case "interact":
           gameLoop.interact(msg.action);
+          break;
+        case "place_turret":
+          gameLoop.placeTurret(msg.x, msg.y);
           break;
       }
     });

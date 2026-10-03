@@ -13,7 +13,11 @@ export const BASE_POS: Vec2 = { x: WORLD_SIZE / 2, y: WORLD_SIZE / 2 };
 export const BASE_ATTACK_RANGE = 40;
 export const WALL_RING_RADIUS = 60;
 export const BASE_INTERACT_RANGE = 80;
-export const TURRET_POS: Vec2 = { x: BASE_POS.x + 60, y: BASE_POS.y - 60 };
+// The annulus the turret can be placed in: BASE_ATTACK_RANGE (the base's own
+// footprint) to TURRET_BUILD_RADIUS from BASE_POS. No fixed TURRET_POS any
+// more — its actual position is wherever the player placed it, always read
+// from the server's own state (StateMessage.turretX/turretY).
+export const TURRET_BUILD_RADIUS = 150;
 
 export interface WallLevelConfig {
   maxHp: number;

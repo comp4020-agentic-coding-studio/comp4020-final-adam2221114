@@ -79,9 +79,12 @@ export const WALL_LEVELS: Record<number, WallLevelConfig> = {
 };
 export const WALL_MAX_LEVEL = 3;
 
-// Fixed, single placement near the base — no picking a spot, no multiple
-// turrets this round.
-export const TURRET_POS: Vec2 = { x: BASE_POS.x + 60, y: BASE_POS.y - 60 };
+// Where the turret is allowed to go: an annulus around the base, not
+// anywhere on the map and not inside the base itself. Outer bound is its own
+// named constant per the brief; the inner bound reuses BASE_ATTACK_RANGE
+// (the base's own footprint) rather than inventing a second one for the
+// same idea. One turret this round — no free placement, no multiple spots.
+export const TURRET_BUILD_RADIUS = 150;
 
 // Same one-table-for-the-numbers approach as the wall. Only level 1 is
 // priced and only level 1 is reachable right now — level 2/3 costs (and any

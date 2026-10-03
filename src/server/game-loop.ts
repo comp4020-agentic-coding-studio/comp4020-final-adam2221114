@@ -2,14 +2,15 @@ import type { PersistedState } from "./persisted-state.ts";
 import { DEFAULT_PROGRESS, type Progress } from "./persistence.ts";
 import type { GamePhase, InteractAction, StateMessage } from "./protocol.ts";
 import {
+  BASE_ATTACK_RANGE,
   BASE_INTERACT_RANGE,
   BASE_POS,
   DAY_VICTORY,
   PISTOL_DAMAGE,
   PLAYER_MAX_HP,
   PLAYER_START_POS,
+  TURRET_BUILD_RADIUS,
   TURRET_LEVELS,
-  TURRET_POS,
   WALL_LEVELS,
   WALL_MAX_LEVEL,
   XP_PER_KILL,
@@ -24,6 +25,7 @@ import {
   zombiesForDay,
   type InputState,
   type Player,
+  type Vec2,
   type Zombie,
 } from "./game-state.ts";
 
@@ -54,11 +56,14 @@ const TICK_MS = 50;
 // the day's remaining quota.
 //
 // Defences are now something the player actively buys with shared XP via
-// interact() (the X-menu), not something that appears on its own — there is
-// no more auto-wall-at-100-XP. The wall physically blocks zombies while it
-// has HP (stepZombie stops them at the wall's ring instead of the base's);
-// losing it drops wallLevel back to 0, so a rebuild always starts over at
-// level 1 regardless of what it was before.
+// interact() (build/upgrade wall) or placeTurret() (the turret, which also
+// needs a position) — the X-menu — not something that appears on its own:
+// there is no more auto-wall-at-100-XP. The wall physically blocks zombies
+// while it has HP (stepZombie stops them at the wall's ring instead of the
+// base's); losing it drops wallLevel back to 0, so a rebuild always starts
+// over at level 1 regardless of what it was before. The turret goes
+// wherever the player placed it (turretX/turretY) — one per round, picked
+// once, no moving it afterwards.
 //
 // Playability polish: a round phase gates the tick (waiting/paused/game_over/
 // victory all freeze zombies, spawning, day and the player — only "running"
@@ -173,10 +178,54 @@ export class GameLoop {
       case "upgrade_wall":
         this.#upgradeWall(progress);
         break;
-      case "build_turret":
-        this.#buildTurret(progress);
-        break;
     }
+  }
+
+  // The follow-up to picking "Build Turret" from the menu: the client enters
+  // placement mode on its own (no message sent yet) and only sends this once
+  // the player clicks a spot it judged valid. Every check here re-runs
+  // independently of that client-side judgement — phase, range-to-base (the
+  // same check interact() uses), "not already built" (one turret this
+  // round), cost, and whether (x, y) itself actually falls inside the
+  // allowed ring. The client never gets the final say on where it ends up.
+  placeTurret(x: number, y: number): void {
+    if (this.#phase !== "running") return;
+    if (distance(this.#player.pos, BASE_POS) > BASE_INTERACT_RANGE) {
+      console.log("place_turret: player out of range");
+      return;
+    }
+    const progress = this.#progress.get();
+    if (progress.turretBuilt) {
+      console.log("place_turret: already built");
+      return;
+    }
+    const config = TURRET_LEVELS[1];
+    if (config.cost === null) {
+      console.log("place_turret: not priced yet");
+      return;
+    }
+    if (progress.sharedXp < config.cost) {
+      console.log(`place_turret: need ${config.cost} XP, have ${progress.sharedXp}`);
+      return;
+    }
+    const spot: Vec2 = { x, y };
+    const d = distance(spot, BASE_POS);
+    if (d < BASE_ATTACK_RANGE || d > TURRET_BUILD_RADIUS) {
+      console.log(`place_turret: (${x}, ${y}) is outside the allowed ring (${BASE_ATTACK_RANGE}-${TURRET_BUILD_RADIUS} from base)`);
+      return;
+    }
+
+    this.#progress.update({
+      sharedXp: progress.sharedXp - config.cost,
+      turretBuilt: true,
+      turretLevel: 1,
+      turretHp: config.maxHp,
+      turretMaxHp: config.maxHp,
+      turretX: x,
+      turretY: y,
+    });
+    this.#progress.flush();
+    console.log(`built turret level 1 at (${x.toFixed(0)}, ${y.toFixed(0)}) (-${config.cost} XP)`);
   }
 
   #buildWall(progress: Readonly<Progress>): void {
@@ -222,31 +271,6 @@ export class GameLoop {
     });
     this.#progress.flush();
     console.log(`upgraded wall to level ${nextLevel} (-${config.cost} XP)`);
-  }
-
-  #buildTurret(progress: Readonly<Progress>): void {
-    if (progress.turretBuilt) {
-      console.log("build_turret: already built");
-      return;
-    }
-    const config = TURRET_LEVELS[1];
-    if (config.cost === null) {
-      console.log("build_turret: not priced yet");
-      return;
-    }
-    if (progress.sharedXp < config.cost) {
-      console.log(`build_turret: need ${config.cost} XP, have ${progress.sharedXp}`);
-      return;
-    }
-    this.#progress.update({
-      sharedXp: progress.sharedXp - config.cost,
-      turretBuilt: true,
-      turretLevel: 1,
-      turretHp: config.maxHp,
-      turretMaxHp: config.maxHp,
-    });
-    this.#progress.flush();
-    console.log(`built turret level 1 (-${config.cost} XP)`);
   }
 
   // Removes a dead zombie, counts the kill towards this day's wave, and
@@ -319,6 +343,8 @@ export class GameLoop {
       turretHp: progress.turretHp,
       turretMaxHp: progress.turretMaxHp,
       turretBuilt: progress.turretBuilt,
+      turretX: progress.turretX,
+      turretY: progress.turretY,
       turretTarget: this.#turretTarget ? { x: this.#turretTarget.pos.x, y: this.#turretTarget.pos.y } : null,
       turretShotsFired: this.#turretShotsFired,
       killedZombies: this.#killedZombies,
@@ -433,7 +459,8 @@ export class GameLoop {
       return;
     }
     const config = TURRET_LEVELS[progress.turretLevel];
-    this.#turretTarget = findNearestZombieInRange(TURRET_POS, config.range, this.#zombies);
+    const turretPos: Vec2 = { x: progress.turretX, y: progress.turretY };
+    this.#turretTarget = findNearestZombieInRange(turretPos, config.range, this.#zombies);
     if (!this.#turretTarget) return;
     if (this.#clockMs - this.#turretLastFiredAt < config.fireIntervalMs) return;
 

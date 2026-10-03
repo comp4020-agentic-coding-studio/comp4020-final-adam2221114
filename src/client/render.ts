@@ -1,5 +1,11 @@
-import { BASE_POS, TURRET_LEVELS, TURRET_POS, WALL_RING_RADIUS, WORLD_SIZE } from "./defense-config.ts";
+import { BASE_ATTACK_RANGE, BASE_POS, TURRET_BUILD_RADIUS, TURRET_LEVELS, WALL_RING_RADIUS, WORLD_SIZE } from "./defense-config.ts";
 import type { StateMessage } from "./protocol.ts";
+
+// Must match src/server/game-state.ts's ZOMBIE_MAX_HP — duplicated for the
+// same reason as everything else here (see protocol.ts's comment). Every
+// zombie this round shares one max HP, so there's nothing to send over the
+// wire for it; the health bar is just zombie.hp against this constant.
+const ZOMBIE_MAX_HP = 90;
 
 // Just enough visual distinction per wall level — colour/thickness, plus
 // spikes once the level actually has the reflect-damage effect (WALL_LEVELS
@@ -80,11 +86,12 @@ export function render(
   ctx.arc(base.x, base.y, 18, 0, Math.PI * 2);
   ctx.fill();
 
-  // Turret: a fixed fixture near the base, drawn whenever it's been built
-  // and still has HP. Range shown as a faint circle so the player can see
-  // what it actually covers.
+  // Turret: drawn wherever the player placed it (turretX/turretY — there's
+  // no fixed spot any more), whenever it's been built and still has HP.
+  // Range shown as a faint circle so the player can see what it covers.
   if (state.turretBuilt && state.turretHp > 0) {
-    const turretScreen = toScreen(TURRET_POS.x, TURRET_POS.y);
+    const turretWorld = { x: state.turretX, y: state.turretY };
+    const turretScreen = toScreen(turretWorld.x, turretWorld.y);
     const range = TURRET_LEVELS[state.turretLevel]?.range ?? TURRET_LEVELS[1].range;
 
     ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
@@ -100,7 +107,7 @@ export function render(
 
     // Barrel, pointing at whatever it's currently tracking.
     if (state.turretTarget) {
-      const angle = Math.atan2(state.turretTarget.y - TURRET_POS.y, state.turretTarget.x - TURRET_POS.x);
+      const angle = Math.atan2(state.turretTarget.y - turretWorld.y, state.turretTarget.x - turretWorld.x);
       ctx.strokeStyle = "#cc6633";
       ctx.lineWidth = 3;
       ctx.beginPath();
@@ -110,13 +117,27 @@ export function render(
     }
   }
 
-  // Zombies
-  ctx.fillStyle = "#4caf50";
+  // Zombies, each with a small health bar above it — authoritative hp/
+  // ZOMBIE_MAX_HP only, nothing computed or guessed locally. Drawn fresh
+  // every frame at the zombie's current (interpolated) position, so it
+  // tracks movement automatically and vanishes the instant the zombie is no
+  // longer in state.zombies (dead or otherwise gone).
   for (const z of state.zombies) {
     const p = toScreen(z.x, z.y);
+    ctx.fillStyle = "#4caf50";
     ctx.beginPath();
     ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
     ctx.fill();
+
+    const barWidth = 18;
+    const barHeight = 3;
+    const barX = p.x - barWidth / 2;
+    const barY = p.y - 14;
+    const fraction = Math.max(0, Math.min(1, z.hp / ZOMBIE_MAX_HP));
+    ctx.fillStyle = "#552222";
+    ctx.fillRect(barX, barY, barWidth, barHeight);
+    ctx.fillStyle = fraction > 0.3 ? "#5fd35f" : "#e05c5c";
+    ctx.fillRect(barX, barY, barWidth * fraction, barHeight);
   }
 
   // Player: a simple oriented body/head/gun shape, not a bare dot — rotated
@@ -252,4 +273,40 @@ export function renderShotEffects(
     ctx.arc(x1, y1, 2 + 6 * alpha, 0, Math.PI * 2);
     ctx.fill();
   }
+}
+
+// Turret placement mode: the allowed ring (outer TURRET_BUILD_RADIUS, inner
+// BASE_ATTACK_RANGE — the base's own footprint) and a preview icon at the
+// mouse's current world position, coloured by whether that spot is actually
+// valid. This is a preview only — the server re-checks the real position
+// independently (GameLoop.placeTurret) the moment the player clicks; nothing
+// here decides where the turret actually ends up.
+export function renderTurretPlacementPreview(
+  ctx: CanvasRenderingContext2D,
+  canvasSize: number,
+  mouseWorldPos: { x: number; y: number },
+  valid: boolean,
+): void {
+  const scale = canvasSize / WORLD_SIZE;
+  const base = { x: BASE_POS.x * scale, y: BASE_POS.y * scale };
+
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.arc(base.x, base.y, scale * TURRET_BUILD_RADIUS, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(base.x, base.y, scale * BASE_ATTACK_RANGE, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const p = { x: mouseWorldPos.x * scale, y: mouseWorldPos.y * scale };
+  ctx.fillStyle = valid ? "rgba(100, 220, 120, 0.8)" : "rgba(220, 80, 80, 0.8)";
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = valid ? "#64dc78" : "#dc5050";
+  ctx.lineWidth = 2;
+  ctx.stroke();
 }

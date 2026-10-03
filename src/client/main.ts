@@ -1,4 +1,12 @@
-import { BASE_INTERACT_RANGE, BASE_POS, TURRET_LEVELS, TURRET_POS, WALL_LEVELS, WALL_MAX_LEVEL } from "./defense-config.ts";
+import {
+  BASE_ATTACK_RANGE,
+  BASE_INTERACT_RANGE,
+  BASE_POS,
+  TURRET_BUILD_RADIUS,
+  TURRET_LEVELS,
+  WALL_LEVELS,
+  WALL_MAX_LEVEL,
+} from "./defense-config.ts";
 import type { ClientMessage, ControlMessage, GamePhase, InteractAction, StateMessage } from "./protocol.ts";
 import { InputController } from "./input.ts";
 import { interpolateState } from "./interpolate.ts";
@@ -8,6 +16,7 @@ import {
   renderCrosshair,
   renderDayProgress,
   renderShotEffects,
+  renderTurretPlacementPreview,
   TRACER_LIFETIME_MS,
   type ShotEffect,
 } from "./render.ts";
@@ -94,6 +103,10 @@ const sendInteract = (action: InteractAction): void => {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "interact", action }));
 };
 
+const sendPlaceTurret = (x: number, y: number): void => {
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "place_turret", x, y }));
+};
+
 const input = new InputController({
   canvas,
   worldSize: WORLD_SIZE,
@@ -115,9 +128,17 @@ const input = new InputController({
 // a menu is drawn). Every actual action still round-trips to the server,
 // which re-checks range against its own authoritative player position, so a
 // stale or wrong local guess can never spend XP or change a building by
-// itself; see GameLoop.interact() for every check that really matters.
+// itself; see GameLoop.interact()/placeTurret() for every check that really
+// matters. Picking "Build Turret" doesn't send anything by itself — it's a
+// MenuChoice of kind "place_turret", which enters placement mode instead
+// (see below); only the follow-up click is a real request.
+type MenuChoice =
+  | { key: string; label: string; kind: "interact"; action: InteractAction }
+  | { key: string; label: string; kind: "place_turret" };
+
 let menuOpen = false;
-let menuOptions: Array<{ key: string; action: InteractAction }> = [];
+let menuChoices: MenuChoice[] = [];
+let placementMode = false;
 
 // Arrow functions throughout (not `function` declarations), same reason as
 // the DOM-reference guards above: TS only carries non-null narrowing into
@@ -127,38 +148,55 @@ const distance = (a: { x: number; y: number }, b: { x: number; y: number }): num
 const playerInBaseRange = (): boolean =>
   distance(prediction.getDisplayPos(performance.now()), BASE_POS) <= BASE_INTERACT_RANGE;
 
+// A preview check only — the server runs the same comparison independently
+// against the position it actually receives (GameLoop.placeTurret).
+const isValidTurretSpot = (pos: { x: number; y: number }): boolean => {
+  const d = distance(pos, BASE_POS);
+  return d >= BASE_ATTACK_RANGE && d <= TURRET_BUILD_RADIUS;
+};
+
 // Builds this frame's option list from the server's own wallLevel/turretBuilt
 // — never from anything the client decided on its own. "Rebuild" after a
 // destroyed wall and the very first "Build" look the same here on purpose
 // (wallLevel 0 either way, same cost, same effect) — not worth a second
 // persisted flag just to change one word in the menu.
-const computeMenuOptions = (state: StateMessage): Array<{ key: string; label: string; action: InteractAction }> => {
-  const options: Array<{ label: string; action: InteractAction }> = [];
+type UnkeyedMenuChoice =
+  | { label: string; kind: "interact"; action: InteractAction }
+  | { label: string; kind: "place_turret" };
+
+const computeMenuChoices = (state: StateMessage): MenuChoice[] => {
+  const choices: UnkeyedMenuChoice[] = [];
 
   if (state.wallLevel === 0) {
-    options.push({ label: `Build Wall — ${WALL_LEVELS[1].cost} XP`, action: "build_wall" });
+    choices.push({ label: `Build Wall — ${WALL_LEVELS[1].cost} XP`, kind: "interact", action: "build_wall" });
   } else if (state.wallLevel < WALL_MAX_LEVEL) {
     const next = WALL_LEVELS[state.wallLevel + 1];
     if (next && next.cost !== null) {
-      options.push({ label: `Upgrade Wall — ${next.cost} XP`, action: "upgrade_wall" });
+      choices.push({ label: `Upgrade Wall — ${next.cost} XP`, kind: "interact", action: "upgrade_wall" });
     }
   }
 
   if (!state.turretBuilt && TURRET_LEVELS[1].cost !== null) {
-    options.push({ label: `Build Turret — ${TURRET_LEVELS[1].cost} XP`, action: "build_turret" });
+    choices.push({ label: `Build Turret — ${TURRET_LEVELS[1].cost} XP`, kind: "place_turret" });
   }
 
-  return options.map((opt, i) => ({ key: String(i + 1), ...opt }));
+  return choices.map((choice, i) => ({ key: String(i + 1), ...choice }) as MenuChoice);
 };
 
 const renderMenu = (state: StateMessage | undefined): void => {
+  if (placementMode) {
+    menu.textContent = ["PLACING TURRET", "", "Click a valid spot (dashed ring around the base)", "[X / Esc] Cancel"].join(
+      "\n",
+    );
+    menu.hidden = false;
+    return;
+  }
   if (!menuOpen || !state) {
     menu.hidden = true;
     return;
   }
-  const options = computeMenuOptions(state);
-  menuOptions = options.map(({ key, action }) => ({ key, action }));
-  const lines = ["BASE UPGRADES", "", ...options.map((o) => `[${o.key}] ${o.label}`), "[X / Esc] Close"];
+  menuChoices = computeMenuChoices(state);
+  const lines = ["BASE UPGRADES", "", ...menuChoices.map((o) => `[${o.key}] ${o.label}`), "[X / Esc] Close"];
   menu.textContent = lines.join("\n");
   menu.hidden = false;
 };
@@ -168,10 +206,19 @@ const closeMenu = (): void => {
   menu.hidden = true;
 };
 
+const cancelPlacement = (): void => {
+  placementMode = false;
+  menu.hidden = true;
+};
+
 window.addEventListener("keydown", (e) => {
   const key = e.key.toLowerCase();
-  if (key === "x") {
-    if (menuOpen) {
+  if (key === "x" || key === "escape") {
+    if (placementMode) {
+      cancelPlacement();
+    } else if (key === "escape") {
+      if (menuOpen) closeMenu();
+    } else if (menuOpen) {
       closeMenu();
     } else if (playerInBaseRange()) {
       menuOpen = true;
@@ -179,15 +226,36 @@ window.addEventListener("keydown", (e) => {
     }
     return;
   }
-  if (key === "escape") {
-    if (menuOpen) closeMenu();
-    return;
-  }
   if (menuOpen) {
-    const chosen = menuOptions.find((o) => o.key === key);
-    if (chosen) sendInteract(chosen.action);
+    const chosen = menuChoices.find((o) => o.key === key);
+    if (!chosen) return;
+    if (chosen.kind === "place_turret") {
+      closeMenu();
+      placementMode = true;
+      renderMenu(currentState);
+    } else {
+      sendInteract(chosen.action);
+    }
   }
 });
+
+// Placement click: capture phase, so this runs before InputController's own
+// (bubble-phase) click listener and — via stopImmediatePropagation — stops
+// it from also firing a shot for the same click. Only active during
+// placement mode; otherwise the event passes through untouched.
+canvas.addEventListener(
+  "click",
+  (e) => {
+    if (!placementMode) return;
+    e.stopImmediatePropagation();
+    const mouse = input.getMouseWorldPos();
+    if (!mouse || !isValidTurretSpot(mouse)) return; // invalid spot: stay in placement mode, nothing sent
+    sendPlaceTurret(mouse.x, mouse.y);
+    placementMode = false;
+    menu.hidden = true;
+  },
+  { capture: true },
+);
 
 socket.addEventListener("message", (ev) => {
   previousState = currentState;
@@ -199,12 +267,12 @@ socket.addEventListener("message", (ev) => {
   // A new turret shot this tick — give it the same tracer/muzzle-flash the
   // player's own shots get. Only fires with a real target, same as the
   // server (turretTarget is cleared whenever the turret doesn't have one).
+  // Origin is wherever the turret actually is (turretX/turretY) — there's no
+  // fixed spot any more.
   if (currentState.turretShotsFired > lastTurretShotsFired && currentState.turretTarget) {
-    const angle = Math.atan2(
-      currentState.turretTarget.y - TURRET_POS.y,
-      currentState.turretTarget.x - TURRET_POS.x,
-    );
-    effects.push({ x: TURRET_POS.x, y: TURRET_POS.y, angle, firedAt: performance.now() });
+    const origin = { x: currentState.turretX, y: currentState.turretY };
+    const angle = Math.atan2(currentState.turretTarget.y - origin.y, currentState.turretTarget.x - origin.x);
+    effects.push({ x: origin.x, y: origin.y, angle, firedAt: performance.now() });
   }
   lastTurretShotsFired = currentState.turretShotsFired;
 
@@ -246,7 +314,10 @@ const updatePhaseUi = (phase: GamePhase): void => {
   btnResume.hidden = phase !== "paused";
   // Restart stays visible in every phase — it's the one control that always
   // works, regardless of how the round ended or whether it's even started.
-  if (phase !== "running" && menuOpen) closeMenu(); // nothing to buy while frozen
+  if (phase !== "running") {
+    if (menuOpen) closeMenu(); // nothing to buy while frozen
+    if (placementMode) cancelPlacement(); // nothing to place either
+  }
 };
 
 // Render loop: requestAnimationFrame (~60fps), independent of the server's
@@ -294,11 +365,13 @@ const frame = (timestamp: number): void => {
 
     const mouse = input.getMouseWorldPos();
     if (mouse) renderCrosshair(ctx, CANVAS_SIZE, mouse);
+    if (placementMode && mouse) renderTurretPlacementPreview(ctx, CANVAS_SIZE, mouse, isValidTurretSpot(mouse));
 
-    // The menu auto-closes if the player walks out of range while it's open
-    // — attempting an action out there would just be rejected server-side,
-    // so there's nothing useful left for it to show.
+    // The menu (and placement mode) auto-close if the player walks out of
+    // range while active — attempting an action out there would just be
+    // rejected server-side, so there's nothing useful left for either to show.
     if (menuOpen && !playerInBaseRange()) closeMenu();
+    if (placementMode && !playerInBaseRange()) cancelPlacement();
   }
   requestAnimationFrame(frame);
 };
