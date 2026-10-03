@@ -13,7 +13,7 @@ export interface Zombie {
   pos: Vec2;
   hp: number;
   attacking: boolean;
-  lastAttackAt: number; // ms, relative to the current day's own clock
+  lastAttackAt: number; // ms, GameLoop's own monotonic clock (never reset)
 }
 
 export interface Player {
@@ -36,11 +36,11 @@ export const MAP_SIZE = 1000;
 export const BASE_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 };
 export const BASE_ATTACK_RANGE = 40;
 export const BASE_MAX_HP = 100; // also persistence.ts's default — single source of truth
+export const WALL_MAX_HP = 30; // also persistence.ts's default, once baseLevel >= 1
 export const ZOMBIE_SPEED = 40; // units/second
-export const ZOMBIE_ATTACK_DAMAGE = 5;
+export const ZOMBIE_ATTACK_DAMAGE = 5; // applies to whichever of wall/base is currently absorbing hits
 export const ZOMBIE_ATTACK_INTERVAL_MS = 1000;
 export const ZOMBIE_MAX_HP = 90;
-export const DAY_DURATION_MS = 60_000; // ~45-60s/day; using the top of that range
 export const DAY_VICTORY = 28; // completing this day ends the round in victory
 export const PLAYER_MAX_HP = 100;
 export const PLAYER_SPEED = 150; // units/second
@@ -56,9 +56,13 @@ export const XP_PER_KILL = 50;
 // (turret/weapon unlocks) is just appending to this array later.
 export const LEVEL_UP_THRESHOLDS = [100];
 
-// A day-over-day bump, not the full 28-day curve — that's later work.
-export function spawnsForDay(day: number): number {
-  return 2 + day;
+// How many zombies day N has in total. A day only ends once every one of
+// them has spawned AND been killed — see GameLoop's own comment on why this
+// replaced the old fixed-duration timer. Simple linear growth, not the full
+// 28-day balance pass: that's later work, this just has to be mechanically
+// correct (day 1 = 3, day 2 = 9, day 3 = 15, ...).
+export function zombiesForDay(day: number): number {
+  return 3 + (day - 1) * 6;
 }
 
 let nextZombieId = 1;

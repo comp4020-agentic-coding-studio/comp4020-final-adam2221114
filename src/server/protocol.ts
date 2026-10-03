@@ -27,7 +27,12 @@ export interface StateMessage {
   baseMaxHp: number;
   baseLevel: number;
   sharedXp: number;
-  wallUnlocked: boolean; // derived (baseLevel >= 1), not a separate persisted field
+  wallHp: number;
+  wallMaxHp: number;
+  // This day's wave: the client renders its progress bar straight from
+  // these, nothing computed locally.
+  killedZombies: number;
+  totalZombiesForDay: number;
   player: PlayerSnapshot;
   zombies: ZombieSnapshot[];
 }

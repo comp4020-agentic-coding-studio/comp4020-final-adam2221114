@@ -38,9 +38,11 @@ export function render(
 
   const base = toScreen(BASE_POS.x, BASE_POS.y);
 
-  // Wall: appears once wallUnlocked flips true. State only — no HP, no
-  // collision, no repair logic lives here or anywhere else this step.
-  if (state.wallUnlocked) {
+  // Wall: present once wallHp > 0 (it's gone again once destroyed — wallHp
+  // at 0 looks the same whether it never existed or fell, which this round
+  // doesn't need to tell apart). Same plain ring as before, just gated on
+  // wallHp now instead of the removed wallUnlocked flag.
+  if (state.wallHp > 0) {
     ctx.strokeStyle = "#9aa0a6";
     ctx.lineWidth = 4;
     ctx.beginPath();
@@ -91,6 +93,42 @@ export function render(
   ctx.moveTo(player.x, player.y);
   ctx.lineTo(player.x + Math.cos(aimAngle) * aimLength, player.y + Math.sin(aimAngle) * aimLength);
   ctx.stroke();
+}
+
+// Day + wave progress, top-centre of the canvas. Pure display of what the
+// server sent (killedZombies/totalZombiesForDay) — nothing here decides when
+// the day advances, that's GameLoop's #checkWaveComplete.
+export function renderDayProgress(
+  ctx: CanvasRenderingContext2D,
+  canvasSize: number,
+  day: number,
+  killed: number,
+  total: number,
+): void {
+  const centerX = canvasSize / 2;
+
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 28px system-ui, sans-serif";
+  ctx.fillText(`DAY ${day}`, centerX, 34);
+
+  const barWidth = 220;
+  const barHeight = 14;
+  const barX = centerX - barWidth / 2;
+  const barY = 44;
+  const fraction = total > 0 ? killed / total : 0;
+
+  ctx.strokeStyle = "#888";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(barX, barY, barWidth, barHeight);
+  ctx.fillStyle = "#4caf50";
+  ctx.fillRect(barX, barY, barWidth * fraction, barHeight);
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "14px system-ui, sans-serif";
+  ctx.fillText(`${killed} / ${total} ZOMBIES`, centerX, barY + barHeight + 18);
+
+  ctx.textAlign = "left"; // restore the default so later draws aren't surprised
 }
 
 // Crosshair at the mouse's own position — separate from the aim line (which

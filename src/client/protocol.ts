@@ -28,7 +28,10 @@ export interface StateMessage {
   baseMaxHp: number;
   baseLevel: number;
   sharedXp: number;
-  wallUnlocked: boolean;
+  wallHp: number;
+  wallMaxHp: number;
+  killedZombies: number;
+  totalZombiesForDay: number;
   player: PlayerSnapshot;
   zombies: ZombieSnapshot[];
 }

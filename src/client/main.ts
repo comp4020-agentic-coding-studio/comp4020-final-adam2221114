@@ -2,7 +2,14 @@ import type { ClientMessage, ControlMessage, GamePhase, StateMessage } from "./p
 import { InputController } from "./input.ts";
 import { interpolateState } from "./interpolate.ts";
 import { LocalPlayerPrediction } from "./prediction.ts";
-import { render, renderCrosshair, renderShotEffects, TRACER_LIFETIME_MS, type ShotEffect } from "./render.ts";
+import {
+  render,
+  renderCrosshair,
+  renderDayProgress,
+  renderShotEffects,
+  TRACER_LIFETIME_MS,
+  type ShotEffect,
+} from "./render.ts";
 
 // Must match src/server/game-state.ts's MAP_SIZE (see protocol.ts's comment
 // on why this is a duplicated constant, not a shared import).
@@ -106,6 +113,7 @@ const updateHud = (state: StateMessage): void => {
   hud.innerHTML = [
     `Day ${state.day}`,
     `Base HP ${state.baseHp} / ${state.baseMaxHp}`,
+    `Wall HP ${state.wallHp} / ${state.wallMaxHp}`,
     `Base Level ${state.baseLevel}`,
     `Shared XP ${state.sharedXp}`,
     `Player HP ${state.player.hp}`,
@@ -165,6 +173,7 @@ const frame = (timestamp: number): void => {
     displayState.player = { ...displayState.player, x: predictedPos.x, y: predictedPos.y };
 
     render(ctx, CANVAS_SIZE, displayState, input.getAimAngle());
+    renderDayProgress(ctx, CANVAS_SIZE, displayState.day, displayState.killedZombies, displayState.totalZombiesForDay);
 
     for (let i = effects.length - 1; i >= 0; i--) {
       if (timestamp - effects[i].firedAt > TRACER_LIFETIME_MS) effects.splice(i, 1);
