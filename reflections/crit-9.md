@@ -1,0 +1,9 @@
+# Crit 9 Reflection
+
+## 1. What was the breakthrough that moved the work forward?
+
+The breakthrough was realising how little of the actual multiplayer behaviour needed inventing. I expected the hard part of "several players at once" to be a new conflict-resolution mechanism — some kind of locking or turn-taking so two people couldn't both build the wall at the same instant. Looking at the existing code, the server was already single-threaded and already re-checked cost and build state at the moment each request arrived, so the second request in a race already failed correctly; it just failed silently. The actual gap wasn't logic, it was feedback — the loser of a race was never told why nothing happened. That reframed the whole decision: instead of designing new coordination machinery, I had to decide what the loser sees, and write down why that's the right amount of honesty for this game rather than a bigger system this project doesn't need.
+
+## 2. What did this work change about who I want to be as a software developer?
+
+This week sharpened the distinction I want to keep making between "the system already behaves correctly" and "the player can tell that it does." I went in assuming a race condition meant a missing guard; it turned out the guard already existed from Crit 8's own discipline about re-validating everything server-side, and the real omission was explaining outcomes to more than one person. That's a habit I want to keep: before adding a new mechanism to solve a multiplayer problem, check whether the single-player version already enforces the rule and the only thing missing is telling someone. It also reinforced staying inside scope under pressure to look impressive — a visible "Alice is building" presence indicator would have looked more polished, but the ADR forced me to argue for the simpler choice in writing, not just default to it.

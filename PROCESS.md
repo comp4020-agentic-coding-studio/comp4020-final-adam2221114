@@ -28,6 +28,48 @@ Each round began with a narrow, explicit scope: a short numbered brief plus a li
 
 **"Turret damage has no effect" was not a logic bug.** During playtesting the turret looked ineffective, but before changing damage values I inspected authoritative zombie HP while the turret fired and confirmed the damage was already being applied correctly. The real problem was presentation: zombies had no visible health feedback, so slow damage looked like no damage at all ([`33c50c0`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/33c50c0)). The correction was to add zombie health bars rather than arbitrarily increasing turret damage. This reinforced a useful rule for the project: diagnose state first, then decide whether the problem is logic or feedback.
 
+## Crit 9: single-player to real multiplayer
+
+Crit 8's server tracked exactly one WebSocket connection and one player —
+deliberate for that week, but it meant the project wasn't actually
+cooperative yet, just a single-player slice with shared-economy code sitting
+unused. For Crit 9 I converted `GameLoop`'s single `Player`/`InputState`
+fields to a map keyed by an ephemeral per-connection id, had `ws-server.ts`
+track every open socket instead of replacing the last one, and broadcast the
+same snapshot (now carrying a `players[]` array) to all of them
+([`0dc526a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/0dc526a)).
+The client picks itself out of that array using a `welcome` message the
+server sends right after connecting, applies prediction only to itself, and
+interpolates everyone else exactly like it already did for zombies
+([`043c541`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/043c541)).
+The session caps at 4 players (README's own "2-4 friends" scope); a 5th
+connection gets a `full` message and is closed.
+
+**Simultaneous build/upgrade/placement races needed a decision, not just
+code.** Once several players can reach the same X-menu, two of them can both
+try to build the wall (or the turret) at once. The existing server-side
+checks already resolve this correctly — Node processes one message at a
+time, and `interact()`/`placeTurret()` already re-read current XP/build
+state at call time, so the loser's request naturally fails against
+already-updated state and shared XP is never double-spent. What Crit 8 never
+needed was telling the loser why nothing happened: a failed check used to
+just log and silently no-op, which is fine with one player and confusing
+with several. I changed those checks to return a reason
+([`0dc526a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/0dc526a)),
+and the server now relays it only to the socket whose request lost the race,
+as a `rejected` message the client shows briefly near the HUD. The full reasoning, including
+the alternatives I considered (client-side locking, a visible request
+queue) and what this costs, is recorded as an ADR at
+[`docs/decisions/0001-simultaneous-build-conflicts.md`](docs/decisions/0001-simultaneous-build-conflicts.md).
+
+I did not add a `players` table to SQLite for this. Per `CLAUDE.md`'s own
+persistence rules, a connection id and a live position are exactly the kind
+of per-frame, per-socket transient state that's explicitly excluded from
+durable storage, and there's still no per-player durable value to store —
+XP stays one shared pool, there are no accounts. A stale comment in
+`persistence.ts` had guessed a players table would be needed here; I
+corrected it instead of adding a table nothing actually required.
+
 ## What was deliberately left out
 
 I deliberately kept the scope smaller than the full final-project idea. There are no multiple turrets, turret repair or refund, extra weapons, drops, multiple zombie types, crafting, public lobby or multiplayer yet. Multiplayer is a later requirement and was not forced into C8 just to increase scope. Some future balance values are intentionally still unset: Wall Level 3 and Turret Levels 2–3 do not have invented costs or stats yet. Leaving those decisions open is preferable to adding arbitrary numbers before there is enough playtesting evidence to justify them.

@@ -29,6 +29,21 @@ This version proves the core loop end-to-end: the player can move, aim and shoot
 
 Realtime multiplayer and concurrency are deliberately deferred to later crits.
 
+## Crit 9 scope
+
+Multiplayer is now real, not deferred: up to 4 players connect at once, see
+each other move and shoot in the same shared world, and spend the same
+shared XP pool — a change one player makes reaches every other open session
+in about a second, with no reload. A 5th connection is turned away rather
+than silently dropping someone already playing.
+
+Two or more players can race to build the same thing (the wall, the turret)
+at once. How that's resolved — and why — is written up as an architecture
+decision record at
+[`docs/decisions/0001-simultaneous-build-conflicts.md`](docs/decisions/0001-simultaneous-build-conflicts.md),
+chosen specifically because shared XP and shared build state are the one
+place this game's players actually contend with each other.
+
 ## What it deliberately leaves out
 
 There are no accounts, public lobbies, crafting systems, inventories, vehicles, weapon attachments, multiple zombie classes, or large maps. Only one turret is currently supported, and later upgrade values are left unset until there is enough playtesting evidence to justify them. The project should become deeper through shared decisions, not through unrelated systems.
@@ -43,5 +58,6 @@ Other parts of “good” cannot be proved by tests alone. Movement must feel re
 
 - The COMP4020 Final Project brief, especially its emphasis on small-scale multiplayer, co-presence, persistence, and defining what “good” means for a specific app.
 - Crit 8 playtesting of this build, which changed movement, wall behaviour, wave progression, and turret feedback.
+- The Crit 9 brief's call for a single documented decision about concurrent use, which produced the simultaneous-build-conflicts ADR linked above.
 
 This list is intentionally short and includes only sources actually used so far.
