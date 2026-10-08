@@ -6,8 +6,10 @@ import {
   BASE_INTERACT_RANGE,
   BASE_POS,
   DAY_VICTORY,
+  MAX_PLAYERS,
   PISTOL_DAMAGE,
   PLAYER_MAX_HP,
+  PLAYER_START_OFFSETS,
   PLAYER_START_POS,
   TURRET_BUILD_RADIUS,
   TURRET_LEVELS,
@@ -28,6 +30,17 @@ import {
   type Vec2,
   type Zombie,
 } from "./game-state.ts";
+
+// Why an action returns a result instead of just logging and no-op'ing (as
+// Crit 8's single-player version did): with several sockets, the loser of a
+// simultaneous build/upgrade/placement race needs to be told so, not just
+// silently ignored — see the Crit 9 ADR on simultaneous build conflicts.
+export type ActionResult = { ok: true } | { ok: false; reason: string };
+const OK: ActionResult = { ok: true };
+function reject(reason: string): ActionResult {
+  console.log(`rejected: ${reason}`);
+  return { ok: false, reason };
+}
 
 // How often a new zombie spawns while this day's quota isn't met yet. Not
 // tied to a day "duration" any more — see the class comment on why that's
@@ -99,8 +112,11 @@ const STARTUP_PHASE: Record<GamePhase, GamePhase> = {
 export class GameLoop {
   readonly #progress: PersistedState;
   readonly #zombies: Zombie[] = [];
-  readonly #player: Player = { pos: { ...PLAYER_START_POS }, hp: PLAYER_MAX_HP };
-  #input: InputState = { up: false, down: false, left: false, right: false, aimAngle: 0 };
+  // Keyed by the ephemeral per-connection id ws-server.ts assigns on
+  // connect/disconnect — no accounts, nothing durable (CLAUDE.md's
+  // persistence rules already exclude per-frame player state).
+  readonly #players = new Map<string, Player>();
+  readonly #inputs = new Map<string, InputState>();
   #phase: GamePhase = "waiting";
   #clockMs = 0; // monotonic; attack/fire-cooldown timestamps for zombies and the turret
   #spawnTimerMs = 0;
@@ -129,6 +145,37 @@ export class GameLoop {
     } else {
       console.log(`startup: phase = "${this.#phase}"`);
     }
+  }
+
+  // Assigns the next free colour slot / start offset to a newly connected
+  // socket. Returns false (and adds nothing) once MAX_PLAYERS are already
+  // in — ws-server.ts turns that into a "full" message and closes the
+  // socket instead of calling this at all past that point.
+  addPlayer(id: string): boolean {
+    if (this.#players.size >= MAX_PLAYERS) return false;
+    const taken = new Set([...this.#players.values()].map((p) => p.colorIndex));
+    let colorIndex = 0;
+    while (taken.has(colorIndex)) colorIndex++;
+    const offset = PLAYER_START_OFFSETS[colorIndex] ?? { x: 0, y: 0 };
+    this.#players.set(id, {
+      id,
+      colorIndex,
+      pos: { x: PLAYER_START_POS.x + offset.x, y: PLAYER_START_POS.y + offset.y },
+      hp: PLAYER_MAX_HP,
+    });
+    this.#inputs.set(id, { up: false, down: false, left: false, right: false, aimAngle: 0 });
+    console.log(`player ${id} joined (slot ${colorIndex}, ${this.#players.size}/${MAX_PLAYERS})`);
+    return true;
+  }
+
+  removePlayer(id: string): void {
+    this.#players.delete(id);
+    this.#inputs.delete(id);
+    console.log(`player ${id} left (${this.#players.size}/${MAX_PLAYERS} remain)`);
+  }
+
+  playerCount(): number {
+    return this.#players.size;
   }
 
   // "start" and "resume" are the same edge: waiting/paused -> running. A
@@ -168,8 +215,11 @@ export class GameLoop {
     this.#spawnTimerMs = 0;
     this.#turretLastFiredAt = -Infinity;
     this.#turretTarget = undefined;
-    this.#player.pos = { ...PLAYER_START_POS };
-    this.#player.hp = PLAYER_MAX_HP;
+    for (const player of this.#players.values()) {
+      const offset = PLAYER_START_OFFSETS[player.colorIndex] ?? { x: 0, y: 0 };
+      player.pos = { x: PLAYER_START_POS.x + offset.x, y: PLAYER_START_POS.y + offset.y };
+      player.hp = PLAYER_MAX_HP;
+    }
     this.#progress.update({ ...DEFAULT_PROGRESS });
     this.#progress.flush();
     this.#totalZombiesForDay = zombiesForDay(DEFAULT_PROGRESS.day);
@@ -177,49 +227,58 @@ export class GameLoop {
     console.log("restart: round reset to defaults, phase -> waiting");
   }
 
-  // Replaces the stored input wholesale — the client sends its full held-key
-  // state and current aim angle on every "input" message, so there's nothing
-  // to merge. Applied on the next tick, not immediately.
-  setInput(input: InputState): void {
-    this.#input = input;
+  // Replaces one player's stored input wholesale — the client sends its full
+  // held-key state and current aim angle on every "input" message, so
+  // there's nothing to merge. Applied on the next tick, not immediately. A
+  // no-op if the id isn't a currently connected player (e.g. a stray message
+  // arriving the instant after disconnect).
+  setInput(id: string, input: InputState): void {
+    if (!this.#inputs.has(id)) return;
+    this.#inputs.set(id, input);
   }
 
-  // One shot, resolved instantly against whatever input is currently stored.
-  // No bullet entity, no queue — this runs synchronously the moment the
-  // "shoot" message arrives, ahead of the next tick if one's close. A no-op
-  // outside "running" — no pre-start plinking, no shooting through a pause.
-  shoot(): void {
+  // One shot, resolved instantly against whatever input that player's socket
+  // last sent. No bullet entity, no queue — this runs synchronously the
+  // moment the "shoot" message arrives, ahead of the next tick if one's
+  // close. A no-op outside "running" — no pre-start plinking, no shooting
+  // through a pause.
+  shoot(id: string): void {
     if (this.#phase !== "running") return;
-    const target = resolveShot(this.#player.pos, this.#input.aimAngle, this.#zombies);
+    const player = this.#players.get(id);
+    const input = this.#inputs.get(id);
+    if (!player || !input) return;
+    const target = resolveShot(player.pos, input.aimAngle, this.#zombies);
     if (!target) {
-      console.log("shoot: no zombie in range/cone");
+      console.log(`shoot(${id}): no zombie in range/cone`);
       return;
     }
     target.hp -= PISTOL_DAMAGE;
-    console.log(`shoot: hit ${target.id}, hp -> ${target.hp}`);
-    if (target.hp <= 0) this.#killZombie(target, "player shot");
+    console.log(`shoot(${id}): hit ${target.id}, hp -> ${target.hp}`);
+    if (target.hp <= 0) this.#killZombie(target, `player ${id} shot`);
   }
 
   // The X-menu's actions. Every check the brief calls for happens here,
   // server-side, regardless of what the client thinks is true: range against
   // the server's own player position, XP against the server's own balance,
-  // and the current building state. A failed check just logs and returns —
-  // no partial effect, no XP spent on a rejected action.
-  interact(action: InteractAction): void {
-    if (this.#phase !== "running") return;
-    if (distance(this.#player.pos, BASE_POS) > BASE_INTERACT_RANGE) {
-      console.log(`interact(${action}): player out of range`);
-      return;
+  // and the current building state. A failed check mutates nothing and
+  // returns why — Crit 9's simultaneous-build-conflicts ADR: whichever
+  // request this (single-threaded) server processes first wins and mutates
+  // state; every request after it re-reads that already-updated state and is
+  // rejected here, with a reason relayed back to just that caller.
+  interact(id: string, action: InteractAction): ActionResult {
+    if (this.#phase !== "running") return reject("round is not running");
+    const player = this.#players.get(id);
+    if (!player) return reject("not a connected player");
+    if (distance(player.pos, BASE_POS) > BASE_INTERACT_RANGE) {
+      return reject("too far from the base");
     }
 
     const progress = this.#progress.get();
     switch (action) {
       case "build_wall":
-        this.#buildWall(progress);
-        break;
+        return this.#buildWall(progress);
       case "upgrade_wall":
-        this.#upgradeWall(progress);
-        break;
+        return this.#upgradeWall(progress);
     }
   }
 
@@ -230,31 +289,28 @@ export class GameLoop {
   // same check interact() uses), "not already built" (one turret this
   // round), cost, and whether (x, y) itself actually falls inside the
   // allowed ring. The client never gets the final say on where it ends up.
-  placeTurret(x: number, y: number): void {
-    if (this.#phase !== "running") return;
-    if (distance(this.#player.pos, BASE_POS) > BASE_INTERACT_RANGE) {
-      console.log("place_turret: player out of range");
-      return;
+  placeTurret(id: string, x: number, y: number): ActionResult {
+    if (this.#phase !== "running") return reject("round is not running");
+    const player = this.#players.get(id);
+    if (!player) return reject("not a connected player");
+    if (distance(player.pos, BASE_POS) > BASE_INTERACT_RANGE) {
+      return reject("too far from the base");
     }
     const progress = this.#progress.get();
     if (progress.turretBuilt) {
-      console.log("place_turret: already built");
-      return;
+      return reject("turret already built");
     }
     const config = TURRET_LEVELS[1];
     if (config.cost === null) {
-      console.log("place_turret: not priced yet");
-      return;
+      return reject("turret not priced yet");
     }
     if (progress.sharedXp < config.cost) {
-      console.log(`place_turret: need ${config.cost} XP, have ${progress.sharedXp}`);
-      return;
+      return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
     }
     const spot: Vec2 = { x, y };
     const d = distance(spot, BASE_POS);
     if (d < BASE_ATTACK_RANGE || d > TURRET_BUILD_RADIUS) {
-      console.log(`place_turret: (${x}, ${y}) is outside the allowed ring (${BASE_ATTACK_RANGE}-${TURRET_BUILD_RADIUS} from base)`);
-      return;
+      return reject(`(${x}, ${y}) is outside the allowed ring (${BASE_ATTACK_RANGE}-${TURRET_BUILD_RADIUS} from base)`);
     }
 
     this.#progress.update({
@@ -268,17 +324,16 @@ export class GameLoop {
     });
     this.#progress.flush();
     console.log(`built turret level 1 at (${x.toFixed(0)}, ${y.toFixed(0)}) (-${config.cost} XP)`);
+    return OK;
   }
 
-  #buildWall(progress: Readonly<Progress>): void {
+  #buildWall(progress: Readonly<Progress>): ActionResult {
     if (progress.wallLevel !== 0) {
-      console.log("build_wall: a wall already stands (upgrade or wait for it to fall, not rebuild)");
-      return;
+      return reject("a wall already stands");
     }
     const config = WALL_LEVELS[1];
     if (progress.sharedXp < config.cost!) {
-      console.log(`build_wall: need ${config.cost} XP, have ${progress.sharedXp}`);
-      return;
+      return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
     }
     this.#progress.update({
       sharedXp: progress.sharedXp - config.cost!,
@@ -288,22 +343,20 @@ export class GameLoop {
     });
     this.#progress.flush();
     console.log(`built wall level 1 (-${config.cost} XP)`);
+    return OK;
   }
 
-  #upgradeWall(progress: Readonly<Progress>): void {
+  #upgradeWall(progress: Readonly<Progress>): ActionResult {
     const nextLevel = progress.wallLevel + 1;
     const config = WALL_LEVELS[nextLevel];
     if (progress.wallLevel === 0) {
-      console.log("upgrade_wall: no wall to upgrade — build one first");
-      return;
+      return reject("no wall to upgrade — build one first");
     }
     if (progress.wallLevel >= WALL_MAX_LEVEL || !config || config.cost === null) {
-      console.log("upgrade_wall: no further priced upgrade available");
-      return;
+      return reject("no further priced upgrade available");
     }
     if (progress.sharedXp < config.cost) {
-      console.log(`upgrade_wall: need ${config.cost} XP, have ${progress.sharedXp}`);
-      return;
+      return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
     }
     this.#progress.update({
       sharedXp: progress.sharedXp - config.cost,
@@ -313,6 +366,7 @@ export class GameLoop {
     });
     this.#progress.flush();
     console.log(`upgraded wall to level ${nextLevel} (-${config.cost} XP)`);
+    return OK;
   }
 
   // Removes a dead zombie, counts the kill towards this day's wave, and
@@ -392,7 +446,13 @@ export class GameLoop {
       turretShotsFired: this.#turretShotsFired,
       killedZombies: this.#killedZombies,
       totalZombiesForDay: this.#totalZombiesForDay,
-      player: { x: this.#player.pos.x, y: this.#player.pos.y, hp: this.#player.hp },
+      players: [...this.#players.values()].map((p) => ({
+        id: p.id,
+        colorIndex: p.colorIndex,
+        x: p.pos.x,
+        y: p.pos.y,
+        hp: p.hp,
+      })),
       zombies: this.#zombies.map((z) => ({ id: z.id, x: z.pos.x, y: z.pos.y, hp: z.hp })),
     };
   }
@@ -413,7 +473,10 @@ export class GameLoop {
     // "paused 时 game loop 停止推进" is simplest as one gate, not a per-system one.
     if (this.#phase !== "running") return;
     this.#clockMs += dtMs;
-    movePlayer(this.#player, this.#input, dtMs);
+    for (const [id, player] of this.#players) {
+      const input = this.#inputs.get(id);
+      if (input) movePlayer(player, input, dtMs);
+    }
     this.#maybeSpawn(dtMs);
     this.#updateZombies();
     this.#updateTurret();

@@ -1,11 +1,14 @@
 import type { Server } from "node:http";
+import { randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import type { GameLoop } from "./game-loop.ts";
 import type { ClientMessage } from "./protocol.ts";
 
-// Step 3 added the broadcast; Step 4 adds the other direction (input/shoot).
-// Still one logical connection at a time — no player id, no room, no
-// broadcast-to-many, no reconnection handling, all deliberately crit 9's job.
+// Crit 9: up to MAX_PLAYERS simultaneous connections, each tracked by an
+// ephemeral server-assigned id (no accounts, nothing durable — see
+// game-state.ts's MAX_PLAYERS and the Crit 9 ADR on simultaneous actions).
+// Every open socket gets the same broadcast; each client finds itself in the
+// snapshot's players[] by the id its own "welcome" message carried.
 //
 // 20Hz, matching the game loop's own tick rate — this timer only ever reads
 // gameLoop.getSnapshot() (no game logic lives here), so running it at the
@@ -65,15 +68,19 @@ function parseClientMessage(data: unknown): ClientMessage | undefined {
 
 export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): void {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
-  let current: WebSocket | null = null;
+  const sockets = new Map<WebSocket, string>();
 
   wss.on("connection", (socket) => {
-    if (current && current.readyState === WebSocket.OPEN) {
-      console.log("ws: new connection replacing the existing one");
-      current.close();
+    const id = randomUUID();
+    if (!gameLoop.addPlayer(id)) {
+      console.log("ws: rejected connection — game is full");
+      socket.send(JSON.stringify({ type: "full" }));
+      socket.close();
+      return;
     }
-    current = socket;
-    console.log("ws: client connected");
+    sockets.set(socket, id);
+    socket.send(JSON.stringify({ type: "welcome", playerId: id }));
+    console.log(`ws: client connected as ${id} (${gameLoop.playerCount()} connected)`);
 
     socket.on("message", (data) => {
       const msg = parseClientMessage(data);
@@ -83,10 +90,10 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
       }
       switch (msg.type) {
         case "input":
-          gameLoop.setInput({ ...msg.move, aimAngle: msg.aimAngle });
+          gameLoop.setInput(id, { ...msg.move, aimAngle: msg.aimAngle });
           break;
         case "shoot":
-          gameLoop.shoot();
+          gameLoop.shoot(id);
           break;
         case "start":
         case "resume":
@@ -98,40 +105,46 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
         case "restart":
           gameLoop.restart();
           break;
-        case "interact":
-          gameLoop.interact(msg.action);
+        case "interact": {
+          const result = gameLoop.interact(id, msg.action);
+          if (!result.ok) {
+            socket.send(JSON.stringify({ type: "rejected", action: msg.action, reason: result.reason }));
+          }
           break;
-        case "place_turret":
-          gameLoop.placeTurret(msg.x, msg.y);
+        }
+        case "place_turret": {
+          const result = gameLoop.placeTurret(id, msg.x, msg.y);
+          if (!result.ok) {
+            socket.send(JSON.stringify({ type: "rejected", action: "place_turret", reason: result.reason }));
+          }
           break;
+        }
       }
     });
 
     socket.on("close", () => {
-      // Only pause when this socket was still the one actually being tracked
-      // — i.e. this really was the last/active connection going away (a tab
-      // closing, a network drop, or a plain refresh's old socket closing
-      // before the new one opens). If `current` has already moved on to a
-      // newer connection by the time this fires, a slow-to-arrive close event
-      // for an already-superseded socket must NOT pause the session that
-      // replaced it. gameLoop.pause() is a no-op unless phase is currently
+      sockets.delete(socket);
+      gameLoop.removePlayer(id);
+      // Only pause once the LAST player has left — i.e. the shared session
+      // has genuinely gone empty, not just lost one of several players. A
+      // single remaining connection keeps the round running for whoever's
+      // still there. gameLoop.pause() is a no-op unless phase is currently
       // "running", so it's always safe to call whenever this check passes.
-      // There is no auto-resume anywhere: the next connection (even the
-      // refreshed page itself) just sees "paused" and the player has to click
-      // Resume themselves.
-      if (current === socket) {
-        current = null;
+      // There is no auto-resume anywhere: the next connection just sees
+      // "paused" and a player has to click Resume themselves.
+      if (gameLoop.playerCount() === 0) {
         gameLoop.pause();
         console.log("ws: last client disconnected — game paused if it was running");
       } else {
-        console.log("ws: a superseded connection closed (already replaced) — not pausing");
+        console.log(`ws: client ${id} disconnected (${gameLoop.playerCount()} remain)`);
       }
     });
   });
 
   setInterval(() => {
-    if (current?.readyState === WebSocket.OPEN) {
-      current.send(JSON.stringify(gameLoop.getSnapshot()));
+    const snapshot = JSON.stringify(gameLoop.getSnapshot());
+    for (const socket of sockets.keys()) {
+      if (socket.readyState === WebSocket.OPEN) socket.send(snapshot);
     }
   }, BROADCAST_INTERVAL_MS);
 }

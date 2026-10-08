@@ -98,8 +98,12 @@ const MIGRATIONS: Array<{ column: string; ddl: string }> = [
   { column: "phase", ddl: "ALTER TABLE game_state ADD COLUMN phase TEXT NOT NULL DEFAULT 'waiting'" },
 ];
 
-// One table, one row (id = 1). Crit 9's players and crit 10's event log are
-// separate tables added when those weeks actually need them — not now.
+// One table, one row (id = 1). Crit 9 added multiplayer without adding a
+// players table here: connection id, position and colour slot are exactly
+// the per-frame/per-socket transient state CLAUDE.md's persistence rules
+// already exclude, and there's still no per-player durable value (XP stays
+// one shared pool, no accounts). Crit 10's event log is a separate table
+// added when that week actually needs it — not now.
 export function openDatabase(dir: string = defaultDataDir()): Database.Database {
   mkdirSync(dir, { recursive: true });
   const db = new Database(path.join(dir, "game.db"));

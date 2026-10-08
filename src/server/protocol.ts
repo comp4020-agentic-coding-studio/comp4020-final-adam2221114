@@ -2,6 +2,8 @@
 // definition instead of a hand-copied second one on each side.
 
 export interface PlayerSnapshot {
+  id: string;
+  colorIndex: number;
   x: number;
   y: number;
   hp: number;
@@ -44,8 +46,31 @@ export interface StateMessage {
   // these, nothing computed locally.
   killedZombies: number;
   totalZombiesForDay: number;
-  player: PlayerSnapshot;
+  players: PlayerSnapshot[];
   zombies: ZombieSnapshot[];
+}
+
+// Sent once, right after a connection is accepted, so the client knows which
+// entry in players[] is itself (for prediction/reconciliation vs. plain
+// interpolation of everyone else).
+export interface WelcomeMessage {
+  type: "welcome";
+  playerId: string;
+}
+
+// Sent instead of "welcome" (then the socket is closed) when MAX_PLAYERS are
+// already connected.
+export interface FullMessage {
+  type: "full";
+}
+
+// Sent only to the socket whose interact/place_turret request was rejected —
+// the Crit 9 ADR's "make the loser's rejection visible" behaviour, instead of
+// Crit 8's silent no-op.
+export interface RejectedMessage {
+  type: "rejected";
+  action: InteractAction | "place_turret";
+  reason: string;
 }
 
 // Client -> server. input carries the full held-key state and the current

@@ -17,9 +17,22 @@ export interface Zombie {
 }
 
 export interface Player {
+  id: string;
+  colorIndex: number;
   pos: Vec2;
   hp: number; // not yet lowered by anything — zombies don't hurt the player this step
 }
+
+// Crit 9: up to 4 simultaneous no-login players, matching README's "2-4
+// friends" scope. Each gets the next free colour slot / start offset below,
+// so they don't spawn stacked on top of each other.
+export const MAX_PLAYERS = 4;
+export const PLAYER_START_OFFSETS: Vec2[] = [
+  { x: 0, y: 0 },
+  { x: 30, y: 0 },
+  { x: -30, y: 0 },
+  { x: 0, y: 30 },
+];
 
 // What WASD + the held keys look like once decoded. aimAngle is radians,
 // atan2 convention (0 = facing +x), set by the client from its own mouse
