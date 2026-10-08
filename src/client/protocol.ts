@@ -6,6 +6,8 @@
 // directory would need its own rootDir/outDir story on both sides).
 
 export interface PlayerSnapshot {
+  id: string;
+  colorIndex: number;
   x: number;
   y: number;
   hp: number;
@@ -40,9 +42,26 @@ export interface StateMessage {
   turretShotsFired: number;
   killedZombies: number;
   totalZombiesForDay: number;
-  player: PlayerSnapshot;
+  players: PlayerSnapshot[];
   zombies: ZombieSnapshot[];
 }
+
+export interface WelcomeMessage {
+  type: "welcome";
+  playerId: string;
+}
+
+export interface FullMessage {
+  type: "full";
+}
+
+export interface RejectedMessage {
+  type: "rejected";
+  action: InteractAction | "place_turret";
+  reason: string;
+}
+
+export type ServerMessage = StateMessage | WelcomeMessage | FullMessage | RejectedMessage;
 
 export interface InputMessage {
   type: "input";

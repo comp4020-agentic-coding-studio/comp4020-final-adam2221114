@@ -30,13 +30,20 @@ export function interpolateState(
     return { ...z, x: lerp(p.x, z.x, t), y: lerp(p.y, z.y, t) };
   });
 
+  // Same treatment for every player in the shared world — the local one gets
+  // overwritten again by prediction.getDisplayPos() right after this call
+  // (main.ts), so interpolating it here too is harmless, not wasted: it just
+  // means prediction's own value always wins last.
+  const prevPlayers = new Map(prev.players.map((p) => [p.id, p]));
+  const players = curr.players.map((p) => {
+    const q = prevPlayers.get(p.id);
+    if (!q) return p; // just joined this tick — nothing to interpolate from, snap in
+    return { ...p, x: lerp(q.x, p.x, t), y: lerp(q.y, p.y, t) };
+  });
+
   return {
     ...curr,
-    player: {
-      ...curr.player,
-      x: lerp(prev.player.x, curr.player.x, t),
-      y: lerp(prev.player.y, curr.player.y, t),
-    },
+    players,
     zombies,
   };
 }

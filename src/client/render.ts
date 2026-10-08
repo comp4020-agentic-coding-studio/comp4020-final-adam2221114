@@ -17,6 +17,14 @@ const WALL_VISUALS: Record<number, { color: string; lineWidth: number; spikes: b
   3: { color: "#c9a0ff", lineWidth: 6, spikes: true },
 };
 
+// One colour per MAX_PLAYERS slot (src/server/game-state.ts), used to tell
+// remote players apart at a glance. The local player always renders in its
+// own fixed colour (below) regardless of slot, since "which one is me" is
+// already unambiguous (the oriented body + aim line), and keeping it
+// constant avoids it visually changing colour on reconnect.
+const REMOTE_PLAYER_COLORS = ["#ff6666", "#66b2ff", "#66ff99", "#ffcc66"];
+const LOCAL_PLAYER_COLOR = "#ffcc00";
+
 // Plain shapes and colour only — no sprites, no animation, no particles.
 // Renders exactly what the server sent; never infers or predicts anything.
 export function render(
@@ -24,6 +32,7 @@ export function render(
   canvasSize: number,
   state: StateMessage,
   aimAngle: number,
+  myPlayerId: string | undefined,
 ): void {
   const scale = canvasSize / WORLD_SIZE;
   const toScreen = (x: number, y: number) => ({ x: x * scale, y: y * scale });
@@ -140,34 +149,46 @@ export function render(
     ctx.fillRect(barX, barY, barWidth * fraction, barHeight);
   }
 
-  // Player: a simple oriented body/head/gun shape, not a bare dot — rotated
-  // to face aimAngle. Flat shapes and colour only, same as everything else
-  // here; no sprite sheet, no animation frames.
-  const player = toScreen(state.player.x, state.player.y);
-  ctx.save();
-  ctx.translate(player.x, player.y);
-  ctx.rotate(aimAngle);
-  ctx.fillStyle = "#ffcc00";
-  ctx.beginPath();
-  ctx.ellipse(0, 0, 11, 8, 0, 0, Math.PI * 2); // body, facing +x before rotation
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(6, 0, 5, 0, Math.PI * 2); // head, offset toward the facing direction
-  ctx.fill();
-  ctx.fillStyle = "#333";
-  ctx.fillRect(8, -2, 15, 4); // gun, extending further forward
-  ctx.restore();
+  // Players, self included: an oriented body/head/gun shape, not a bare dot.
+  // The local player (myPlayerId) renders at the client's own live aimAngle
+  // and gets the aim line; every other player in the shared world renders at
+  // whatever position the server last reported, facing its own velocity-free
+  // default (no aim angle travels over the wire for remote players — nothing
+  // in CLAUDE.md's UI rules asks for that, and drawing a plain oriented body
+  // is already enough to tell players apart by colour). Flat shapes and
+  // colour only, same as everything else here; no sprite sheet.
+  for (const p of state.players) {
+    const isSelf = p.id === myPlayerId;
+    const screen = toScreen(p.x, p.y);
+    const angle = isSelf ? aimAngle : 0;
+    ctx.save();
+    ctx.translate(screen.x, screen.y);
+    ctx.rotate(angle);
+    ctx.fillStyle = isSelf ? LOCAL_PLAYER_COLOR : REMOTE_PLAYER_COLORS[p.colorIndex % REMOTE_PLAYER_COLORS.length];
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 11, 8, 0, 0, Math.PI * 2); // body, facing +x before rotation
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(6, 0, 5, 0, Math.PI * 2); // head, offset toward the facing direction
+    ctx.fill();
+    ctx.fillStyle = "#333";
+    ctx.fillRect(8, -2, 15, 4); // gun, extending further forward
+    ctx.restore();
 
-  // Aim direction — a short line from the player along the client's own
-  // current aim angle. A UI cue for what the next shot would target, not a
-  // game decision: the server resolves the actual hit independently.
-  const aimLength = 30;
-  ctx.strokeStyle = "#ffcc00";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(player.x, player.y);
-  ctx.lineTo(player.x + Math.cos(aimAngle) * aimLength, player.y + Math.sin(aimAngle) * aimLength);
-  ctx.stroke();
+    // Aim direction — only drawn for the local player: a UI cue for what the
+    // client's own next shot would target, not a game decision (the server
+    // resolves the actual hit independently). There's no equivalent data for
+    // remote players to draw this from.
+    if (isSelf) {
+      const aimLength = 30;
+      ctx.strokeStyle = LOCAL_PLAYER_COLOR;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(screen.x, screen.y);
+      ctx.lineTo(screen.x + Math.cos(aimAngle) * aimLength, screen.y + Math.sin(aimAngle) * aimLength);
+      ctx.stroke();
+    }
+  }
 }
 
 // Day + wave progress, top-centre of the canvas. Pure display of what the

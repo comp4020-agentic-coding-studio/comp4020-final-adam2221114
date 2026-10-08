@@ -7,7 +7,7 @@ import {
   WALL_LEVELS,
   WALL_MAX_LEVEL,
 } from "./defense-config.ts";
-import type { ClientMessage, ControlMessage, GamePhase, InteractAction, StateMessage } from "./protocol.ts";
+import type { ClientMessage, ControlMessage, GamePhase, InteractAction, ServerMessage, StateMessage } from "./protocol.ts";
 import { InputController } from "./input.ts";
 import { interpolateState } from "./interpolate.ts";
 import { LocalPlayerPrediction } from "./prediction.ts";
@@ -62,6 +62,21 @@ let previousState: StateMessage | undefined;
 let previousReceivedAt = 0;
 let currentState: StateMessage | undefined;
 let currentReceivedAt = 0;
+
+// Set once, from the "welcome" message the server sends right after
+// connecting — every snapshot's players[] is the whole shared world, and
+// this is the one piece of information the client needs to tell which entry
+// is itself (for prediction/reconciliation and for how it's drawn).
+let myPlayerId: string | undefined;
+
+const findSelf = (state: StateMessage): StateMessage["players"][number] | undefined =>
+  state.players.find((p) => p.id === myPlayerId);
+
+// Last rejection, shown briefly near the HUD (Crit 9 ADR: the loser of a
+// simultaneous build/upgrade/placement race gets told why, instead of
+// Crit 8's silent no-op). Cleared a couple of seconds after it arrives.
+let rejectionNotice: string | undefined;
+let rejectionTimer: ReturnType<typeof setTimeout> | undefined;
 
 // Client-side prediction for the local player only: advances every
 // animation frame from locally-held input, never waiting for a snapshot.
@@ -258,11 +273,32 @@ canvas.addEventListener(
 );
 
 socket.addEventListener("message", (ev) => {
+  const msg = JSON.parse(ev.data) as ServerMessage;
+
+  if (msg.type === "welcome") {
+    myPlayerId = msg.playerId;
+    return;
+  }
+  if (msg.type === "full") {
+    setConnStatus("disconnected");
+    conn.textContent = "game is full (max 4 players)";
+    return;
+  }
+  if (msg.type === "rejected") {
+    rejectionNotice = `${msg.action.replace(/_/g, " ")}: ${msg.reason}`;
+    clearTimeout(rejectionTimer);
+    rejectionTimer = setTimeout(() => {
+      rejectionNotice = undefined;
+    }, 2500);
+    return;
+  }
+
   previousState = currentState;
   previousReceivedAt = currentReceivedAt;
-  currentState = JSON.parse(ev.data) as StateMessage;
+  currentState = msg;
   currentReceivedAt = performance.now();
-  prediction.reconcile(currentState.player, currentReceivedAt);
+  const self = findSelf(currentState);
+  if (self) prediction.reconcile(self, currentReceivedAt);
 
   // A new turret shot this tick — give it the same tracer/muzzle-flash the
   // player's own shots get. Only fires with a real target, same as the
@@ -289,13 +325,16 @@ const updateHud = (state: StateMessage): void => {
   const turretLine = state.turretBuilt
     ? `Turret Lv${state.turretLevel} HP ${state.turretHp} / ${state.turretMaxHp}`
     : "Turret: not built";
+  const self = findSelf(state);
   hud.innerHTML = [
     `Day ${state.day}`,
     `Base HP ${state.baseHp} / ${state.baseMaxHp}`,
     wallLine,
     turretLine,
     `Shared XP: ${state.sharedXp}`,
-    `Player HP ${state.player.hp}`,
+    `Player HP ${self?.hp ?? "-"}`,
+    `Players: ${state.players.length} / 4`,
+    ...(rejectionNotice ? [`<span class="rejected">${rejectionNotice}</span>`] : []),
   ].join("<br>");
 };
 
@@ -353,9 +392,11 @@ const frame = (timestamp: number): void => {
 
     const displayState = interpolateState(previousState, previousReceivedAt, currentState, currentReceivedAt, timestamp);
     const predictedPos = prediction.getDisplayPos(predictionNow);
-    displayState.player = { ...displayState.player, x: predictedPos.x, y: predictedPos.y };
+    displayState.players = displayState.players.map((p) =>
+      p.id === myPlayerId ? { ...p, x: predictedPos.x, y: predictedPos.y } : p,
+    );
 
-    render(ctx, CANVAS_SIZE, displayState, input.getAimAngle());
+    render(ctx, CANVAS_SIZE, displayState, input.getAimAngle(), myPlayerId);
     renderDayProgress(ctx, CANVAS_SIZE, displayState.day, displayState.killedZombies, displayState.totalZombiesForDay);
 
     for (let i = effects.length - 1; i >= 0; i--) {
