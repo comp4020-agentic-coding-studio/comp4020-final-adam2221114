@@ -23,6 +23,7 @@ const cwd = process.cwd();
 
 const clientIndex = readFileSync(path.join(cwd, "src", "client", "index.html"), "utf8");
 const distClientDir = path.join(cwd, "dist", "client");
+const spritesDir = path.join(cwd, "src", "client", "sprites");
 
 // Reads fresh each request (like renderReadme()) rather than caching, so a
 // rebuild (`pnpm run build`) is visible without restarting the server. Only
@@ -41,11 +42,30 @@ function serveClientScript(url: string, res: import("node:http").ServerResponse)
   }
 }
 
+// Sprite/tileset PNGs under /sprites/ — served straight from source (same
+// "read fresh from src/client" approach as index.html above, not a dist/
+// build artifact), scoped to *.png under spritesDir only. The curated
+// originals live in src/client/sprites/; the full CraftPix pack stays in
+// assets/ untouched (see PROCESS.md's visual-redesign entry for sourcing).
+function serveSprite(url: string, res: import("node:http").ServerResponse): boolean {
+  if (!url.startsWith("/sprites/") || !url.endsWith(".png")) return false;
+  const resolved = path.resolve(path.join(cwd, "src", "client", url));
+  if (!resolved.startsWith(spritesDir + path.sep)) return false; // no path traversal
+  try {
+    const png = readFileSync(resolved);
+    res.writeHead(200, { "content-type": "image/png", "cache-control": "public, max-age=3600" });
+    res.end(png);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const db = openDatabase();
 const progress = new PersistedState(db);
 console.log("loaded progress:", progress.get());
 
-const gameLoop = new GameLoop(progress);
+const gameLoop = new GameLoop(progress, db);
 gameLoop.start();
 
 const server = createServer((req, res) => {
@@ -64,6 +84,7 @@ const server = createServer((req, res) => {
   }
 
   if (serveClientScript(url, res)) return;
+  if (serveSprite(url, res)) return;
 
   res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
   res.end("not found");

@@ -11,7 +11,7 @@ export class InputController {
   readonly #send: (msg: ClientMessage) => void;
   readonly #getPlayerPos: () => { x: number; y: number };
   readonly #onShoot: (origin: { x: number; y: number }, aimAngle: number) => void;
-  readonly #keys = { up: false, down: false, left: false, right: false };
+  readonly #keys = { up: false, down: false, left: false, right: false, reviving: false };
   #mouseWorldPos: { x: number; y: number } | undefined;
 
   constructor(opts: {
@@ -52,7 +52,14 @@ export class InputController {
   }
 
   getMoveState(): { up: boolean; down: boolean; left: boolean; right: boolean } {
-    return { ...this.#keys };
+    return { up: this.#keys.up, down: this.#keys.down, left: this.#keys.left, right: this.#keys.right };
+  }
+
+  // Whether E is currently held — the continuous hold-to-revive input,
+  // polled the same way the move keys are rather than sent as a one-shot
+  // message, since "hold for 3 seconds" is exactly the move keys' shape.
+  isReviving(): boolean {
+    return this.#keys.reviving;
   }
 
   // undefined until the first mousemove — nothing to draw a crosshair at yet.
@@ -78,6 +85,9 @@ export class InputController {
       case "arrowright":
         this.#keys.right = down;
         break;
+      case "e":
+        this.#keys.reviving = down;
+        break;
     }
   }
 
@@ -99,6 +109,6 @@ export class InputController {
   }
 
   #sendInput(): void {
-    this.#send({ type: "input", move: this.getMoveState(), aimAngle: this.getAimAngle() });
+    this.#send({ type: "input", move: this.getMoveState(), aimAngle: this.getAimAngle(), reviving: this.#keys.reviving });
   }
 }

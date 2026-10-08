@@ -1,40 +1,65 @@
+import type Database from "better-sqlite3";
 import type { PersistedState } from "./persisted-state.ts";
-import { DEFAULT_PROGRESS, type Progress } from "./persistence.ts";
-import type { GamePhase, InteractAction, StateMessage } from "./protocol.ts";
+import { DEFAULT_PROGRESS, loadPlayerRecord, savePlayerRecord, type PlayerRecord, type Progress, type TurretRecord } from "./persistence.ts";
+import type { GamePhase, InteractAction, StateMessage, TurretAction } from "./protocol.ts";
 import {
   BASE_ATTACK_RANGE,
   BASE_INTERACT_RANGE,
   BASE_POS,
+  DAILY_HEAL_AMOUNT,
+  DAY_INTRO_MS,
   DAY_VICTORY,
+  DOWNED_DURATION_MS,
+  FIELD_REVIVE_HP,
+  FIELD_REVIVE_INVULN_MS,
   MAX_PLAYERS,
+  MAX_TURRETS,
+  MEDKIT_COST,
+  MEDKIT_DURATION_MS,
+  MEDKIT_HEAL,
+  MEDKIT_MAX,
+  MELEE_RANGE,
+  PAID_RESURRECT_HP,
+  PAID_RESURRECT_INVULN_MS,
   PISTOL_DAMAGE,
   PLAYER_MAX_HP,
   PLAYER_START_OFFSETS,
   PLAYER_START_POS,
+  REVIVE_HOLD_MS,
+  REVIVE_RANGE,
   TURRET_BUILD_RADIUS,
+  TURRET_INTERACT_RANGE,
   TURRET_LEVELS,
+  TURRET_MAX_LEVEL,
+  TURRET_MIN_SEPARATION,
   WALL_LEVELS,
   WALL_MAX_LEVEL,
+  WALL_PULSE_RADIUS,
   XP_PER_KILL,
-  ZOMBIE_ATTACK_DAMAGE,
-  ZOMBIE_ATTACK_INTERVAL_MS,
+  ZOMBIE_TYPES,
+  advanceZombie,
+  buildSpawnQueue,
   distance,
-  findNearestZombieInRange,
+  findNearestZombiesInRange,
   movePlayer,
   resolveShot,
+  resurrectCostForDay,
+  spawnIntervalForDay,
   spawnZombie,
-  stepZombie,
-  zombiesForDay,
+  totalZombiesForDay,
   type InputState,
   type Player,
   type Vec2,
   type Zombie,
+  type ZombieType,
 } from "./game-state.ts";
 
-// Why an action returns a result instead of just logging and no-op'ing (as
-// Crit 8's single-player version did): with several sockets, the loser of a
-// simultaneous build/upgrade/placement race needs to be told so, not just
-// silently ignored — see the Crit 9 ADR on simultaneous build conflicts.
+// Why an action returns a result instead of just logging and no-op'ing: with
+// several sockets, the loser of a simultaneous race (build/upgrade/repair/
+// placement/medkit/resurrection — anything that spends shared XP or touches
+// shared build state) needs to be told so, not just silently ignored. See
+// the Crit 9 ADR on simultaneous build conflicts — this generalizes that
+// same mechanism to every action Crit 10 adds.
 export type ActionResult = { ok: true } | { ok: false; reason: string };
 const OK: ActionResult = { ok: true };
 function reject(reason: string): ActionResult {
@@ -42,26 +67,12 @@ function reject(reason: string): ActionResult {
   return { ok: false, reason };
 }
 
-// How often a new zombie spawns while this day's quota isn't met yet. Not
-// tied to a day "duration" any more — see the class comment on why that's
-// gone. A placeholder pace, not the balance pass.
-const SPAWN_INTERVAL_MS = 2000;
-
-// 20Hz: fine-grained enough that client-side prediction rarely needs more
-// than a tiny, barely-visible correction. Nothing in the tick body changed —
-// every interval here (attack cadence, day duration, spawn spacing) is
-// expressed in absolute ms, so running it 4x more often doesn't change any
-// gameplay rule, just the granularity it's checked at.
-const TICK_MS = 50;
+const TICK_MS = 50; // 20Hz
 
 // What phase a process boots into, given what was last persisted. A stored
 // "running" never means "really resume" — it only ever means the previous
 // process stopped (crash, SIGKILL, `flyctl machine restart`, a redeploy)
-// while a round was live, with no chance to pause cleanly first. Mapping it
-// to "paused" here, unconditionally, on every boot, is what makes correctness
-// NOT depend on SIGTERM/shutdown having run: even a hard kill leaves the game
-// safe to resume manually next time, because the boot-time read is the one
-// place that decides, not whatever happened (or didn't) on the way out.
+// while a round was live, with no chance to pause cleanly first.
 const STARTUP_PHASE: Record<GamePhase, GamePhase> = {
   waiting: "waiting",
   paused: "paused",
@@ -70,130 +81,180 @@ const STARTUP_PHASE: Record<GamePhase, GamePhase> = {
   victory: "victory",
 };
 
-// Server-authoritative, in-memory tick loop. Zombie/player positions, the
-// turret's current target and its fire timer live only here —
-// day/baseHp/sharedXp/wallLevel/wallHp/turret* are the only things that go
-// through PersistedState, and only day-change, a build/upgrade, and wall/
-// base destruction flush directly; everything else goes through the
-// dirty-state path.
-//
-// Day progression is wave-clear, not a timer: a day ends only once every one
-// of its zombies has spawned AND been killed (#checkWaveComplete, called
-// right after a kill — spawning alone can never make that condition newly
-// true, so there's nothing to check on the tick's own schedule). There's no
-// more "day duration"; #spawnTimerMs just paces how often a new zombie joins
-// the day's remaining quota.
-//
-// Defences are now something the player actively buys with shared XP via
-// interact() (build/upgrade wall) or placeTurret() (the turret, which also
-// needs a position) — the X-menu — not something that appears on its own:
-// there is no more auto-wall-at-100-XP. The wall physically blocks zombies
-// while it has HP (stepZombie stops them at the wall's ring instead of the
-// base's); losing it drops wallLevel back to 0, so a rebuild always starts
-// over at level 1 regardless of what it was before. The turret goes
-// wherever the player placed it (turretX/turretY) — one per round, picked
-// once, no moving it afterwards.
-//
-// Playability polish: a round phase gates the tick (waiting/paused/game_over/
-// victory all freeze zombies, spawning, day and the player — only "running"
-// ticks). restart() is the only thing that resets day/baseHp/sharedXp/
-// wallLevel/turret* themselves — every other phase transition leaves them
-// exactly as persisted.
-//
-// Disconnect-pause fix: phase IS persisted now (reversing the earlier
-// decision), so the game can be paused the instant the last client
-// disconnects and have that stick even through a crash or a machine restart.
-// The constructor never trusts a stored phase as-is, though — see
-// STARTUP_PHASE above. Every transition below (play/pause/restart, and the
-// game_over/victory edges) updates and flushes progress.phase immediately,
-// the same "worth not losing" treatment a build or a day change already
-// gets, so correctness never depends on the periodic save timer or on
-// SIGTERM having a chance to run.
+interface TurretRuntime {
+  lastFiredAt: number;
+  target: Zombie | undefined;
+  shotsFired: number;
+}
+
+interface ReviveState {
+  targetId: string;
+  startedAt: number;
+}
+
+// What "the start of this day" looked like, captured once per day
+// (#beginNewDay) and restored by retryDay() after a Game Over. Deliberately
+// in-memory only, not SQLite — see retryDay()'s own comment, and this
+// class's constructor comment, on what that costs across a process restart.
+interface DaySnapshot {
+  sharedXp: number;
+  baseHp: number;
+  wallLevel: number;
+  wallHp: number;
+  wallMaxHp: number;
+  turrets: TurretRecord[];
+  players: Map<string, { hp: number; status: Player["status"]; medkits: number }>;
+}
+
+// Server-authoritative, in-memory tick loop. Player/zombie positions, turret
+// fire-cooldowns/targets, revive-hold progress, and this day's spawn queue
+// live only here; day/baseHp/sharedXp/wallLevel/wallHp/turrets go through
+// PersistedState (periodic dirty-flush, with an explicit flush() for
+// "worth not losing" moments — build/upgrade/repair/destroy, day change).
+// Player identity (hp/status/medkits) is written straight through
+// PersistedPlayers' write-through functions instead — see persistence.ts's
+// file comment on why that's a different persistence shape from Progress.
 export class GameLoop {
   readonly #progress: PersistedState;
+  readonly #db: Database.Database;
   readonly #zombies: Zombie[] = [];
-  // Keyed by the ephemeral per-connection id ws-server.ts assigns on
-  // connect/disconnect — no accounts, nothing durable (CLAUDE.md's
-  // persistence rules already exclude per-frame player state).
+  // Keyed by the browser-persistent id the client supplies on connect
+  // (ws-server.ts) — no accounts, but now a stable identity across
+  // reconnects, unlike Crit 9's purely ephemeral per-socket id.
   readonly #players = new Map<string, Player>();
   readonly #inputs = new Map<string, InputState>();
+  readonly #turretRuntime = new Map<string, TurretRuntime>();
+  readonly #reviveProgress = new Map<string, ReviveState>();
   #phase: GamePhase = "waiting";
-  #clockMs = 0; // monotonic; attack/fire-cooldown timestamps for zombies and the turret
+  #clockMs = 0; // monotonic; every cooldown/timer in this class is measured against this, never wall-clock
   #spawnTimerMs = 0;
+  #spawnIntervalMs = 2000;
+  #spawnQueue: ZombieType[] = [];
   #spawnedZombies = 0;
   #killedZombies = 0;
   #totalZombiesForDay: number;
-  // Turret firing state — not persisted (GameLoop's own comment explains
-  // why): both reset to "idle" on every boot, which is fine, since they're
-  // only ever a few seconds of cooldown, not progress worth keeping.
-  #turretLastFiredAt = -Infinity;
-  #turretTarget: Zombie | undefined;
-  #turretShotsFired = 0;
+  #dayIntroUntilMs = 0;
+  #wallPulseLastFiredAt = -Infinity;
+  #daySnapshot: DaySnapshot;
   #timer: ReturnType<typeof setInterval> | undefined;
+  #turretIdCounter = 0;
 
-  constructor(progress: PersistedState) {
+  constructor(progress: PersistedState, db: Database.Database) {
     this.#progress = progress;
+    this.#db = db;
     const stored = progress.get();
-    this.#totalZombiesForDay = zombiesForDay(stored.day);
+    this.#totalZombiesForDay = totalZombiesForDay(stored.day);
     this.#phase = STARTUP_PHASE[stored.phase];
     if (this.#phase !== stored.phase) {
-      // Correct the stored value on disk immediately, not just in memory —
-      // so a second crash before any real transition still boots safely.
       this.#progress.update({ phase: this.#phase });
       this.#progress.flush();
       console.log(`startup: stored phase was "${stored.phase}", starting as "${this.#phase}" instead`);
     } else {
       console.log(`startup: phase = "${this.#phase}"`);
     }
+    for (const t of stored.turrets) {
+      this.#turretRuntime.set(t.id, { lastFiredAt: -Infinity, target: undefined, shotsFired: 0 });
+    }
+    // Best available "day start" to retry back to across a restart: the
+    // state as it was actually loaded. Real per-player day-start values
+    // aren't known yet (players reconnect after this constructor runs), so
+    // retryDay() falls back to "keep whatever medkits they currently have"
+    // for anyone not in this map — see its own comment.
+    this.#daySnapshot = {
+      sharedXp: stored.sharedXp,
+      baseHp: stored.baseHp,
+      wallLevel: stored.wallLevel,
+      wallHp: stored.wallHp,
+      wallMaxHp: stored.wallMaxHp,
+      turrets: stored.turrets.map((t) => ({ ...t })),
+      players: new Map(),
+    };
+    if (this.#phase === "paused") {
+      // A round was mid-day when the process last stopped. Rebuild this
+      // day's spawn queue so spawning can resume once a player clicks
+      // Resume — deliberately #resetDayCombatState, NOT #beginNewDay: that
+      // would re-grant the daily heal and overwrite the real day-start
+      // snapshot above on every single restart, which the brief explicitly
+      // says must never be exploitable via reconnecting or retrying.
+      this.#resetDayCombatState(stored.day);
+    }
   }
 
-  // Assigns the next free colour slot / start offset to a newly connected
-  // socket. Returns false (and adds nothing) once MAX_PLAYERS are already
-  // in — ws-server.ts turns that into a "full" message and closes the
-  // socket instead of calling this at all past that point.
+  // Loads (or creates) this identity's durable record and adds it to the
+  // live world. Returns false (adds nothing) once MAX_PLAYERS are already
+  // connected — ws-server.ts turns that into a "full" message.
   addPlayer(id: string): boolean {
     if (this.#players.size >= MAX_PLAYERS) return false;
     const taken = new Set([...this.#players.values()].map((p) => p.colorIndex));
     let colorIndex = 0;
     while (taken.has(colorIndex)) colorIndex++;
     const offset = PLAYER_START_OFFSETS[colorIndex] ?? { x: 0, y: 0 };
-    this.#players.set(id, {
+
+    const record = loadPlayerRecord(this.#db, id);
+    const player: Player = {
       id,
       colorIndex,
       pos: { x: PLAYER_START_POS.x + offset.x, y: PLAYER_START_POS.y + offset.y },
-      hp: PLAYER_MAX_HP,
-    });
-    this.#inputs.set(id, { up: false, down: false, left: false, right: false, aimAngle: 0 });
-    console.log(`player ${id} joined (slot ${colorIndex}, ${this.#players.size}/${MAX_PLAYERS})`);
+      hp: record?.hp ?? PLAYER_MAX_HP,
+      maxHp: record?.maxHp ?? PLAYER_MAX_HP,
+      status: record?.status ?? "alive",
+      downedAt: -Infinity,
+      diedAt: -Infinity,
+      invulnerableUntil: -Infinity,
+      medkits: record?.medkits ?? 0,
+      healingSince: null,
+    };
+    this.#players.set(id, player);
+    this.#inputs.set(id, { up: false, down: false, left: false, right: false, aimAngle: 0, reviving: false });
+    if (!record) this.#persistPlayer(player); // brand new identity: seed a row now so a quick reconnect finds it
+    console.log(`player ${id} joined (slot ${colorIndex}, status ${player.status}, ${this.#players.size}/${MAX_PLAYERS})`);
     return true;
   }
 
   removePlayer(id: string): void {
     this.#players.delete(id);
     this.#inputs.delete(id);
+    this.#reviveProgress.delete(id);
     console.log(`player ${id} left (${this.#players.size}/${MAX_PLAYERS} remain)`);
+    this.#checkAllIncapacitated();
+  }
+
+  isConnected(id: string): boolean {
+    return this.#players.has(id);
   }
 
   playerCount(): number {
     return this.#players.size;
   }
 
-  // "start" and "resume" are the same edge: waiting/paused -> running. A
-  // concluded round (game_over/victory) can't be resumed this way — only
-  // restart() gets out of those.
+  #persistPlayer(player: Player): void {
+    const record: PlayerRecord = { id: player.id, hp: player.hp, maxHp: player.maxHp, status: player.status, medkits: player.medkits };
+    savePlayerRecord(this.#db, record);
+  }
+
+  #nextTurretId(): string {
+    this.#turretIdCounter++;
+    return `t${this.#clockMs}-${this.#turretIdCounter}`;
+  }
+
+  // "start" and "resume" are the same edge: waiting/paused -> running. Only
+  // the FIRST (waiting->running) is a genuine day start — resuming after a
+  // pause continues the same day already in progress.
   play(): void {
-    if (this.#phase === "waiting" || this.#phase === "paused") {
+    if (this.#phase === "waiting") {
       this.#phase = "running";
       this.#progress.update({ phase: "running" });
       this.#progress.flush();
-      console.log(`phase -> running`);
+      this.#beginNewDay(this.#progress.get().day);
+      console.log("phase -> running");
+    } else if (this.#phase === "paused") {
+      this.#phase = "running";
+      this.#progress.update({ phase: "running" });
+      this.#progress.flush();
+      console.log("phase -> running");
     }
   }
 
-  // Also the disconnect handler's own fix: ws-server calls this unconditionally
-  // whenever the active connection closes (including a plain refresh replacing
-  // it a moment later), and this no-ops unless a round was actually running —
-  // so it's always safe to call, never something that needs its own guard.
   pause(): void {
     if (this.#phase === "running") {
       this.#phase = "paused";
@@ -203,75 +264,113 @@ export class GameLoop {
     }
   }
 
-  // Resets this round to its defaults from any phase, and lands back at
-  // "waiting" — the same state a fresh boot would show, so there's exactly
-  // one way into "running" (play()) regardless of how you got to "waiting".
-  // Flushes immediately: a deliberate reset is as worth not losing as a
-  // build/upgrade or day change.
+  // Full reset to Day 1 defaults, from any phase — unlike retryDay(), which
+  // only rewinds to the CURRENT day's start.
   restart(): void {
     this.#zombies.length = 0;
-    this.#spawnedZombies = 0;
-    this.#killedZombies = 0;
-    this.#spawnTimerMs = 0;
-    this.#turretLastFiredAt = -Infinity;
-    this.#turretTarget = undefined;
+    this.#reviveProgress.clear();
+    this.#turretRuntime.clear();
     for (const player of this.#players.values()) {
       const offset = PLAYER_START_OFFSETS[player.colorIndex] ?? { x: 0, y: 0 };
       player.pos = { x: PLAYER_START_POS.x + offset.x, y: PLAYER_START_POS.y + offset.y };
       player.hp = PLAYER_MAX_HP;
+      player.maxHp = PLAYER_MAX_HP;
+      player.status = "alive";
+      player.downedAt = -Infinity;
+      player.diedAt = -Infinity;
+      player.invulnerableUntil = -Infinity;
+      player.medkits = 0;
+      player.healingSince = null;
+      this.#persistPlayer(player);
     }
     this.#progress.update({ ...DEFAULT_PROGRESS });
     this.#progress.flush();
-    this.#totalZombiesForDay = zombiesForDay(DEFAULT_PROGRESS.day);
+    this.#totalZombiesForDay = totalZombiesForDay(DEFAULT_PROGRESS.day);
+    this.#daySnapshot = {
+      sharedXp: DEFAULT_PROGRESS.sharedXp,
+      baseHp: DEFAULT_PROGRESS.baseHp,
+      wallLevel: DEFAULT_PROGRESS.wallLevel,
+      wallHp: DEFAULT_PROGRESS.wallHp,
+      wallMaxHp: DEFAULT_PROGRESS.wallMaxHp,
+      turrets: [],
+      players: new Map(),
+    };
     this.#phase = "waiting";
-    console.log("restart: round reset to defaults, phase -> waiting");
+    console.log("restart: round reset to Day 1 defaults, phase -> waiting");
   }
 
-  // Replaces one player's stored input wholesale — the client sends its full
-  // held-key state and current aim angle on every "input" message, so
-  // there's nothing to merge. Applied on the next tick, not immediately. A
-  // no-op if the id isn't a currently connected player (e.g. a stray message
-  // arriving the instant after disconnect).
+  // Rewinds to THIS DAY's start snapshot (sharedXp/baseHp/wall/turrets, and
+  // every known player back to alive/full HP with their day-start medkit
+  // count) and replays the same day's wave — day itself is untouched. Only
+  // valid after a Game Over; XP/damage/kills from the failed attempt are not
+  // preserved (they were never written back into the snapshot).
+  retryDay(): ActionResult {
+    if (this.#phase !== "game_over") return reject("can only retry the day after a game over");
+
+    const snap = this.#daySnapshot;
+    this.#progress.update({
+      sharedXp: snap.sharedXp,
+      baseHp: snap.baseHp,
+      wallLevel: snap.wallLevel,
+      wallHp: snap.wallHp,
+      wallMaxHp: snap.wallMaxHp,
+      turrets: snap.turrets.map((t) => ({ ...t })),
+      phase: "waiting",
+    });
+    this.#progress.flush();
+
+    this.#turretRuntime.clear();
+    for (const t of snap.turrets) this.#turretRuntime.set(t.id, { lastFiredAt: -Infinity, target: undefined, shotsFired: 0 });
+
+    this.#zombies.length = 0;
+    this.#reviveProgress.clear();
+
+    for (const player of this.#players.values()) {
+      const saved = snap.players.get(player.id);
+      player.status = "alive";
+      player.hp = player.maxHp;
+      player.downedAt = -Infinity;
+      player.diedAt = -Infinity;
+      player.invulnerableUntil = -Infinity;
+      player.healingSince = null;
+      // A player who joined mid-attempt has no day-start snapshot entry —
+      // fall back to leaving their current medkit count alone rather than
+      // guessing.
+      if (saved) player.medkits = saved.medkits;
+      this.#persistPlayer(player);
+    }
+
+    this.#phase = "waiting";
+    console.log(`retry_day: restored day ${this.#progress.get().day}'s start snapshot`);
+    return OK;
+  }
+
   setInput(id: string, input: InputState): void {
     if (!this.#inputs.has(id)) return;
     this.#inputs.set(id, input);
   }
 
-  // One shot, resolved instantly against whatever input that player's socket
-  // last sent. No bullet entity, no queue — this runs synchronously the
-  // moment the "shoot" message arrives, ahead of the next tick if one's
-  // close. A no-op outside "running" — no pre-start plinking, no shooting
-  // through a pause.
   shoot(id: string): void {
     if (this.#phase !== "running") return;
     const player = this.#players.get(id);
     const input = this.#inputs.get(id);
     if (!player || !input) return;
+    if (player.status !== "alive" || player.healingSince !== null) return; // can't shoot downed/dead, or mid-medkit
     const target = resolveShot(player.pos, input.aimAngle, this.#zombies);
-    if (!target) {
-      console.log(`shoot(${id}): no zombie in range/cone`);
-      return;
-    }
+    if (!target) return;
     target.hp -= PISTOL_DAMAGE;
-    console.log(`shoot(${id}): hit ${target.id}, hp -> ${target.hp}`);
     if (target.hp <= 0) this.#killZombie(target, `player ${id} shot`);
   }
 
-  // The X-menu's actions. Every check the brief calls for happens here,
-  // server-side, regardless of what the client thinks is true: range against
-  // the server's own player position, XP against the server's own balance,
-  // and the current building state. A failed check mutates nothing and
-  // returns why — Crit 9's simultaneous-build-conflicts ADR: whichever
-  // request this (single-threaded) server processes first wins and mutates
-  // state; every request after it re-reads that already-updated state and is
-  // rejected here, with a reason relayed back to just that caller.
+  // The base X-menu's actions: build/upgrade the wall, pay to resurrect a
+  // dead teammate, or buy a medkit. Turret upgrade/repair are NOT here —
+  // see turretInteract(), a separate, turret-targeted message, per the
+  // brief's explicit "do not allow turret upgrades/repairs from the base".
   interact(id: string, action: InteractAction): ActionResult {
     if (this.#phase !== "running") return reject("round is not running");
     const player = this.#players.get(id);
-    if (!player) return reject("not a connected player");
-    if (distance(player.pos, BASE_POS) > BASE_INTERACT_RANGE) {
-      return reject("too far from the base");
-    }
+    if (!player || player.status !== "alive") return reject("not a connected, alive player");
+    if (distance(player.pos, BASE_POS) > BASE_INTERACT_RANGE) return reject("too far from the base");
 
     const progress = this.#progress.get();
     switch (action) {
@@ -279,125 +378,205 @@ export class GameLoop {
         return this.#buildWall(progress);
       case "upgrade_wall":
         return this.#upgradeWall(progress);
+      case "revive_dead":
+        return this.#reviveDead(progress);
+      case "buy_medkit":
+        return this.#buyMedkit(progress, player);
     }
   }
 
-  // The follow-up to picking "Build Turret" from the menu: the client enters
-  // placement mode on its own (no message sent yet) and only sends this once
-  // the player clicks a spot it judged valid. Every check here re-runs
-  // independently of that client-side judgement — phase, range-to-base (the
-  // same check interact() uses), "not already built" (one turret this
-  // round), cost, and whether (x, y) itself actually falls inside the
-  // allowed ring. The client never gets the final say on where it ends up.
   placeTurret(id: string, x: number, y: number): ActionResult {
     if (this.#phase !== "running") return reject("round is not running");
     const player = this.#players.get(id);
-    if (!player) return reject("not a connected player");
-    if (distance(player.pos, BASE_POS) > BASE_INTERACT_RANGE) {
-      return reject("too far from the base");
-    }
+    if (!player || player.status !== "alive") return reject("not a connected, alive player");
+    if (distance(player.pos, BASE_POS) > BASE_INTERACT_RANGE) return reject("too far from the base");
+
     const progress = this.#progress.get();
-    if (progress.turretBuilt) {
-      return reject("turret already built");
-    }
+    if (progress.turrets.length >= MAX_TURRETS) return reject(`already at the maximum of ${MAX_TURRETS} turrets`);
     const config = TURRET_LEVELS[1];
-    if (config.cost === null) {
-      return reject("turret not priced yet");
-    }
-    if (progress.sharedXp < config.cost) {
-      return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
-    }
+    if (progress.sharedXp < config.cost) return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
+
     const spot: Vec2 = { x, y };
     const d = distance(spot, BASE_POS);
     if (d < BASE_ATTACK_RANGE || d > TURRET_BUILD_RADIUS) {
       return reject(`(${x}, ${y}) is outside the allowed ring (${BASE_ATTACK_RANGE}-${TURRET_BUILD_RADIUS} from base)`);
     }
+    for (const t of progress.turrets) {
+      if (distance(spot, { x: t.x, y: t.y }) < TURRET_MIN_SEPARATION) {
+        return reject(`too close to an existing turret (minimum ${TURRET_MIN_SEPARATION} units apart)`);
+      }
+    }
 
-    this.#progress.update({
-      sharedXp: progress.sharedXp - config.cost,
-      turretBuilt: true,
-      turretLevel: 1,
-      turretHp: config.maxHp,
-      turretMaxHp: config.maxHp,
-      turretX: x,
-      turretY: y,
-    });
+    const newTurret: TurretRecord = { id: this.#nextTurretId(), level: 1, hp: config.maxHp, maxHp: config.maxHp, x, y };
+    this.#progress.update({ sharedXp: progress.sharedXp - config.cost, turrets: [...progress.turrets, newTurret] });
     this.#progress.flush();
-    console.log(`built turret level 1 at (${x.toFixed(0)}, ${y.toFixed(0)}) (-${config.cost} XP)`);
+    this.#turretRuntime.set(newTurret.id, { lastFiredAt: -Infinity, target: undefined, shotsFired: 0 });
+    console.log(`built turret ${newTurret.id} (level 1) at (${x.toFixed(0)}, ${y.toFixed(0)}) (-${config.cost} XP)`);
+    return OK;
+  }
+
+  // The turret X-menu's actions: upgrade or repair ONE specific turret,
+  // identified by id, with its own independent level/HP/cooldown — distinct
+  // from interact() because there's no longer exactly one implicit turret.
+  turretInteract(id: string, turretId: string, action: TurretAction): ActionResult {
+    if (this.#phase !== "running") return reject("round is not running");
+    const player = this.#players.get(id);
+    if (!player || player.status !== "alive") return reject("not a connected, alive player");
+
+    const progress = this.#progress.get();
+    const turret = progress.turrets.find((t) => t.id === turretId);
+    if (!turret) return reject("no such turret");
+    if (distance(player.pos, { x: turret.x, y: turret.y }) > TURRET_INTERACT_RANGE) return reject("too far from that turret");
+
+    return action === "upgrade" ? this.#upgradeTurret(progress, turret) : this.#repairTurret(progress, turret);
+  }
+
+  #upgradeTurret(progress: Readonly<Progress>, turret: TurretRecord): ActionResult {
+    if (turret.level >= TURRET_MAX_LEVEL) return reject("already at max level");
+    const nextLevel = turret.level + 1;
+    const config = TURRET_LEVELS[nextLevel];
+    if (progress.sharedXp < config.cost) return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
+
+    const turrets = progress.turrets.map((t) => (t.id === turret.id ? { ...t, level: nextLevel, maxHp: config.maxHp, hp: config.maxHp } : t));
+    this.#progress.update({ sharedXp: progress.sharedXp - config.cost, turrets });
+    this.#progress.flush();
+    console.log(`turret ${turret.id} upgraded to level ${nextLevel} (-${config.cost} XP)`);
+    return OK;
+  }
+
+  #repairTurret(progress: Readonly<Progress>, turret: TurretRecord): ActionResult {
+    if (turret.hp >= turret.maxHp) return reject("already at full health");
+    const config = TURRET_LEVELS[turret.level];
+    if (progress.sharedXp < config.repairCost) return reject(`need ${config.repairCost} XP, have ${progress.sharedXp}`);
+
+    const turrets = progress.turrets.map((t) => (t.id === turret.id ? { ...t, hp: t.maxHp } : t));
+    this.#progress.update({ sharedXp: progress.sharedXp - config.repairCost, turrets });
+    this.#progress.flush();
+    console.log(`turret ${turret.id} repaired to full (-${config.repairCost} XP)`);
     return OK;
   }
 
   #buildWall(progress: Readonly<Progress>): ActionResult {
-    if (progress.wallLevel !== 0) {
-      return reject("a wall already stands");
-    }
+    if (progress.wallLevel !== 0) return reject("a wall already stands");
     const config = WALL_LEVELS[1];
-    if (progress.sharedXp < config.cost!) {
-      return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
-    }
-    this.#progress.update({
-      sharedXp: progress.sharedXp - config.cost!,
-      wallLevel: 1,
-      wallHp: config.maxHp,
-      wallMaxHp: config.maxHp,
-    });
+    if (progress.sharedXp < config.cost) return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
+    this.#progress.update({ sharedXp: progress.sharedXp - config.cost, wallLevel: 1, wallHp: config.maxHp, wallMaxHp: config.maxHp });
     this.#progress.flush();
     console.log(`built wall level 1 (-${config.cost} XP)`);
     return OK;
   }
 
   #upgradeWall(progress: Readonly<Progress>): ActionResult {
+    if (progress.wallLevel === 0) return reject("no wall to upgrade — build one first");
     const nextLevel = progress.wallLevel + 1;
     const config = WALL_LEVELS[nextLevel];
-    if (progress.wallLevel === 0) {
-      return reject("no wall to upgrade — build one first");
-    }
-    if (progress.wallLevel >= WALL_MAX_LEVEL || !config || config.cost === null) {
-      return reject("no further priced upgrade available");
-    }
-    if (progress.sharedXp < config.cost) {
-      return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
-    }
-    this.#progress.update({
-      sharedXp: progress.sharedXp - config.cost,
-      wallLevel: nextLevel,
-      wallMaxHp: config.maxHp,
-      wallHp: config.maxHp, // upgrading restores to the new level's full HP
-    });
+    if (progress.wallLevel >= WALL_MAX_LEVEL || !config) return reject("no further upgrade available");
+    if (progress.sharedXp < config.cost) return reject(`need ${config.cost} XP, have ${progress.sharedXp}`);
+    this.#progress.update({ sharedXp: progress.sharedXp - config.cost, wallLevel: nextLevel, wallMaxHp: config.maxHp, wallHp: config.maxHp });
     this.#progress.flush();
     console.log(`upgraded wall to level ${nextLevel} (-${config.cost} XP)`);
     return OK;
   }
 
-  // Removes a dead zombie, counts the kill towards this day's wave, and
-  // awards XP — shared by every kill source (player shot, wall spikes,
-  // turret), so all three stay in sync with the same bookkeeping.
+  #reviveDead(progress: Readonly<Progress>): ActionResult {
+    let earliest: Player | undefined;
+    for (const p of this.#players.values()) {
+      if (p.status !== "dead") continue;
+      if (!earliest || p.diedAt < earliest.diedAt) earliest = p;
+    }
+    if (!earliest) return reject("no dead teammate to revive");
+    const cost = resurrectCostForDay(progress.day);
+    if (progress.sharedXp < cost) return reject(`need ${cost} XP, have ${progress.sharedXp}`);
+
+    this.#progress.update({ sharedXp: progress.sharedXp - cost });
+    this.#progress.flush();
+    const now = this.#clockMs;
+    earliest.status = "alive";
+    earliest.hp = PAID_RESURRECT_HP;
+    earliest.invulnerableUntil = now + PAID_RESURRECT_INVULN_MS;
+    this.#persistPlayer(earliest);
+    console.log(`player ${earliest.id} resurrected for ${cost} XP`);
+    return OK;
+  }
+
+  #buyMedkit(progress: Readonly<Progress>, buyer: Player): ActionResult {
+    if (buyer.medkits >= MEDKIT_MAX) return reject(`already carrying the max of ${MEDKIT_MAX} medkits`);
+    if (progress.sharedXp < MEDKIT_COST) return reject(`need ${MEDKIT_COST} XP, have ${progress.sharedXp}`);
+
+    this.#progress.update({ sharedXp: progress.sharedXp - MEDKIT_COST });
+    this.#progress.flush();
+    buyer.medkits += 1;
+    this.#persistPlayer(buyer);
+    console.log(`player ${buyer.id} bought a medkit (${buyer.medkits}/${MEDKIT_MAX}) (-${MEDKIT_COST} XP)`);
+    return OK;
+  }
+
+  // Press H: starts a 2-second heal if eligible. Completion (and the HP
+  // gain + medkit consumption) happens in #updateHealing() once the
+  // duration elapses uninterrupted — see #damagePlayer for the interrupt.
+  useMedkit(id: string): ActionResult {
+    if (this.#phase !== "running") return reject("round is not running");
+    const player = this.#players.get(id);
+    if (!player || player.status !== "alive") return reject("not a connected, alive player");
+    if (player.healingSince !== null) return reject("already healing");
+    if (player.medkits <= 0) return reject("no medkits");
+    if (player.hp >= player.maxHp) return reject("already at full health");
+
+    player.healingSince = this.#clockMs;
+    console.log(`player ${id} starts using a medkit`);
+    return OK;
+  }
+
+  // Applies damage to a player, respecting invulnerability and interrupting
+  // (not consuming) an in-progress medkit heal. The one place anything in
+  // this class is allowed to lower a player's HP.
+  #damagePlayer(player: Player, amount: number, now: number): void {
+    if (player.status !== "alive") return;
+    if (now < player.invulnerableUntil) return;
+    if (player.healingSince !== null) player.healingSince = null; // interrupted, medkit not consumed
+    player.hp = Math.max(0, player.hp - amount);
+    if (player.hp <= 0) {
+      player.status = "downed";
+      player.downedAt = now;
+      console.log(`player ${player.id} is downed`);
+    }
+    this.#persistPlayer(player);
+    if (player.status === "downed") this.#checkAllIncapacitated();
+  }
+
+  // Removes a dead zombie, counts the kill, awards XP, and — for a giant —
+  // damages every alive player within its explosion radius. Shared by every
+  // kill source (player shot, turret, wall spikes/pulse) so bookkeeping stays
+  // in one place.
   #killZombie(zombie: Zombie, source: string): void {
     this.#zombies.splice(this.#zombies.indexOf(zombie), 1);
-    if (this.#turretTarget === zombie) this.#turretTarget = undefined;
     this.#killedZombies++;
-    console.log(`zombie ${zombie.id} died (${source}) (${this.#killedZombies}/${this.#totalZombiesForDay})`);
+    console.log(`zombie ${zombie.id} (${zombie.type}) died (${source}) (${this.#killedZombies}/${this.#totalZombiesForDay})`);
     this.#addSharedXp(XP_PER_KILL);
-    // Spawning can only ever make "all killed" harder to reach, never
-    // trigger it — a kill is the only event that can newly satisfy the
-    // wave-complete condition, so that's the only place it needs checking.
+
+    const cfg = ZOMBIE_TYPES[zombie.type];
+    if (cfg.explodesOnDeath) {
+      const now = this.#clockMs;
+      for (const player of this.#players.values()) {
+        if (player.status !== "alive") continue;
+        if (distance(player.pos, zombie.pos) <= cfg.explosionRadius) this.#damagePlayer(player, cfg.explosionDamage, now);
+      }
+      console.log(`zombie ${zombie.id} explodes on death: ${cfg.explosionDamage} dmg within ${cfg.explosionRadius}`);
+    }
+
+    for (const runtime of this.#turretRuntime.values()) {
+      if (runtime.target === zombie) runtime.target = undefined;
+    }
     this.#checkWaveComplete();
   }
 
-  // Shared XP is now purely a spendable resource (no more auto baseLevel/
-  // wall-unlock) — just add it and mark dirty, same as any other change.
   #addSharedXp(amount: number): void {
     const before = this.#progress.get().sharedXp;
-    const sharedXp = before + amount;
-    this.#progress.update({ sharedXp });
-    console.log(`sharedXp ${before} -> ${sharedXp}`);
+    this.#progress.update({ sharedXp: before + amount });
   }
 
-  // The only way "all of this day's zombies are spawned and dead" becomes
-  // true is a kill (see #killZombie), so this only ever needs calling from
-  // there.
   #checkWaveComplete(): void {
-    const allSpawned = this.#spawnedZombies === this.#totalZombiesForDay;
+    const allSpawned = this.#spawnQueue.length === 0;
     const noneLeft = this.#zombies.length === 0;
     const allKilled = this.#killedZombies === this.#totalZombiesForDay;
     if (!(allSpawned && noneLeft && allKilled)) return;
@@ -408,24 +587,74 @@ export class GameLoop {
       this.#progress.update({ phase: "victory" });
       this.#progress.flush();
       console.log(`day ${completedDay} complete: phase -> victory`);
-      return; // frozen at the victorious day, not advanced past it
+      return;
     }
 
     const nextDay = completedDay + 1;
-    this.#killedZombies = 0;
-    this.#spawnedZombies = 0;
-    this.#spawnTimerMs = 0;
-    this.#totalZombiesForDay = zombiesForDay(nextDay);
     this.#progress.update({ day: nextDay });
-    this.#progress.flush(); // day change flushes immediately, ahead of the timer
-    console.log(`day ${nextDay} begins: ${this.#totalZombiesForDay} zombies scheduled`);
+    this.#progress.flush();
+    this.#beginNewDay(nextDay);
   }
 
-  // Read-only view for the WS layer to broadcast. Never mutates anything —
-  // the only writers of game state are shoot(), interact() and the tick loop
-  // itself.
+  // Everything needed for a day's zombies to spawn correctly — safe (and
+  // necessary) to redo after ANY process restart mid-day, since none of this
+  // grants anything. See #beginNewDay for the genuinely once-per-day parts.
+  #resetDayCombatState(day: number): void {
+    this.#spawnQueue = buildSpawnQueue(day);
+    this.#totalZombiesForDay = totalZombiesForDay(day);
+    this.#spawnedZombies = 0;
+    this.#killedZombies = 0;
+    this.#spawnTimerMs = 0;
+    this.#spawnIntervalMs = spawnIntervalForDay(this.#totalZombiesForDay);
+    this.#wallPulseLastFiredAt = this.#clockMs;
+  }
+
+  // Only called on a GENUINE new day: the very first "Start" click (Day 1)
+  // and a natural day-clear advance. Grants the daily heal and recaptures
+  // the retry-day snapshot — deliberately never called on a mid-day resume
+  // or process restart (#resetDayCombatState covers those), so neither can
+  // be exploited into free healing or a reset XP ledger.
+  #beginNewDay(day: number): void {
+    this.#resetDayCombatState(day);
+    this.#dayIntroUntilMs = this.#clockMs + DAY_INTRO_MS;
+
+    const now = this.#clockMs;
+    for (const player of this.#players.values()) {
+      if (player.status === "alive") {
+        player.hp = Math.min(player.maxHp, player.hp + DAILY_HEAL_AMOUNT);
+        this.#persistPlayer(player);
+      }
+    }
+
+    const progress = this.#progress.get();
+    this.#daySnapshot = {
+      sharedXp: progress.sharedXp,
+      baseHp: progress.baseHp,
+      wallLevel: progress.wallLevel,
+      wallHp: progress.wallHp,
+      wallMaxHp: progress.wallMaxHp,
+      turrets: progress.turrets.map((t) => ({ ...t })),
+      players: new Map([...this.#players.entries()].map(([id, p]) => [id, { hp: p.hp, status: p.status, medkits: p.medkits }])),
+    };
+    console.log(`day ${day} begins: ${this.#totalZombiesForDay} zombies scheduled, ${DAY_INTRO_MS}ms intro, daily heal applied`);
+  }
+
+  #checkAllIncapacitated(): void {
+    if (this.#phase !== "running") return;
+    if (this.#players.size === 0) return; // an empty session is the disconnect/pause path's job, not a loss
+    const allDown = [...this.#players.values()].every((p) => p.status !== "alive");
+    if (allDown) {
+      this.#phase = "game_over";
+      this.#progress.update({ phase: "game_over" });
+      this.#progress.flush();
+      console.log("every connected player is downed or dead: phase -> game_over");
+    }
+  }
+
+  // Read-only view for the WS layer to broadcast. Never mutates anything.
   getSnapshot(): StateMessage {
     const progress = this.#progress.get();
+    const now = this.#clockMs;
     return {
       type: "state",
       phase: this.#phase,
@@ -436,14 +665,7 @@ export class GameLoop {
       wallLevel: progress.wallLevel,
       wallHp: progress.wallHp,
       wallMaxHp: progress.wallMaxHp,
-      turretLevel: progress.turretLevel,
-      turretHp: progress.turretHp,
-      turretMaxHp: progress.turretMaxHp,
-      turretBuilt: progress.turretBuilt,
-      turretX: progress.turretX,
-      turretY: progress.turretY,
-      turretTarget: this.#turretTarget ? { x: this.#turretTarget.pos.x, y: this.#turretTarget.pos.y } : null,
-      turretShotsFired: this.#turretShotsFired,
+      dayIntroRemainingMs: Math.max(0, this.#dayIntroUntilMs - now),
       killedZombies: this.#killedZombies,
       totalZombiesForDay: this.#totalZombiesForDay,
       players: [...this.#players.values()].map((p) => ({
@@ -452,16 +674,38 @@ export class GameLoop {
         x: p.pos.x,
         y: p.pos.y,
         hp: p.hp,
+        maxHp: p.maxHp,
+        status: p.status,
+        downedRemainingMs: p.status === "downed" ? Math.max(0, DOWNED_DURATION_MS - (now - p.downedAt)) : 0,
+        medkits: p.medkits,
+        healing: p.healingSince !== null,
+        invulnerable: now < p.invulnerableUntil,
       })),
-      zombies: this.#zombies.map((z) => ({ id: z.id, x: z.pos.x, y: z.pos.y, hp: z.hp })),
+      zombies: this.#zombies.map((z) => ({ id: z.id, type: z.type, x: z.pos.x, y: z.pos.y, hp: z.hp, maxHp: z.maxHp, attacking: z.attacking })),
+      turrets: progress.turrets.map((t) => {
+        const runtime = this.#turretRuntime.get(t.id);
+        return {
+          id: t.id,
+          level: t.level,
+          hp: t.hp,
+          maxHp: t.maxHp,
+          x: t.x,
+          y: t.y,
+          target: runtime?.target ? { x: runtime.target.pos.x, y: runtime.target.pos.y } : null,
+          shotsFired: runtime?.shotsFired ?? 0,
+        };
+      }),
+      reviveProgress: [...this.#reviveProgress.entries()].map(([reviverId, prog]) => ({
+        reviverId,
+        targetId: prog.targetId,
+        remainingMs: Math.max(0, REVIVE_HOLD_MS - (now - prog.startedAt)),
+      })),
     };
   }
 
   start(): void {
     this.#timer = setInterval(() => this.#tick(TICK_MS), TICK_MS);
-    console.log(
-      `game loop started: day ${this.#progress.get().day}, ${this.#totalZombiesForDay} zombies this wave`,
-    );
+    console.log(`game loop started: day ${this.#progress.get().day}`);
   }
 
   stop(): void {
@@ -469,48 +713,116 @@ export class GameLoop {
   }
 
   #tick(dtMs: number): void {
-    // waiting/paused/game_over/victory: everything freezes, player included —
-    // "paused 时 game loop 停止推进" is simplest as one gate, not a per-system one.
     if (this.#phase !== "running") return;
     this.#clockMs += dtMs;
     for (const [id, player] of this.#players) {
+      if (player.status !== "alive") continue;
       const input = this.#inputs.get(id);
       if (input) movePlayer(player, input, dtMs);
     }
+    this.#updateRevives();
+    this.#updateHealing();
+    this.#updateDownedTimers();
     this.#maybeSpawn(dtMs);
     this.#updateZombies();
-    this.#updateTurret();
+    this.#updateTurrets();
+    this.#updateWallPulse();
   }
 
-  // Paces spawning at a fixed interval until this day's quota is fully
-  // spawned — no longer tied to a day "duration" (there isn't one), just a
-  // steady drip so the whole quota doesn't appear at once.
-  #maybeSpawn(dtMs: number): void {
-    if (this.#spawnedZombies >= this.#totalZombiesForDay) return;
-    this.#spawnTimerMs += dtMs;
-    if (this.#spawnTimerMs < SPAWN_INTERVAL_MS) return;
-    this.#spawnTimerMs -= SPAWN_INTERVAL_MS; // keep the remainder so the cadence doesn't drift
+  // One hold-E-for-3-seconds field revive in progress per reviver. Not
+  // sticky across losing the conditions (letting go of E, moving out of
+  // range, or the target already being revived/gone) — progress resets.
+  #updateRevives(): void {
+    const now = this.#clockMs;
+    for (const [reviverId, input] of this.#inputs) {
+      const reviver = this.#players.get(reviverId);
+      if (!reviver || reviver.status !== "alive" || !input.reviving) {
+        this.#reviveProgress.delete(reviverId);
+        continue;
+      }
+      let target: Player | undefined;
+      let bestD = REVIVE_RANGE;
+      for (const p of this.#players.values()) {
+        if (p.status !== "downed") continue;
+        const d = distance(reviver.pos, p.pos);
+        if (d <= bestD) {
+          target = p;
+          bestD = d;
+        }
+      }
+      if (!target) {
+        this.#reviveProgress.delete(reviverId);
+        continue;
+      }
+      const prog = this.#reviveProgress.get(reviverId);
+      if (!prog || prog.targetId !== target.id) {
+        this.#reviveProgress.set(reviverId, { targetId: target.id, startedAt: now });
+        continue;
+      }
+      if (now - prog.startedAt >= REVIVE_HOLD_MS) {
+        target.status = "alive";
+        target.hp = FIELD_REVIVE_HP;
+        target.invulnerableUntil = now + FIELD_REVIVE_INVULN_MS;
+        this.#persistPlayer(target);
+        this.#reviveProgress.delete(reviverId);
+        console.log(`player ${target.id} field-revived by ${reviverId}`);
+      }
+    }
+  }
 
-    const z = spawnZombie();
+  #updateHealing(): void {
+    const now = this.#clockMs;
+    for (const player of this.#players.values()) {
+      if (player.healingSince === null) continue;
+      if (now - player.healingSince >= MEDKIT_DURATION_MS) {
+        player.hp = Math.min(player.maxHp, player.hp + MEDKIT_HEAL);
+        player.medkits -= 1;
+        player.healingSince = null;
+        this.#persistPlayer(player);
+        console.log(`player ${player.id} medkit heal complete: hp -> ${player.hp}, medkits -> ${player.medkits}`);
+      }
+    }
+  }
+
+  #updateDownedTimers(): void {
+    const now = this.#clockMs;
+    for (const player of this.#players.values()) {
+      if (player.status === "downed" && now - player.downedAt >= DOWNED_DURATION_MS) {
+        player.status = "dead";
+        player.diedAt = now;
+        this.#persistPlayer(player);
+        console.log(`player ${player.id} died (downed timer expired)`);
+      }
+    }
+    this.#checkAllIncapacitated();
+  }
+
+  // Paces spawning from this day's pre-built queue (buildSpawnQueue) at the
+  // adaptive interval chosen for this day's total (spawnIntervalForDay).
+  // Held entirely during the day-intro countdown — zombies don't spawn until
+  // it finishes, though players can already move/build/interact.
+  #maybeSpawn(dtMs: number): void {
+    if (this.#clockMs < this.#dayIntroUntilMs) return;
+    if (this.#spawnQueue.length === 0) return;
+    this.#spawnTimerMs += dtMs;
+    if (this.#spawnTimerMs < this.#spawnIntervalMs) return;
+    this.#spawnTimerMs -= this.#spawnIntervalMs;
+
+    const type = this.#spawnQueue.shift()!;
+    const z = spawnZombie(type, this.#progress.get().day);
     this.#zombies.push(z);
     this.#spawnedZombies++;
-    console.log(
-      `zombie ${z.id} spawned at (${z.pos.x.toFixed(0)}, ${z.pos.y.toFixed(0)}) (${this.#spawnedZombies}/${this.#totalZombiesForDay})`,
-    );
+    console.log(`zombie ${z.id} (${type}) spawned (${this.#spawnedZombies}/${this.#totalZombiesForDay})`);
   }
 
-  // Wall first, base second: while wallHp > 0, stepZombie stops every zombie
-  // at the wall's ring instead of the base — they physically cannot reach
-  // the base at all, let alone attack it. Only once the wall is at 0 does a
-  // zombie's stop radius shrink to the base's own, and only then does damage
-  // reach baseHp.
   #updateZombies(): void {
     const now = this.#clockMs;
     const progress = this.#progress.get();
     const wallUp = progress.wallHp > 0;
+    const players = [...this.#players.values()];
     for (const z of this.#zombies) {
-      stepZombie(z, TICK_MS, wallUp);
-      if (z.attacking && now - z.lastAttackAt >= ZOMBIE_ATTACK_INTERVAL_MS) {
+      advanceZombie(z, TICK_MS, players, wallUp);
+      if (z.attacking && now - z.lastAttackAt >= ZOMBIE_TYPES[z.type].attackIntervalMs) {
         z.lastAttackAt = now;
         this.#applyZombieHit(z);
       }
@@ -518,34 +830,65 @@ export class GameLoop {
   }
 
   #applyZombieHit(zombie: Zombie): void {
+    const now = this.#clockMs;
+    const cfg = ZOMBIE_TYPES[zombie.type];
+
+    // Turrets are physical obstacles: a GROUND zombie that ends up within
+    // melee range of a live turret fights it instead of its "real" target —
+    // not otherwise specified by the brief, but the only way turret HP/
+    // repair means anything (a documented assumption, see PROCESS.md).
+    // Flying zombies ignore turrets the same way they ignore the wall.
+    if (!cfg.ranged) {
+      const progress = this.#progress.get();
+      const nearTurret = progress.turrets.find((t) => t.hp > 0 && distance(zombie.pos, { x: t.x, y: t.y }) <= MELEE_RANGE);
+      if (nearTurret) {
+        const hp = Math.max(0, nearTurret.hp - cfg.damage);
+        const destroyed = hp <= 0;
+        const turrets = destroyed
+          ? progress.turrets.filter((t) => t.id !== nearTurret.id)
+          : progress.turrets.map((t) => (t.id === nearTurret.id ? { ...t, hp } : t));
+        this.#progress.update({ turrets });
+        if (destroyed) {
+          this.#turretRuntime.delete(nearTurret.id);
+          this.#progress.flush();
+          console.log(`turret ${nearTurret.id} destroyed, slot freed`);
+        } else {
+          console.log(`zombie ${zombie.id} hits turret ${nearTurret.id}: hp ${nearTurret.hp} -> ${hp}`);
+        }
+        return;
+      }
+    }
+
+    if (zombie.attackTarget.kind === "player") {
+      const player = this.#players.get(zombie.attackTarget.playerId);
+      if (player) this.#damagePlayer(player, cfg.damage, now);
+      return;
+    }
+
+    // Structure target: a flying zombie bypasses the wall entirely ("may
+    // attack over walls") and always hits the base directly; a ground
+    // zombie hits whichever of wall/base is currently absorbing hits.
     const progress = this.#progress.get();
-    if (progress.wallHp > 0) {
-      const wallHp = Math.max(0, progress.wallHp - ZOMBIE_ATTACK_DAMAGE);
+    if (!cfg.ranged && progress.wallHp > 0) {
+      const reduction = WALL_LEVELS[progress.wallLevel]?.damageReductionPercent ?? 0;
+      const dmg = Math.max(0, Math.round(cfg.damage * (1 - reduction)));
+      const wallHp = Math.max(0, progress.wallHp - dmg);
       const destroyed = wallHp <= 0;
-      this.#progress.update({
-        wallHp,
-        // Destruction always drops the level back to 0 — a rebuild starts
-        // over at level 1, never free-upgrades back to whatever it was.
-        ...(destroyed ? { wallLevel: 0, wallMaxHp: 0 } : {}),
-      });
+      this.#progress.update({ wallHp, ...(destroyed ? { wallLevel: 0, wallMaxHp: 0 } : {}) });
       console.log(`zombie ${zombie.id} hits the wall: wallHp ${progress.wallHp} -> ${wallHp}`);
       if (destroyed) {
-        this.#progress.flush(); // the wall falling is worth not losing, same as a build/upgrade
+        this.#progress.flush();
         console.log("wall destroyed: wallLevel -> 0, the base is exposed");
       }
-
-      // Level 2+ spikes: every attack the wall takes also hurts the zombie
-      // making it, on the same cadence as the attack itself.
       const spikeDamage = WALL_LEVELS[progress.wallLevel]?.spikeDamage ?? 0;
       if (spikeDamage > 0) {
         zombie.hp -= spikeDamage;
-        console.log(`wall spikes hit ${zombie.id} back for ${spikeDamage}, hp -> ${zombie.hp}`);
         if (zombie.hp <= 0) this.#killZombie(zombie, "wall spikes");
       }
       return;
     }
 
-    const baseHp = Math.max(0, progress.baseHp - ZOMBIE_ATTACK_DAMAGE);
+    const baseHp = Math.max(0, progress.baseHp - cfg.damage);
     this.#progress.update({ baseHp });
     console.log(`zombie ${zombie.id} hits the base: baseHp ${progress.baseHp} -> ${baseHp}`);
     if (baseHp <= 0) {
@@ -556,26 +899,58 @@ export class GameLoop {
     }
   }
 
-  // Fully automatic: finds the nearest zombie in range, fires on its own
-  // cadence, no player input involved. Same instant-hit approach as the
-  // player's own shot — no bullet entity, no network-simulated projectile.
-  #updateTurret(): void {
+  // Every turret fires independently, each on its own cooldown, at the
+  // nearest `multiTargetCount` zombies within its own range (this project's
+  // hitscan-only architecture's approximation of "attacks 2 targets" /
+  // "pierce up to N" — see TurretLevelConfig's own comment). Level 5's
+  // splash then adds reduced damage to anything else near the primary hit.
+  #updateTurrets(): void {
+    const now = this.#clockMs;
     const progress = this.#progress.get();
-    if (!progress.turretBuilt || progress.turretHp <= 0) {
-      this.#turretTarget = undefined;
-      return;
-    }
-    const config = TURRET_LEVELS[progress.turretLevel];
-    const turretPos: Vec2 = { x: progress.turretX, y: progress.turretY };
-    this.#turretTarget = findNearestZombieInRange(turretPos, config.range, this.#zombies);
-    if (!this.#turretTarget) return;
-    if (this.#clockMs - this.#turretLastFiredAt < config.fireIntervalMs) return;
+    for (const turret of progress.turrets) {
+      if (turret.hp <= 0) continue;
+      const runtime = this.#turretRuntime.get(turret.id);
+      if (!runtime) continue;
+      const config = TURRET_LEVELS[turret.level];
+      const origin: Vec2 = { x: turret.x, y: turret.y };
+      const targets = findNearestZombiesInRange(origin, config.range, config.multiTargetCount, this.#zombies);
+      runtime.target = targets[0];
+      if (targets.length === 0) continue;
+      if (now - runtime.lastFiredAt < config.fireIntervalMs) continue;
 
-    this.#turretLastFiredAt = this.#clockMs;
-    this.#turretShotsFired++;
-    const target = this.#turretTarget;
-    target.hp -= config.damage;
-    console.log(`turret hits ${target.id}, hp -> ${target.hp}`);
-    if (target.hp <= 0) this.#killZombie(target, "turret");
+      runtime.lastFiredAt = now;
+      runtime.shotsFired++;
+      for (const target of targets) {
+        target.hp -= config.damage;
+        if (target.hp <= 0) this.#killZombie(target, `turret ${turret.id}`);
+      }
+      if (config.splashRadius > 0) {
+        const primary = targets[0];
+        const splashDamage = config.damage * config.splashDamagePercent;
+        for (const z of [...this.#zombies]) {
+          if (targets.includes(z)) continue; // already took full damage above
+          if (distance(z.pos, primary.pos) <= config.splashRadius) {
+            z.hp -= splashDamage;
+            if (z.hp <= 0) this.#killZombie(z, `turret ${turret.id} splash`);
+          }
+        }
+      }
+    }
+  }
+
+  // Level 2 wall's periodic AOE pulse — levels 3+ use an on-hit spike
+  // reflect instead (handled inline in #applyZombieHit).
+  #updateWallPulse(): void {
+    const progress = this.#progress.get();
+    if (progress.wallLevel !== 2 || progress.wallHp <= 0) return;
+    const config = WALL_LEVELS[2];
+    if (this.#clockMs - this.#wallPulseLastFiredAt < config.pulseIntervalMs) return;
+    this.#wallPulseLastFiredAt = this.#clockMs;
+
+    for (const z of [...this.#zombies]) {
+      if (distance(z.pos, BASE_POS) > WALL_PULSE_RADIUS) continue;
+      z.hp -= config.pulseDamage;
+      if (z.hp <= 0) this.#killZombie(z, "wall pulse");
+    }
   }
 }

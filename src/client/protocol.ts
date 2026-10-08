@@ -5,19 +5,48 @@
 // need (server emits to dist/server, client to dist/client; a shared source
 // directory would need its own rootDir/outDir story on both sides).
 
+export type ZombieType = "normal" | "flying" | "giant" | "boss";
+export type PlayerStatus = "alive" | "downed" | "dead";
+
 export interface PlayerSnapshot {
   id: string;
   colorIndex: number;
   x: number;
   y: number;
   hp: number;
+  maxHp: number;
+  status: PlayerStatus;
+  downedRemainingMs: number;
+  medkits: number;
+  healing: boolean;
+  invulnerable: boolean;
 }
 
 export interface ZombieSnapshot {
   id: string;
+  type: ZombieType;
   x: number;
   y: number;
   hp: number;
+  maxHp: number;
+  attacking: boolean;
+}
+
+export interface TurretSnapshot {
+  id: string;
+  level: number;
+  hp: number;
+  maxHp: number;
+  x: number;
+  y: number;
+  target: { x: number; y: number } | null;
+  shotsFired: number;
+}
+
+export interface ReviveProgressSnapshot {
+  reviverId: string;
+  targetId: string;
+  remainingMs: number;
 }
 
 export type GamePhase = "waiting" | "running" | "paused" | "game_over" | "victory";
@@ -32,18 +61,13 @@ export interface StateMessage {
   wallLevel: number;
   wallHp: number;
   wallMaxHp: number;
-  turretLevel: number;
-  turretHp: number;
-  turretMaxHp: number;
-  turretBuilt: boolean;
-  turretX: number;
-  turretY: number;
-  turretTarget: { x: number; y: number } | null;
-  turretShotsFired: number;
+  dayIntroRemainingMs: number;
   killedZombies: number;
   totalZombiesForDay: number;
   players: PlayerSnapshot[];
   zombies: ZombieSnapshot[];
+  turrets: TurretSnapshot[];
+  reviveProgress: ReviveProgressSnapshot[];
 }
 
 export interface WelcomeMessage {
@@ -55,18 +79,23 @@ export interface FullMessage {
   type: "full";
 }
 
+export interface DuplicateIdentityMessage {
+  type: "duplicate_identity";
+}
+
 export interface RejectedMessage {
   type: "rejected";
-  action: InteractAction | "place_turret";
+  action: string;
   reason: string;
 }
 
-export type ServerMessage = StateMessage | WelcomeMessage | FullMessage | RejectedMessage;
+export type ServerMessage = StateMessage | WelcomeMessage | FullMessage | DuplicateIdentityMessage | RejectedMessage;
 
 export interface InputMessage {
   type: "input";
   move: { up: boolean; down: boolean; left: boolean; right: boolean };
   aimAngle: number;
+  reviving: boolean;
 }
 
 export interface ShootMessage {
@@ -74,10 +103,10 @@ export interface ShootMessage {
 }
 
 export interface ControlMessage {
-  type: "start" | "pause" | "resume" | "restart";
+  type: "start" | "pause" | "resume" | "restart" | "retry_day";
 }
 
-export type InteractAction = "build_wall" | "upgrade_wall";
+export type InteractAction = "build_wall" | "upgrade_wall" | "revive_dead" | "buy_medkit";
 
 export interface InteractMessage {
   type: "interact";
@@ -90,4 +119,23 @@ export interface PlaceTurretMessage {
   y: number;
 }
 
-export type ClientMessage = InputMessage | ShootMessage | ControlMessage | InteractMessage | PlaceTurretMessage;
+export type TurretAction = "upgrade" | "repair";
+
+export interface TurretInteractMessage {
+  type: "turret_interact";
+  turretId: string;
+  action: TurretAction;
+}
+
+export interface UseMedkitMessage {
+  type: "use_medkit";
+}
+
+export type ClientMessage =
+  | InputMessage
+  | ShootMessage
+  | ControlMessage
+  | InteractMessage
+  | PlaceTurretMessage
+  | TurretInteractMessage
+  | UseMedkitMessage;

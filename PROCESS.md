@@ -70,6 +70,147 @@ XP stays one shared pool, there are no accounts. A stale comment in
 `persistence.ts` had guessed a players table would be needed here; I
 corrected it instead of adding a table nothing actually required.
 
+That conclusion didn't survive the next round of requirements — see below:
+once players have their own HP and a downed/dead status that must survive a
+reconnect, there genuinely is a per-player durable value, and a `players`
+table became the right call after all. Recorded here rather than edited away
+so the reasoning that was correct for Crit 9's actual requirements stays
+visible, not just the part that changed.
+
+## Gameplay expansion: zombie types, 28-day waves, player HP, multi-turret, medkits
+
+A large, explicitly-specified round: four zombie types (normal/flying/giant/
+boss) replacing the single type and linear day formula; zombies now damage
+and down/kill players, not just the wall/base; downed players can be field-
+revived (hold E) or, once dead, paid-resurrected at the base; up to four
+independently-built/upgraded/repaired turrets replacing the single turret;
+a 5-level wall whose level 2 ability changed shape (a periodic AOE pulse,
+not an on-hit reflect); medkits; a day-start countdown with daily healing;
+Game Over's "Retry Current Day" snapshot/restore; and browser-persistent
+player identity so a reconnect resumes the same HP/status/medkits instead of
+joining as someone new.
+
+**The brief left real decisions open on purpose, and I made them rather than
+guessing silently** — each is called out in a code comment at its point of
+use, not just here:
+
+- **Turret "pierce"/"multi-target" has no projectile to pierce along.** This
+  project's architecture deliberately has no bullet/line entity (`CLAUDE.md`:
+  hitscan only). "Attacks 2 targets" and "pierce up to N" are both
+  implemented the same way — one shot simultaneously hits the N nearest
+  zombies in a turret's range — rather than inventing a line-raycast system
+  the rest of the codebase has no equivalent for.
+- **Turrets needed to be attackable for "repair" to mean anything.** The
+  brief specifies turret HP and repair cost but never says what damages a
+  turret. I made ground zombies that end up within melee range of a live
+  turret fight it instead of their real target (`game-loop.ts`'s
+  `#applyZombieHit`) — the only way the repair system has a purpose. Flying
+  zombies ignore turrets the same way they ignore the wall.
+- **Boss damage/attack-interval/speed aren't in the brief** ("basic melee
+  attacks initially... keep extensible") — only each boss's HP is specified.
+  I picked one flat melee profile reused across all four bosses
+  (`ZOMBIE_TYPES.boss` in `game-state.ts`) rather than inventing four
+  different kits.
+- **The day-start retry snapshot is in-memory only, not SQLite.** A process
+  restart mid-day already loses live zombie/spawn-queue state under this
+  project's existing persistence rules (nothing new here — Crit 8's
+  single-type version had the same limitation, documented in
+  `PendingRepair.md`'s history). `retryDay()` falls back to the last
+  *persisted* state if a restart happened since the day began, rather than
+  failing outright — a degraded case I'd rather document than silently
+  pretend doesn't exist.
+- **Several numeric ranges weren't specified**: melee contact distance,
+  flying attack range, revive range, turret minimum separation, wall pulse
+  radius, turret splash radius. Each has a one-line comment at its
+  declaration in `game-state.ts` explaining the choice; none of them are
+  balance-critical enough to need a design conversation on their own, but
+  they're not hidden either.
+
+One pre-existing invariant this round genuinely breaks: `CLAUDE.md` used to
+state "normal zombie HP is 90, so three pistol hits kill one." Normal zombie
+HP is now 100 by explicit specification, and pistol damage wasn't asked to
+change — `CLAUDE.md`'s Gameplay invariants section has been rewritten to
+match the current numbers rather than silently leaving the old, now-false
+claim in place.
+
+## Visual redesign: CraftPix pixel-art assets
+
+Replaced the plain black/grid Canvas placeholder with the CraftPix "Zombie
+Survival" freebie pack: a tiled ground layer and scattered decoration (city
+tileset), animated per-type zombies (four reskinned enemy sets), a real base
+sprite, a textured wall ring, and HUD icons. The player stays a drawn Canvas
+shape by explicit instruction — the pack has no player-character sprite, and
+a mismatched placeholder sprite would be worse than a clean drawn one.
+
+**A real licensing question, not resolved, deliberately proceeding anyway.**
+CraftPix's free-tier license permits using the assets in a deployed game but
+explicitly says *"You can NOT resell the art source files... or a slightly
+modified version of the art,"* drawing the line at *"an app that uses the art
+as part of the play of the game is fine [...] an app that allows the user to
+save or export [...] the artwork itself is not fine."* This course's normal
+workflow makes assessment repos public on GitHub, which puts the raw PNG
+files (committed under `src/client/sprites/`) in a public, clonable,
+downloadable location — arguably exactly what that clause is written against,
+though the clause doesn't contemplate "public source repo" specifically. I
+flagged this before touching any code; the call to proceed anyway is mine to
+honour, not mine to make — recorded here so it isn't silently forgotten. If
+this matters for submission, it's worth a direct question to the course
+convenor or CraftPix support before the repo goes public.
+
+**Zombie type -> sprite set is an arbitrary, documented mapping, not a
+semantic one.** All four `Enimies_N` sets in the pack are palette-swapped
+reskins of the same civilian-zombie character — none is shaped like a
+flyer, a giant, or a boss. normal/flying/giant/boss are told apart at
+render time by scale, a hover motion + glow (flying), and a larger size +
+glow (giant/boss) — see `render.ts`'s `ZOMBIE_RENDER` table — not by
+different art. This was a deliberate choice over inventing a shape the pack
+doesn't have.
+
+**Tileset region coordinates were read off a rendered, labelled grid
+overlay, not guessed from the thumbnail.** `City_Tileset/PSD/Tile.png` has
+no accompanying per-tile metadata beyond a generic `Tile.tsx` (16px grid,
+374 tiles, no names). I rendered the sheet through a scaled, grid-lined,
+coordinate-labelled HTML page via a headless browser, read off exact pixel
+regions for the ground tiles, trees, bushes, fence panels, doors and small
+props, and visually re-verified each crop before using it — several initial
+guesses (pavement, bench, both doors) were off by one or more tiles and
+were corrected this way rather than shipped unchecked.
+
+**Found and fixed in passing: a pre-existing file was collaterally deleted
+by the asset re-import, breaking the course's own baseline check.**
+`assets/readme-template.html` — unrelated to CraftPix, committed since
+`5b680de`, read by `render-readme.ts` to serve `/readme/` — was missing from
+disk (`git status` showed it as deleted) after the CraftPix pack was copied
+into `assets/`, almost certainly because the import replaced the whole
+folder rather than adding to it. This crashed the server on the first
+request to `/readme/` and failed `spec/invariants.test.ts`'s "publishes
+README.md at /readme/" check — one of the two fixed invariants this project
+treats as never-break. Restored with `git restore` (the file was tracked,
+untouched otherwise); every other `assets/` change is exactly the CraftPix
+import, left alone.
+
+**Performance**: the ground layer is built once into an offscreen canvas
+and blitted whole each frame, not re-tiled per frame (~1,600 draws once
+instead of per frame) — the map's world size and tile layout never change,
+so there's nothing to invalidate the cache for except a canvas resize.
+Decorative props are a fixed list (a small seeded PRNG, not `Math.random()`,
+so the scatter is identical every load) kept clear of the base/wall/turret
+build area, and are drawn but never consulted by any gameplay code —
+movement, targeting, and placement validation are exactly as before.
+
 ## What was deliberately left out
 
-I deliberately kept the scope smaller than the full final-project idea. There are no multiple turrets, turret repair or refund, extra weapons, drops, multiple zombie types, crafting, public lobby or multiplayer yet. Multiplayer is a later requirement and was not forced into C8 just to increase scope. Some future balance values are intentionally still unset: Wall Level 3 and Turret Levels 2–3 do not have invented costs or stats yet. Leaving those decisions open is preferable to adding arbitrary numbers before there is enough playtesting evidence to justify them.
+Multiple turrets, turret repair, four zombie types, player HP/downed/revive,
+medkits and multiplayer — all previously listed here as not-yet-built — are
+now implemented; see the sections above. Every wall and turret level now has
+a real, specified cost, so there are no more intentionally-unpriced levels
+left to call out.
+
+What's still out of scope, per `CLAUDE.md`'s own scope rules: accounts or
+real authentication (identity is still just a browser-stored random id),
+public matchmaking/lobbies, multiple maps, crafting, vehicles, skill trees,
+extra weapons beyond the pistol, ammo/durability systems, chat or voice, and
+any second turret-placement mechanism alongside the existing X-menu one. A
+turret's "pierce"/"splash" abilities are a documented approximation of the
+brief (see above), not a projectile-physics system — adding one would be
+scope creep this project's own architecture rules already warn against.

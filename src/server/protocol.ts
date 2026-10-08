@@ -1,5 +1,9 @@
-// Message shapes shared between server and (future) client, so there's one
-// definition instead of a hand-copied second one on each side.
+// Message shapes shared between server and client, so there's one definition
+// instead of a hand-copied second one on each side (src/client/protocol.ts
+// mirrors this file — see its own comment on why it's a second copy, not a
+// shared import).
+
+import type { PlayerStatus, ZombieType } from "./game-state.ts";
 
 export interface PlayerSnapshot {
   id: string;
@@ -7,17 +11,49 @@ export interface PlayerSnapshot {
   x: number;
   y: number;
   hp: number;
+  maxHp: number;
+  status: PlayerStatus;
+  // 0 while not downed; counts down from DOWNED_DURATION_MS while downed, so
+  // the client can show a timer without re-deriving it from a clock offset.
+  downedRemainingMs: number;
+  medkits: number;
+  healing: boolean;
+  invulnerable: boolean;
 }
 
 export interface ZombieSnapshot {
   id: string;
+  type: ZombieType;
   x: number;
   y: number;
   hp: number;
+  maxHp: number;
+  // Purely a rendering cue (walk vs. attack animation) — the actual attack
+  // resolution already happened server-side by the time this is seen.
+  attacking: boolean;
+}
+
+export interface TurretSnapshot {
+  id: string;
+  level: number;
+  hp: number;
+  maxHp: number;
+  x: number;
+  y: number;
+  target: { x: number; y: number } | null;
+  shotsFired: number;
+}
+
+// Someone currently mid-revive (holding E on a downed teammate) — broadcast
+// so every client can show the hold-progress, not just the reviver's own.
+export interface ReviveProgressSnapshot {
+  reviverId: string;
+  targetId: string;
+  remainingMs: number;
 }
 
 // The round's state machine. "waiting" is also every process's boot state —
-// see GameLoop's own comment on why phase itself is never persisted.
+// see GameLoop's own comment on why a stored "running" is never trusted as-is.
 export type GamePhase = "waiting" | "running" | "paused" | "game_over" | "victory";
 
 // Server -> client, broadcast at a stable rate (ws-server.ts).
@@ -31,28 +67,20 @@ export interface StateMessage {
   wallLevel: number;
   wallHp: number;
   wallMaxHp: number;
-  turretLevel: number;
-  turretHp: number;
-  turretMaxHp: number;
-  turretBuilt: boolean;
-  turretX: number; // meaningless while !turretBuilt
-  turretY: number;
-  // Not persisted (GameLoop's own comment explains why) — just this tick's
-  // targeting, so the client can draw the turret's barrel/aim line and tell
-  // a real shot apart from an idle turret via turretShotsFired increasing.
-  turretTarget: { x: number; y: number } | null;
-  turretShotsFired: number;
-  // This day's wave: the client renders its progress bar straight from
-  // these, nothing computed locally.
+  // > 0 while the day's 5-second countdown banner is showing; 0 once zombies
+  // are allowed to spawn. Still "running" throughout — players can move/
+  // build/interact during this window, only spawning is held back.
+  dayIntroRemainingMs: number;
   killedZombies: number;
   totalZombiesForDay: number;
   players: PlayerSnapshot[];
   zombies: ZombieSnapshot[];
+  turrets: TurretSnapshot[];
+  reviveProgress: ReviveProgressSnapshot[];
 }
 
 // Sent once, right after a connection is accepted, so the client knows which
-// entry in players[] is itself (for prediction/reconciliation vs. plain
-// interpolation of everyone else).
+// entry in players[] is itself.
 export interface WelcomeMessage {
   type: "welcome";
   playerId: string;
@@ -64,40 +92,47 @@ export interface FullMessage {
   type: "full";
 }
 
-// Sent only to the socket whose interact/place_turret request was rejected —
-// the Crit 9 ADR's "make the loser's rejection visible" behaviour, instead of
-// Crit 8's silent no-op.
+// Sent instead of "welcome" (then the socket is closed) when the supplied
+// playerId is already driving an open connection — one identity, one socket.
+export interface DuplicateIdentityMessage {
+  type: "duplicate_identity";
+}
+
+// Sent only to the socket whose request was rejected — the Crit 9 ADR's
+// "make the loser's rejection visible" behaviour, now covering every
+// server-validated action, not just build/upgrade.
 export interface RejectedMessage {
   type: "rejected";
-  action: InteractAction | "place_turret";
+  action: string;
   reason: string;
 }
 
-// Client -> server. input carries the full held-key state and the current
-// aim angle on every send; shoot is a bare one-shot event resolved against
-// whatever input the server has stored most recently.
+// Client -> server. input carries the full held-key state, current aim
+// angle, and whether E (revive) is currently held, on every send.
 export interface InputMessage {
   type: "input";
   move: { up: boolean; down: boolean; left: boolean; right: boolean };
   aimAngle: number;
+  reviving: boolean;
 }
 
 export interface ShootMessage {
   type: "shoot";
 }
 
-// Start and resume are the same transition server-side (GameLoop.play()) —
-// two buttons in the UI for clarity, one state-machine edge underneath.
+// Start and resume are the same transition server-side (GameLoop.play()).
+// retry_day is new: only valid from "game_over", restores the day-start
+// snapshot and re-plays the same day (see GameLoop.retryDay()) — distinct
+// from "restart", which resets everything back to Day 1.
 export interface ControlMessage {
-  type: "start" | "pause" | "resume" | "restart";
+  type: "start" | "pause" | "resume" | "restart" | "retry_day";
 }
 
-// The X-menu's actions. The server re-validates range/cost/current building
+// The base X-menu's actions. The server re-validates range/cost/current
 // state independently every time — this message is a request, not a grant.
-// build_turret isn't here any more — picking it client-side enters placement
-// mode instead (purely local UI, no message sent yet); only the follow-up
-// click, as a PlaceTurretMessage, is a real request.
-export type InteractAction = "build_wall" | "upgrade_wall";
+// build_turret isn't here — picking it client-side enters placement mode
+// instead; only the follow-up click, as a PlaceTurretMessage, is a request.
+export type InteractAction = "build_wall" | "upgrade_wall" | "revive_dead" | "buy_medkit";
 
 export interface InteractMessage {
   type: "interact";
@@ -105,13 +140,32 @@ export interface InteractMessage {
 }
 
 // Sent once, when the player clicks a (client-side-judged) valid spot during
-// placement mode. The server re-validates all of it independently — range,
-// cost, "not already built", and whether (x, y) is actually inside the
-// allowed ring — the client's own validity check is only ever a preview.
+// placement mode. The server re-validates everything independently.
 export interface PlaceTurretMessage {
   type: "place_turret";
   x: number;
   y: number;
 }
 
-export type ClientMessage = InputMessage | ShootMessage | ControlMessage | InteractMessage | PlaceTurretMessage;
+// The turret X-menu's actions — distinct from InteractMessage because it
+// needs a target id (there's no longer exactly one implicit turret).
+export type TurretAction = "upgrade" | "repair";
+
+export interface TurretInteractMessage {
+  type: "turret_interact";
+  turretId: string;
+  action: TurretAction;
+}
+
+export interface UseMedkitMessage {
+  type: "use_medkit";
+}
+
+export type ClientMessage =
+  | InputMessage
+  | ShootMessage
+  | ControlMessage
+  | InteractMessage
+  | PlaceTurretMessage
+  | TurretInteractMessage
+  | UseMedkitMessage;

@@ -1,0 +1,41 @@
+{
+    "activeFile": "безымянный.tmx",
+    "expandedProjectPaths": [
+        "."
+    ],
+    "file.lastUsedOpenFilter": "Все файлы (*)",
+    "fileStates": {
+        "Tile.tsx": {
+            "scaleInDock": 1,
+            "scaleInEditor": 1
+        },
+        "безымянный.tmx": {
+            "scale": 1,
+            "selectedLayer": 4,
+            "viewCenter": {
+                "x": 691,
+                "y": 318
+            }
+        }
+    },
+    "last.imagePath": "B:/Заказы/Craftpix_Gamekit_Shooter_1_8px/City_Tileset/PSD",
+    "map.height": 30,
+    "map.lastUsedFormat": "tmx",
+    "map.tileHeight": 16,
+    "map.tileWidth": 16,
+    "map.width": 50,
+    "openFiles": [
+        "безымянный.tmx",
+        "Tile.tsx"
+    ],
+    "project": "Tiled_map.tiled-project",
+    "recentFiles": [
+        "Tile.tsx",
+        "безымянный.tmx"
+    ],
+    "tileset.lastUsedFormat": "tsx",
+    "tileset.tileSize": {
+        "height": 16,
+        "width": 16
+    }
+}

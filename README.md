@@ -1,6 +1,6 @@
 # Last Stand
 
-A small zombie base-defence game about surviving waves, earning shared resources, and deciding how to protect one base. The current Crit 8 build is a proof-of-life slice: the core loop works, progress persists, and the project is ready to grow into multiplayer later.
+A small cooperative zombie base-defence game: up to 4 players survive 28 days of waves, earn shared XP, and decide together how to defend one base — a wall, up to four turrets, and each other, since a downed teammate needs a hand up before the timer runs out. The per-crit sections below record how the scope grew; the game itself is always the current state of the code, not any one crit's snapshot of it.
 
 ## What good means here
 
@@ -44,9 +44,43 @@ decision record at
 chosen specifically because shared XP and shared build state are the one
 place this game's players actually contend with each other.
 
+## Gameplay expansion scope
+
+The full 28-day wave table is live: four zombie types (normal, flying,
+giant, a boss on days 5/10/20/28), each with its own behaviour — flying
+zombies attack from range and ignore the wall, giants explode on death, a
+ground zombie that reaches a turret fights it instead of passing by. Zombies
+now threaten players directly, not just the base: HP loss can down a
+player (field-revivable by a teammate holding E, or paid-resurrectable at
+the base once truly dead), and medkits give players an active way to look
+after themselves and each other. The wall now has 5 levels and up to 4
+independently-built, independently-upgraded, independently-repaired turrets
+can stand at once, each a real choice of where to spend shared XP. A day
+now opens with a 5-second countdown and a daily heal, and a Game Over can be
+retried from that day's own start rather than only ever restarting from
+Day 1.
+
+Where the brief left specifics open (turret "pierce"/"splash" with no
+projectile system to pierce along, what actually damages a turret, boss
+attack stats beyond HP, several interaction ranges), the choice made and why
+is recorded in `PROCESS.md`'s gameplay-expansion entry and in code comments
+at each value's declaration — not left for a reader to guess at.
+
+## Visual style
+
+Terrain, zombies, the base, the wall and the HUD use the CraftPix "Zombie
+Survival" pixel-art pack; the player stays hand-drawn Canvas shapes, since
+the pack has no player-character sprite and a mismatched one would read
+worse than a clean drawn one. Which of the pack's four reskinned zombie
+sets stands in for normal/flying/giant/boss (none are shaped like any of
+those roles — see `PROCESS.md`) and a real, unresolved licensing question
+about the pack's free-tier terms versus this course's public-repo workflow
+are both recorded in `PROCESS.md`'s visual-redesign entry rather than
+quietly assumed away.
+
 ## What it deliberately leaves out
 
-There are no accounts, public lobbies, crafting systems, inventories, vehicles, weapon attachments, multiple zombie classes, or large maps. Only one turret is currently supported, and later upgrade values are left unset until there is enough playtesting evidence to justify them. The project should become deeper through shared decisions, not through unrelated systems.
+There are no accounts, public lobbies, crafting systems, inventories, vehicles, weapon attachments beyond the pistol, ammo/durability systems, or large maps. Turret "piercing" and "splash" are a hitscan-based approximation (this project's architecture has no projectile entity), not real projectile physics. The project should become deeper through shared decisions, not through unrelated systems.
 
 ## Which claims are checked, and which are judged
 
@@ -59,5 +93,6 @@ Other parts of “good” cannot be proved by tests alone. Movement must feel re
 - The COMP4020 Final Project brief, especially its emphasis on small-scale multiplayer, co-presence, persistence, and defining what “good” means for a specific app.
 - Crit 8 playtesting of this build, which changed movement, wall behaviour, wave progression, and turret feedback.
 - The Crit 9 brief's call for a single documented decision about concurrent use, which produced the simultaneous-build-conflicts ADR linked above.
+- A detailed gameplay-expansion specification (28-day wave table, zombie types, wall/turret levels, player HP/downed/revive/medkits, X-menu redesign) that drove the current scope — see `PROCESS.md`.
 
 This list is intentionally short and includes only sources actually used so far.

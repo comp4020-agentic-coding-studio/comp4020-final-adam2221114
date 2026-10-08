@@ -20,7 +20,8 @@
       }
       #game {
         display: block;
-        border: 1px solid #333;
+        border: 2px solid #4a3f2f;
+        image-rendering: pixelated;
         /* the canvas draws its own crosshair at the mouse position; the OS
            pointer would just be a redundant second one on top of it */
         cursor: none;
@@ -30,10 +31,14 @@
         top: 8px;
         left: 8px;
         font-size: 14px;
-        line-height: 1.6;
-        background: rgb(0 0 0 / 55%);
+        line-height: 1.8;
+        background: rgb(20 18 14 / 80%);
+        border: 2px solid #4a3f2f;
         padding: 8px 12px;
         border-radius: 4px;
+      }
+      #hud span {
+        image-rendering: pixelated;
       }
       #conn {
         position: fixed;
@@ -98,6 +103,9 @@
         text-shadow: 0 2px 8px rgb(0 0 0 / 70%);
         pointer-events: none;
       }
+      #phase-banner span {
+        image-rendering: pixelated;
+      }
       #phase-banner:empty {
         display: none;
       }
@@ -108,8 +116,8 @@
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        background: rgb(10 10 10 / 88%);
-        border: 1px solid #555;
+        background: rgb(16 14 10 / 92%);
+        border: 2px solid #6a5a3f;
         border-radius: 6px;
         padding: 16px 24px;
         font-family: ui-monospace, monospace;
@@ -133,7 +141,8 @@
       <button id="btn-start">Start Game</button>
       <button id="btn-pause">Pause</button>
       <button id="btn-resume">Resume</button>
-      <button id="btn-restart">Restart</button>
+      <button id="btn-retry">Retry Current Day</button>
+      <button id="btn-restart">Restart (Day 1)</button>
     </div>
     <footer><a href="/readme/">About this app</a></footer>
     <script type="module" src="/main.js"></script>

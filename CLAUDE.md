@@ -88,63 +88,142 @@ Schema changes must be backward-compatible with existing databases where practic
 Do not silently destroy existing stored progress during a migration.
 Gameplay invariants
 Unless I explicitly change them, preserve these rules.
+
+Superseded by Crit 10 (2026-10-08): the single-turret, 3-level-wall,
+one-zombie-type, no-player-damage design below (zombie HP 90 / "three
+pistol hits", one turret, wall levels 1-3, zombiesForDay formula) was
+Crit 8/9's scope. Crit 10 explicitly replaced it with the 28-day/4-type
+zombie table, 5-level wall, up to 4 independent turrets, and player HP/
+downed/dead/revive/medkits. The rules below describe the CURRENT system;
+see PROCESS.md's Crit 10 entry for what changed and why, and
+docs/decisions/ for the one documented concurrency-style decision that
+entry links (simultaneous turret build/upgrade/repair conflicts).
+
 Waves
-A day advances only after its complete zombie wave is spawned and defeated.
-The current wave size rule is:
-zombiesForDay(day) = 3 + (day - 1) * 6
+A day advances only after its complete zombie wave (every type, including
+any boss) is spawned and defeated.
+The wave table (day -> normal/flying/giant/boss counts) is fixed, not a
+formula — see game-state.ts's WAVE_TABLE. Day 28 is the final day
+(DAY_VICTORY); completing it ends the round in victory.
+Spawn pacing is adaptive (spawnIntervalForDay), not a flat interval, so a
+late-game day's much larger zombie count doesn't take excessively long to
+finish spawning.
 Do not reintroduce timer-only day advancement.
+At the start of every day (including Day 1's first Start click, but NOT a
+mid-day resume or process restart), there is a 5-second intro: players can
+move/build/interact, but no zombie spawns until it ends. Alive players heal
+DAILY_HEAL_AMOUNT (30, capped at maxHp) at that same moment. This must never
+re-fire from a reconnect, a pause/resume, or a process restart — only a
+genuine new day (see game-loop.ts's #beginNewDay vs #resetDayCombatState
+split, which exists specifically to keep this true).
 Zombies
-Normal zombie HP is 90.
-Player pistol damage is 30, so a normal zombie requires three successful pistol hits.
-Zombie health shown in the UI must come from authoritative server HP.
+Four types — normal, flying, giant, boss — each with its own HP/damage/
+attack-interval/speed in game-state.ts's ZOMBIE_TYPES (boss HP additionally
+varies by spawn day, BOSS_HP_BY_DAY). Pistol damage (30) is unchanged, so
+"three hits kills a normal zombie" is NO LONGER true (normal HP is 100);
+do not reintroduce that specific invariant without also reconciling the
+numbers.
+Zombies prioritise the nearest alive player within AGGRO_RADIUS; otherwise
+they head for the base. Ground zombies (normal/giant/boss) cannot cross an
+intact wall to reach anything inside its ring, including a player who
+wandered in there — they stop at the wall and attack it instead, same as
+before. Flying zombies ignore the wall entirely (ranged attack, "may attack
+over walls") and also ignore turrets.
+A ground zombie that ends up within melee range of a live turret fights it
+instead of its real target — this is what makes turret HP/repair mean
+anything; it is a documented assumption (game-loop.ts's #applyZombieHit),
+not stated explicitly in the original brief.
+A giant deals its explosion damage to every ALIVE player within its
+explosion radius when it dies.
+Zombie health/type shown in the UI must come from authoritative server
+state (ZombieSnapshot.hp/maxHp/type).
 Shared XP
 XP is a shared team resource.
 XP must not automatically create buildings or upgrades.
-Players must deliberately spend XP through the base interaction system.
+Players must deliberately spend XP through the base interaction system (or,
+for a specific turret, that turret's own menu — see Turret below).
+Player HP, downed, dead, revive, medkits
+Each player has their own HP (maxHp 100), independent of shared XP.
+At 0 HP a player becomes "downed": cannot move or attack, 45-second timer
+(DOWNED_DURATION_MS). Another alive player holding E within REVIVE_RANGE for
+REVIVE_HOLD_MS (3s) field-revives them to 50 HP with a short invulnerability
+window — free, no XP cost. If the timer expires first, they become "dead";
+any alive player can pay XP (resurrectCostForDay, scaling by current day) at
+the BASE menu to fully resurrect the earliest-dead teammate to 100 HP with a
+longer invulnerability window.
+A dead or downed player keeps their medkit count; reconnecting must never
+grant free HP/XP/medkits (hp/status/medkits are the only durable per-player
+fields — see persistence.ts).
+Medkits: bought at the base (100 XP each, cap 2 per player), used with H,
+take 2 seconds, heal 50 HP, can be moved during but not attacked during, and
+are only consumed on an uninterrupted completion — any damage during the
+2 seconds cancels the heal without consuming the medkit.
+Game Over triggers on baseHp reaching 0 OR every currently-connected player
+being downed/dead simultaneously. "Retry Current Day" (only valid from
+game_over) restores that day's start snapshot (sharedXp/baseHp/wall/
+turrets/player hp-status-medkits) and replays the same day — it does not
+reset to Day 1, and does not preserve XP/damage from the failed attempt.
 Wall
-The wall must physically block zombies while it has HP.
-While wallHp > 0:
-- zombies stop at the wall
-- zombies attack the wall
-- the base must not take zombie damage through the wall
-Only after the wall is destroyed may zombies continue to the base.
-Building/rebuilding Wall Level 1 costs 100 XP.
-Upgrading an intact wall to Level 2 costs 300 XP.
-A destroyed wall must be rebuilt from Level 1 rather than restoring its previous level for free.
-Wall Level 2 damages an attacking zombie for 5 damage according to the existing server-side attack rhythm.
-Do not invent missing Level 3 prices or new Level 3 abilities unless I specify them.
+The wall must physically block ground zombies while it has HP; flying
+zombies bypass it entirely (see Zombies above).
+While wallHp > 0, ground zombies stop at the wall and attack it; the base
+must not take zombie damage through it. Only after the wall is destroyed may
+ground zombies continue to the base.
+Five levels (game-state.ts's WALL_LEVELS): level 2's ability is a periodic
+AOE pulse (not an on-hit reflect); levels 3-4 are an on-hit spike reflect;
+level 5 adds both the spike reflect AND a flat 20% damage reduction on
+incoming wall damage. A destroyed wall must be rebuilt from Level 1 rather
+than restoring its previous level for free.
 Turret
-Building the first turret costs 200 XP.
-Turret Level 1 currently has:
-- 50 HP
-- server-authoritative targeting
-- limited attack range
-- slow automatic fire
-- server-side instant hit resolution
-The player chooses the turret location, but the server must validate that the position is inside the allowed base build area.
-Only one turret is allowed until I explicitly change this.
-Do not invent Level 2 or Level 3 upgrade prices.
+Up to MAX_TURRETS (4) independent turrets at once, shared by the whole team
+— each with its own id, position, level, HP, and fire cooldown
+(persistence.ts's turrets table). A destroyed turret frees its slot.
+The player chooses each turret's location when building it; the server
+validates both the allowed build ring around the base AND a minimum
+separation from any existing turret (TURRET_MIN_SEPARATION).
+Building any new turret always costs Level 1's price; upgrading/repairing
+an EXISTING turret is a separate, turret-targeted action (not available from
+the base menu — see Input and interaction rules) at that specific turret's
+own level-based cost.
+Levels 2+'s "attacks N targets" / "pierce up to N" are both implemented the
+same way — a shot hits the N nearest in-range zombies simultaneously — since
+this project's hitscan-only architecture has no projectile/line entity to
+pierce along. Level 5's splash is a separate, position-based AOE around the
+single primary hit. All levels can hit flying zombies (targeting was never
+type-restricted).
 Input and interaction rules
-The base interaction menu is opened near the base with X.
+Pressing X opens ONE of two contexts, chosen by proximity: near an existing
+turret, its own menu (Upgrade This Turret / Repair This Turret, affecting
+only that turret); otherwise near the base, the base menu (Build Turret,
+Build Wall, Upgrade Wall, Revive Dead Teammate, Buy Medkit). The base menu
+must never offer turret upgrade/repair — that split is deliberate, not an
+oversight, and a turret in range takes priority over the base when both
+overlap.
 Do not trust the client when validating interaction range.
-The server must independently validate:
-- player distance from the base
-- available XP
-- current building state
-- requested upgrade/build action
-- turret placement coordinates
-Invalid actions must not mutate state.
+The server must independently validate, for every one of these: player
+distance from the target (base or the specific turret), available XP,
+current building/turret/player state, and (for placement) the build ring
+AND minimum separation from other turrets.
+Holding E near a downed teammate (REVIVE_RANGE, REVIVE_HOLD_MS) and
+pressing H to use a medkit are both separate from the X-menu and have their
+own server-side validation (status, range, cost, cooldown/duration).
+Invalid actions must not mutate state, and must tell the requester why
+(the "rejected" message) rather than silently doing nothing — see the
+Crit 9 ADR this generalizes.
 UI rules
 Clarity is more important than decoration.
 The player should be able to understand:
-- current day
-- zombies killed / total zombies in the wave
+- current day, and the day-intro countdown when one is active
+- zombies killed / total zombies in the wave, and each zombie's type
 - base HP
 - shared XP
 - wall HP/state
-- turret state
+- every turret's own state (id implicitly, level, HP, position)
+- their own HP/status (alive/downed/dead), medkit count, and any teammate's status
 - current game phase
-Keep Start / Pause / Resume / Restart behaviour clear.
+Keep Start / Pause / Resume / Retry Current Day / Restart behaviour clear —
+Retry Current Day only appears after a Game Over and is distinct from
+Restart (which resets to Day 1).
 Do not hide important game state behind decorative UI.
 When adding visual feedback, prefer simple Canvas geometry over introducing a new rendering framework.
 Game-state rules
@@ -161,14 +240,24 @@ Testing rules
 Do not claim a behaviour works without verifying it.
 Prefer tests for important promises and invariants, not test-count inflation.
 High-value checks include:
-- three pistol hits kill a normal zombie
-- wall blocks base damage while wall HP is above zero
-- zombies cannot pass an intact wall
-- a wave must be cleared before the next day
-- turret placement is rejected outside the legal area
-- purchases reject insufficient XP
-- persistence survives process restart
-- restart produces the intended reset state
+- a normal zombie's HP and the pistol's damage together decide how many hits
+  kill one — verify the actual numbers in game-state.ts, not a memorised count
+- wall blocks base damage while wall HP is above zero; flying zombies bypass
+  the wall entirely
+- ground zombies cannot pass an intact wall; flying zombies can
+- a wave (every type, including any boss) must be cleared before the next day
+- turret placement is rejected outside the legal area AND when too close to
+  another turret AND once MAX_TURRETS is already built
+- purchases (wall, turret build/upgrade/repair, medkit, resurrection) reject
+  insufficient XP, and never partially mutate state on a rejected request
+- a downed player's 45s timer, field revive (50 HP + brief invulnerability),
+  and paid resurrection (100 HP) all behave as specified
+- daily healing and the retry-day snapshot never re-apply from a reconnect,
+  pause/resume, or process restart — only a genuine new day
+- persistence survives process restart, including the multi-turret table and
+  per-player identity (hp/status/medkits)
+- restart produces the intended Day-1 reset state; retry_day restores the
+  CURRENT day's start snapshot without resetting the day counter
 - client input cannot directly mutate authoritative server state
 When testing realtime behaviour, inspect authoritative WebSocket state where useful instead of relying only on screenshots or logs.
 If a test script is wrong, say so clearly; do not mislabel a test-script failure as a product bug.
