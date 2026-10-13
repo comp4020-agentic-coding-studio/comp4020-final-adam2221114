@@ -4,11 +4,15 @@
 // PROCESS.md's visual-redesign entry). Pure data/loading here; render.ts
 // does the actual drawing.
 //
-// The pack has no "flying"/"giant"/"boss" shaped sprite — all four Enemies_N
-// sets are palette-swapped reskins of the same civilian-zombie character.
-// Normal/flying/giant/boss are told apart by render-time scale, tint and
-// (for flying) a hover motion, not by distinct art — a documented choice,
-// not a missing feature.
+// The pack has no "giant"/"boss" shaped sprite either — both reuse
+// palette-swapped reskins of the same civilian-zombie character, told apart
+// from "normal" by render-time scale/tint only (a documented choice, not a
+// missing feature). Flying zombies used to do the same, but a reskinned
+// humanoid read as "the same zombie" rather than a distinct airborne threat
+// (see PROCESS.md's zombie-visual-identity entry) — flying is now drawn
+// procedurally in render.ts instead, the same reasoning this project already
+// applies to the player character and turrets ("no sprite in the pack is
+// shaped like this, so draw it instead of forcing a mismatched one in").
 import type { ZombieType } from "./protocol.ts";
 
 export interface SpriteSheet {
@@ -42,19 +46,19 @@ function zombieSheets(dir: string): Record<ZombieAnimState, SpriteSheet> {
   };
 }
 
-// normal<-Enimies_1 (light shirt), flying<-Enimies_2 (red shirt, drawn
-// hovering), boss<-Enimies_3 (dark suit, drawn largest + tinted), giant<-
-// Enimies_4 (navy shirt, drawn oversized). Picked for visual variety only —
-// none of the four "means" its role by its art.
-export const ZOMBIE_SHEETS: Record<ZombieType, Record<ZombieAnimState, SpriteSheet>> = {
+// normal<-Enimies_1 (light shirt), boss<-Enimies_3 (dark suit, drawn largest
+// + tinted), giant<-Enimies_4 (navy shirt, drawn oversized) — picked for
+// visual variety only, neither "means" its role by its art. Flying has no
+// entry here: render.ts draws it procedurally (see the file comment above),
+// so there's nothing to preload for it.
+export type SpritedZombieType = Exclude<ZombieType, "flying">;
+export const ZOMBIE_SHEETS: Record<SpritedZombieType, Record<ZombieAnimState, SpriteSheet>> = {
   normal: zombieSheets("normal"),
-  flying: zombieSheets("flying"),
   giant: zombieSheets("giant"),
   boss: zombieSheets("boss"),
 };
 
 export const TILESET = loadImage("/sprites/tileset.png");
-export const UI_SHEET = loadImage("/sprites/ui.png");
 
 // --- City_Tileset/PSD/Tile.png regions (16px grid). Located by rendering
 // the sheet through a labelled-grid overlay and visually confirming each
@@ -68,6 +72,16 @@ export const TILESET_REGIONS = {
     { sx: 48, sy: 176 },
   ],
   pavementAlt: { sx: 64, sy: 240 },
+  // Map-redesign additions (same already-licensed sheet, previously-
+  // uncatalogued tiles — see PROCESS.md's map-redesign entry): stained/
+  // cracked variants for the mid combat zone, and a heavily-cracked dark
+  // variant for damaged patches further out. No new asset files.
+  pavementCracked: [
+    { sx: 16, sy: 240 },
+    { sx: 32, sy: 240 },
+    { sx: 16, sy: 256 },
+  ],
+  pavementDamaged: { sx: 80, sy: 256 },
   tree: { sx: 256, sy: 64, sw: 32, sh: 48 },
   bush: { sx: 64, sy: 160, sw: 64, sh: 64 },
   fencePanel: { sx: 256, sy: 160, sw: 32, sh: 32 },
@@ -80,15 +94,20 @@ export const TILESET_REGIONS = {
   roofBrick: { sx: 256, sy: 32, sw: 48, sh: 48 },
 } as const;
 
-// --- UI.png regions (16px grid) ---
-export const UI_REGIONS = {
-  heart: { sx: 208, sy: 160, sw: 16, sh: 16 },
-  medkit: { sx: 16, sy: 144, sw: 16, sh: 16 },
-  skull: { sx: 64, sy: 144, sw: 16, sh: 16 },
-  shield: { sx: 96, sy: 144, sw: 16, sh: 16 },
-  star: { sx: 80, sy: 144, sw: 16, sh: 16 },
-  house: { sx: 48, sy: 176, sw: 16, sh: 16 },
-  // 9-slice-able panel background (plain, border baked in) — big block
-  // variant, large enough to scale down cleanly for HUD/menu panels.
-  panel: { sx: 80, sy: 80, sw: 48, sh: 48 },
-} as const;
+// --- UI icons + panel chrome: src/client/sprites/ui/ ---
+//
+// Replaces the former CraftPix-derived ui.png atlas. CraftPix's free-tier
+// license explicitly forbids redistributing the art source files, which
+// conflicts with this course's public-repo workflow (flagged, unresolved —
+// see PROCESS.md's visual-redesign entry); these icons/panels instead come
+// from two Kenney.nl packs released CC0 (public domain, redistribution of
+// the original files explicitly permitted). Full sourcing, pack URLs, and
+// the exact tile coordinates each icon was cropped from are documented in
+// assets/ui-kenney/NOTES.md. Individual files rather than an atlas — no
+// pixel-coordinate bookkeeping needed for a handful of icons.
+export const UI_ICON_NAMES = ["heart", "medkit", "skull", "shield", "coin", "house", "trophy"] as const;
+export type UiIconName = (typeof UI_ICON_NAMES)[number];
+
+export function uiIconUrl(name: UiIconName): string {
+  return `/sprites/ui/icons/${name}.png`;
+}

@@ -38,17 +38,22 @@ import {
   XP_PER_KILL,
   ZOMBIE_TYPES,
   advanceZombie,
+  batchSpawnAngles,
   buildSpawnQueue,
   distance,
   findNearestZombiesInRange,
   movePlayer,
+  randomBatchSize,
   resolveShot,
   resurrectCostForDay,
-  spawnIntervalForDay,
+  spawnPositionAtAngle,
+  spawnTierForDay,
   spawnZombie,
   totalZombiesForDay,
+  waveForDay,
   type InputState,
   type Player,
+  type SpawnTier,
   type Vec2,
   type Zombie,
   type ZombieType,
@@ -128,7 +133,7 @@ export class GameLoop {
   #phase: GamePhase = "waiting";
   #clockMs = 0; // monotonic; every cooldown/timer in this class is measured against this, never wall-clock
   #spawnTimerMs = 0;
-  #spawnIntervalMs = 2000;
+  #spawnTier: SpawnTier = spawnTierForDay(1);
   #spawnQueue: ZombieType[] = [];
   #spawnedZombies = 0;
   #killedZombies = 0;
@@ -605,7 +610,7 @@ export class GameLoop {
     this.#spawnedZombies = 0;
     this.#killedZombies = 0;
     this.#spawnTimerMs = 0;
-    this.#spawnIntervalMs = spawnIntervalForDay(this.#totalZombiesForDay);
+    this.#spawnTier = spawnTierForDay(day);
     this.#wallPulseLastFiredAt = this.#clockMs;
   }
 
@@ -668,6 +673,13 @@ export class GameLoop {
       dayIntroRemainingMs: Math.max(0, this.#dayIntroUntilMs - now),
       killedZombies: this.#killedZombies,
       totalZombiesForDay: this.#totalZombiesForDay,
+      // Read-only lookup against the fixed WAVE_TABLE for this day — not
+      // this.#spawnQueue (which shrinks as the day empties it) and not a new
+      // stored field, so there's nothing new to get out of sync. Lets the
+      // client show what a day actually contains (composition HUD, "new
+      // enemy" intro popups) without guessing from which zombies happen to
+      // have spawned yet.
+      dayWaveComposition: waveForDay(progress.day),
       players: [...this.#players.values()].map((p) => ({
         id: p.id,
         colorIndex: p.colorIndex,
@@ -681,7 +693,18 @@ export class GameLoop {
         healing: p.healingSince !== null,
         invulnerable: now < p.invulnerableUntil,
       })),
-      zombies: this.#zombies.map((z) => ({ id: z.id, type: z.type, x: z.pos.x, y: z.pos.y, hp: z.hp, maxHp: z.maxHp, attacking: z.attacking })),
+      zombies: this.#zombies.map((z) => ({
+        id: z.id,
+        type: z.type,
+        x: z.pos.x,
+        y: z.pos.y,
+        hp: z.hp,
+        maxHp: z.maxHp,
+        attacking: z.attacking,
+        attacksLanded: z.attacksLanded,
+        lastHitKind: z.lastHitKind,
+        lastHitTargetId: z.lastHitTargetId,
+      })),
       turrets: progress.turrets.map((t) => {
         const runtime = this.#turretRuntime.get(t.id);
         return {
@@ -797,22 +820,35 @@ export class GameLoop {
     this.#checkAllIncapacitated();
   }
 
-  // Paces spawning from this day's pre-built queue (buildSpawnQueue) at the
-  // adaptive interval chosen for this day's total (spawnIntervalForDay).
-  // Held entirely during the day-intro countdown — zombies don't spawn until
-  // it finishes, though players can already move/build/interact.
+  // Spawns this day's pre-built queue (buildSpawnQueue — still owns the
+  // actual totals/type composition/boss-last ordering, untouched here) in
+  // simultaneous batches at a fixed per-day-range interval (spawnTierForDay)
+  // instead of one zombie at a time. Held entirely during the day-intro
+  // countdown — zombies don't spawn until it finishes, though players can
+  // already move/build/interact.
   #maybeSpawn(dtMs: number): void {
     if (this.#clockMs < this.#dayIntroUntilMs) return;
     if (this.#spawnQueue.length === 0) return;
     this.#spawnTimerMs += dtMs;
-    if (this.#spawnTimerMs < this.#spawnIntervalMs) return;
-    this.#spawnTimerMs -= this.#spawnIntervalMs;
+    if (this.#spawnTimerMs < this.#spawnTier.intervalMs) return;
+    this.#spawnTimerMs -= this.#spawnTier.intervalMs;
 
-    const type = this.#spawnQueue.shift()!;
-    const z = spawnZombie(type, this.#progress.get().day);
-    this.#zombies.push(z);
-    this.#spawnedZombies++;
-    console.log(`zombie ${z.id} (${type}) spawned (${this.#spawnedZombies}/${this.#totalZombiesForDay})`);
+    // Capped to whatever's left so the final batch of a day never
+    // over-spawns past the day's real total.
+    const count = Math.min(randomBatchSize(this.#spawnTier), this.#spawnQueue.length);
+    const angles = batchSpawnAngles(count);
+    const players = [...this.#players.values()];
+    const day = this.#progress.get().day;
+    const spawnedIds: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const type = this.#spawnQueue.shift()!;
+      const pos = spawnPositionAtAngle(angles[i], players);
+      const z = spawnZombie(type, day, pos);
+      this.#zombies.push(z);
+      this.#spawnedZombies++;
+      spawnedIds.push(z.id);
+    }
+    console.log(`horde batch: ${count} zombies spawned around the perimeter (${this.#spawnedZombies}/${this.#totalZombiesForDay}) [${spawnedIds.join(", ")}]`);
   }
 
   #updateZombies(): void {
@@ -848,6 +884,9 @@ export class GameLoop {
           ? progress.turrets.filter((t) => t.id !== nearTurret.id)
           : progress.turrets.map((t) => (t.id === nearTurret.id ? { ...t, hp } : t));
         this.#progress.update({ turrets });
+        zombie.attacksLanded++;
+        zombie.lastHitKind = "turret";
+        zombie.lastHitTargetId = nearTurret.id;
         if (destroyed) {
           this.#turretRuntime.delete(nearTurret.id);
           this.#progress.flush();
@@ -861,7 +900,12 @@ export class GameLoop {
 
     if (zombie.attackTarget.kind === "player") {
       const player = this.#players.get(zombie.attackTarget.playerId);
-      if (player) this.#damagePlayer(player, cfg.damage, now);
+      if (player) {
+        zombie.attacksLanded++;
+        zombie.lastHitKind = "player";
+        zombie.lastHitTargetId = player.id;
+        this.#damagePlayer(player, cfg.damage, now);
+      }
       return;
     }
 
@@ -875,6 +919,9 @@ export class GameLoop {
       const wallHp = Math.max(0, progress.wallHp - dmg);
       const destroyed = wallHp <= 0;
       this.#progress.update({ wallHp, ...(destroyed ? { wallLevel: 0, wallMaxHp: 0 } : {}) });
+      zombie.attacksLanded++;
+      zombie.lastHitKind = "wall";
+      zombie.lastHitTargetId = null;
       console.log(`zombie ${zombie.id} hits the wall: wallHp ${progress.wallHp} -> ${wallHp}`);
       if (destroyed) {
         this.#progress.flush();
@@ -890,6 +937,9 @@ export class GameLoop {
 
     const baseHp = Math.max(0, progress.baseHp - cfg.damage);
     this.#progress.update({ baseHp });
+    zombie.attacksLanded++;
+    zombie.lastHitKind = "base";
+    zombie.lastHitTargetId = null;
     console.log(`zombie ${zombie.id} hits the base: baseHp ${progress.baseHp} -> ${baseHp}`);
     if (baseHp <= 0) {
       this.#phase = "game_over";

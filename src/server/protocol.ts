@@ -3,7 +3,7 @@
 // mirrors this file — see its own comment on why it's a second copy, not a
 // shared import).
 
-import type { PlayerStatus, ZombieType } from "./game-state.ts";
+import type { DayWave, PlayerStatus, ZombieType } from "./game-state.ts";
 
 export interface PlayerSnapshot {
   id: string;
@@ -31,6 +31,18 @@ export interface ZombieSnapshot {
   // Purely a rendering cue (walk vs. attack animation) — the actual attack
   // resolution already happened server-side by the time this is seen.
   attacking: boolean;
+  // Monotonic — increments exactly once each time this zombie's attack
+  // interval actually landed a hit (on a player, turret, wall, or base).
+  // The client diffs this against the previous snapshot to know "a real
+  // attack happened this tick" rather than guessing from `attacking`/timing
+  // — the same pattern TurretSnapshot.shotsFired already uses. Combined
+  // with lastHitKind/lastHitTargetId below, lets the client place an impact
+  // effect/projectile exactly where (and only where) damage was really
+  // dealt, instead of a client-side guessed hit that could disagree with
+  // the server's own combat resolution.
+  attacksLanded: number;
+  lastHitKind: "player" | "turret" | "wall" | "base" | null;
+  lastHitTargetId: string | null; // playerId or turretId; null for wall/base/none
 }
 
 export interface TurretSnapshot {
@@ -73,6 +85,12 @@ export interface StateMessage {
   dayIntroRemainingMs: number;
   killedZombies: number;
   totalZombiesForDay: number;
+  // The fixed per-type composition for the CURRENT day (game-state.ts's
+  // WAVE_TABLE) — not how many of each have spawned/died so far, just what
+  // this day contains. Lets the client show wave composition and trigger a
+  // "new enemy" intro the first time a type appears in a run, without
+  // guessing from which zombies happen to be alive right now.
+  dayWaveComposition: DayWave;
   players: PlayerSnapshot[];
   zombies: ZombieSnapshot[];
   turrets: TurretSnapshot[];

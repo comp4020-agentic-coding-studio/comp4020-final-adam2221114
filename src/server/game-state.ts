@@ -70,6 +70,13 @@ export interface Zombie {
   // tick to tick (a chased player goes down, or a wall falls).
   attackTarget: { kind: "player"; playerId: string } | { kind: "structure" };
   lastAttackAt: number; // ms, GameLoop's own monotonic clock (never reset)
+  // Visual-sync bookkeeping for the client (see protocol.ts's ZombieSnapshot
+  // comment): attacksLanded increments exactly once per real landed hit,
+  // set alongside lastHitKind/lastHitTargetId in GameLoop#applyZombieHit —
+  // never touched anywhere else, never affects damage/cooldown logic.
+  attacksLanded: number;
+  lastHitKind: "player" | "turret" | "wall" | "base" | null;
+  lastHitTargetId: string | null;
 }
 
 export type PlayerStatus = "alive" | "downed" | "dead";
@@ -301,50 +308,108 @@ export function buildSpawnQueue(day: number): ZombieType[] {
   return queue;
 }
 
-// Adaptive spawn pacing (replaces the old flat 2000ms interval): aims to
-// finish spawning a day's full quota within roughly TARGET_DAY_SPAWN_SPAN_MS,
-// clamped so early days don't feel rushed and late days don't stall on a
-// too-small interval. Not specified by the brief beyond "adaptive... so
-// late-game waves do not take excessively long" — this is a deliberate,
-// documented choice, not an arbitrary one.
-const TARGET_DAY_SPAWN_SPAN_MS = 90_000;
-const MIN_SPAWN_INTERVAL_MS = 300;
-const MAX_SPAWN_INTERVAL_MS = 2000;
+// --- Horde spawning: simultaneous batches, full 360° around the base ------
+//
+// Replaces the old "one zombie every adaptive interval" pacing. Named,
+// per-day-range batch sizes/intervals (exact numbers requested, not a
+// formula) — every zombie in a batch spawns in the same server tick, not
+// trickled in one at a time.
+export interface SpawnTier {
+  minBatch: number;
+  maxBatch: number;
+  intervalMs: number;
+}
 
-export function spawnIntervalForDay(totalForDay: number): number {
-  if (totalForDay <= 0) return MAX_SPAWN_INTERVAL_MS;
-  const target = TARGET_DAY_SPAWN_SPAN_MS / totalForDay;
-  return Math.min(MAX_SPAWN_INTERVAL_MS, Math.max(MIN_SPAWN_INTERVAL_MS, target));
+export function spawnTierForDay(day: number): SpawnTier {
+  if (day <= 2) return { minBatch: 4, maxBatch: 5, intervalMs: 6000 };
+  if (day <= 5) return { minBatch: 5, maxBatch: 7, intervalMs: 5000 };
+  if (day <= 10) return { minBatch: 7, maxBatch: 10, intervalMs: 4000 };
+  return { minBatch: 8, maxBatch: 10, intervalMs: 3000 };
+}
+
+export function randomBatchSize(tier: SpawnTier): number {
+  return tier.minBatch + Math.floor(Math.random() * (tier.maxBatch - tier.minBatch + 1));
 }
 
 let nextZombieId = 1;
 
-export function randomEdgePosition(): Vec2 {
-  const side = Math.floor(Math.random() * 4);
-  const along = Math.random() * MAP_SIZE;
-  switch (side) {
-    case 0:
-      return { x: along, y: 0 };
-    case 1:
-      return { x: MAP_SIZE, y: along };
-    case 2:
-      return { x: along, y: MAP_SIZE };
-    default:
-      return { x: 0, y: along };
-  }
+// A ray from the map's exact centre (always BASE_POS — see MAP_SIZE/BASE_POS
+// above) at this angle, projected out to wherever it first crosses the
+// square map boundary. Every angle in [0, 2π) maps to a real point on the
+// perimeter, corners included — a continuous 360° spawn ring, not a choice
+// among four fixed sides or points. (The old system did already vary
+// continuously along whichever side it picked, but picked that side from
+// just 4 — this removes the 4-way branch entirely.)
+export function perimeterPositionAtAngle(angleRad: number): Vec2 {
+  const half = MAP_SIZE / 2;
+  const dx = Math.cos(angleRad);
+  const dy = Math.sin(angleRad);
+  // Scales the direction so the larger axis component reaches exactly
+  // half the map size — i.e. the point where the ray first leaves the
+  // square, since dx²+dy²=1 guarantees max(|dx|,|dy|) is never 0.
+  const scale = half / Math.max(Math.abs(dx), Math.abs(dy));
+  return {
+    x: clamp(half + dx * scale, 0, MAP_SIZE),
+    y: clamp(half + dy * scale, 0, MAP_SIZE),
+  };
 }
 
-export function spawnZombie(type: ZombieType, day: number): Zombie {
+// Enough sectors for the largest possible batch (10 — see spawnTierForDay)
+// to each land in its own unique 36° slice of the circle, in shuffled
+// (not always-clockwise-from-0) order — a batch's zombies spread across
+// different angular sectors instead of each independently rolling an angle
+// that could land them all on one side of the map.
+const SPAWN_SECTORS = 10;
+
+export function batchSpawnAngles(count: number): number[] {
+  const order = Array.from({ length: SPAWN_SECTORS }, (_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  const sectorSize = (Math.PI * 2) / SPAWN_SECTORS;
+  const angles: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const sector = order[i % SPAWN_SECTORS];
+    angles.push(sector * sectorSize + Math.random() * sectorSize);
+  }
+  return angles;
+}
+
+// Structures (base/wall/turrets) all sit well inside TURRET_BUILD_RADIUS of
+// the map's exact centre — nowhere near the boundary a spawn point always
+// lands on — so they can never be spawned on top of; only a PLAYER, who can
+// walk anywhere including near an edge, needs an explicit check here.
+const SPAWN_PLAYER_CLEARANCE = 60;
+
+export function spawnPositionAtAngle(angleRad: number, players: readonly Player[]): Vec2 {
+  let angle = angleRad;
+  let pos = perimeterPositionAtAngle(angle);
+  for (
+    let attempt = 0;
+    attempt < SPAWN_SECTORS && players.some((p) => p.status === "alive" && distance(pos, p.pos) < SPAWN_PLAYER_CLEARANCE);
+    attempt++
+  ) {
+    angle += (Math.PI * 2) / SPAWN_SECTORS;
+    pos = perimeterPositionAtAngle(angle);
+  }
+  return pos;
+}
+
+export function spawnZombie(type: ZombieType, day: number, pos: Vec2): Zombie {
   const hp = type === "boss" ? (BOSS_HP_BY_DAY[day] ?? ZOMBIE_TYPES.boss.hp) : ZOMBIE_TYPES[type].hp;
   return {
     id: `z${nextZombieId++}`,
     type,
-    pos: randomEdgePosition(),
+    pos,
     hp,
     maxHp: hp,
     attacking: false,
     attackTarget: { kind: "structure" },
     lastAttackAt: -Infinity,
+    attacksLanded: 0,
+    lastHitKind: null,
+    lastHitTargetId: null,
   };
 }
 
@@ -451,16 +516,26 @@ export function advanceZombie(z: Zombie, dtMs: number, players: readonly Player[
   let stopRadius = target.isPlayer ? cfg.attackRange : wallUp ? WALL_RING_RADIUS : BASE_ATTACK_RANGE;
   let attackTarget: Zombie["attackTarget"] = target.isPlayer && target.playerId ? { kind: "player", playerId: target.playerId } : { kind: "structure" };
 
-  if (!cfg.ranged && wallUp) {
-    const targetInsideRing = distance(target.pos, BASE_POS) <= WALL_RING_RADIUS;
-    const zombieOutsideRing = distance(z.pos, BASE_POS) > WALL_RING_RADIUS;
-    if (targetInsideRing && zombieOutsideRing) {
-      // The real target (base, or a player standing inside the wall ring) is
-      // behind an intact wall — stop at the ring and attack the wall itself.
-      aimPos = BASE_POS;
-      stopRadius = WALL_RING_RADIUS;
-      attackTarget = { kind: "structure" };
-    }
+  // The real target (base, or a player standing inside the wall ring) is
+  // behind an intact wall — stop at the ring and attack the wall itself.
+  //
+  // Bug fixed here: this used to also require the ZOMBIE to currently be
+  // outside the ring before applying. Since that was re-checked fresh every
+  // tick from the zombie's own (just-moved) position, the first tick a
+  // zombie's ordinary per-tick approach step happened to land it at/inside
+  // the ring — a couple of units' overshoot, not a deliberate breach — it
+  // was judged "no longer outside" and permanently stopped being blocked:
+  // every tick after that it walked straight to real melee range of the
+  // player, through a fully intact, undamaged wall, for the rest of its
+  // life. Whether a ground zombie can reach something inside the ring must
+  // depend only on whether that target is behind the wall, not on where
+  // this zombie's last movement step happened to leave it.
+  const targetInsideRing = distance(target.pos, BASE_POS) <= WALL_RING_RADIUS;
+  const blockedByWall = !cfg.ranged && wallUp && targetInsideRing;
+  if (blockedByWall) {
+    aimPos = BASE_POS;
+    stopRadius = WALL_RING_RADIUS;
+    attackTarget = { kind: "structure" };
   }
 
   const d = distance(z.pos, aimPos);
@@ -472,8 +547,29 @@ export function advanceZombie(z: Zombie, dtMs: number, players: readonly Player[
   z.attacking = false;
   const step = (ZOMBIE_SPEED * cfg.speedMultiplier * dtMs) / 1000;
   const ratio = Math.min(step / d, 1);
-  z.pos = {
+  let nextPos: Vec2 = {
     x: z.pos.x + (aimPos.x - z.pos.x) * ratio,
     y: z.pos.y + (aimPos.y - z.pos.y) * ratio,
   };
+  // Belt and braces: even with the fix above, a single large step could in
+  // principle still carry a blocked zombie across the ring boundary in one
+  // tick (it can't today at these speed values, but nothing should rely on
+  // that). Clamp the result so it can never end up closer to the base than
+  // the ring while the wall blocks it.
+  if (blockedByWall) {
+    const distFromBase = distance(nextPos, BASE_POS);
+    if (distFromBase < WALL_RING_RADIUS) {
+      // distFromBase === 0 has no defined direction to push back along;
+      // fall back to the zombie's own pre-move position, which is always
+      // further out (it approached from outside the ring).
+      const from = distFromBase === 0 ? z.pos : nextPos;
+      const fromDist = distFromBase === 0 ? distance(z.pos, BASE_POS) || 1 : distFromBase;
+      const pullBack = WALL_RING_RADIUS / fromDist;
+      nextPos = {
+        x: BASE_POS.x + (from.x - BASE_POS.x) * pullBack,
+        y: BASE_POS.y + (from.y - BASE_POS.y) * pullBack,
+      };
+    }
+  }
+  z.pos = nextPos;
 }

@@ -68,15 +68,46 @@ at each value's declaration — not left for a reader to guess at.
 
 ## Visual style
 
-Terrain, zombies, the base, the wall and the HUD use the CraftPix "Zombie
-Survival" pixel-art pack; the player stays hand-drawn Canvas shapes, since
-the pack has no player-character sprite and a mismatched one would read
-worse than a clean drawn one. Which of the pack's four reskinned zombie
-sets stands in for normal/flying/giant/boss (none are shaped like any of
-those roles — see `PROCESS.md`) and a real, unresolved licensing question
-about the pack's free-tier terms versus this course's public-repo workflow
-are both recorded in `PROCESS.md`'s visual-redesign entry rather than
-quietly assumed away.
+Terrain, the base, the wall, and the normal/giant/boss zombies use the
+CraftPix "Zombie Survival" pixel-art pack; the player stays hand-drawn
+Canvas shapes, since the pack has no player-character sprite and a
+mismatched one would read worse than a clean drawn one. Giant and boss are
+palette-swapped reskins of the same civilian-zombie character, told apart by
+scale/tint only (see `PROCESS.md`'s visual-redesign entry). Flying zombies
+used to be a third reskin of that same sprite — easy to mistake for a
+ground zombie, which fed directly into players not being able to tell what
+was attacking them — and are now drawn procedurally instead (a bat/wraith
+silhouette, for the same "no sprite in the pack fits" reason the player and
+turrets are drawn rather than sprited); see `PROCESS.md`'s
+zombie-visual-identity entry.
+
+The HUD/menu layer (icons, panels, buttons) is separate: it previously used
+a cropped region of that same CraftPix pack, whose free-tier license
+explicitly forbids redistributing source art files — a real conflict with
+this course's public-repo workflow, flagged but left unresolved at the
+time. It's since been replaced with icons and panel chrome from two
+Kenney.nl packs released CC0 (public domain, redistribution of the
+original files explicitly permitted) — see `PROCESS.md`'s UI-asset-swap
+entry and `assets/ui-kenney/NOTES.md` for sources, licenses, and exactly
+which files/tiles were used. The world sprites above are unaffected and
+keep the same open licensing question.
+
+Battlefield readability built on top of that redesign: the base, its
+interact range, and the wall's protection ring are now visible at a glance
+(a glow, a highlighted range ring, a proportional HP arc on the wall, and a
+visible "exposed" indicator when there's no wall), every non-normal zombie
+carries a small warning marker, and the first time a flying or giant zombie
+appears in a run, a short popup names it and what it does before the
+player's already fighting one — see `PROCESS.md`'s
+map/HUD-readability entry.
+
+The battlefield itself is organised into three zones radiating from the
+base — a kept-clean fortified pad at the centre, a mid "combat zone" with
+clustered debris/barricade props and a believable minority of cracked
+ground, and a sparser, more visibly damaged outer zone — rather than a
+single uniform tile scatter. No new art: the same CraftPix tileset had
+several previously-unused stained/cracked tiles and an undamaged fence
+panel this needed; see `PROCESS.md`'s map-redesign entry.
 
 ## What it deliberately leaves out
 

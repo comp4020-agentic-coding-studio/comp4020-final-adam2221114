@@ -8,6 +8,14 @@
 export type ZombieType = "normal" | "flying" | "giant" | "boss";
 export type PlayerStatus = "alive" | "downed" | "dead";
 
+// Mirrors src/server/game-state.ts's DayWave.
+export interface DayWave {
+  normal: number;
+  flying: number;
+  giant: number;
+  boss: number;
+}
+
 export interface PlayerSnapshot {
   id: string;
   colorIndex: number;
@@ -30,6 +38,12 @@ export interface ZombieSnapshot {
   hp: number;
   maxHp: number;
   attacking: boolean;
+  // Monotonic — increments once per real landed hit; diffed client-side to
+  // trigger attack-effect visuals exactly in sync with real server combat
+  // events. See src/server/protocol.ts's matching comment.
+  attacksLanded: number;
+  lastHitKind: "player" | "turret" | "wall" | "base" | null;
+  lastHitTargetId: string | null;
 }
 
 export interface TurretSnapshot {
@@ -64,6 +78,10 @@ export interface StateMessage {
   dayIntroRemainingMs: number;
   killedZombies: number;
   totalZombiesForDay: number;
+  // Fixed per-type composition for the CURRENT day (not how many of each
+  // have spawned/died yet) — drives the wave-composition HUD and "new
+  // enemy" intro popups. See src/server/protocol.ts's matching comment.
+  dayWaveComposition: DayWave;
   players: PlayerSnapshot[];
   zombies: ZombieSnapshot[];
   turrets: TurretSnapshot[];

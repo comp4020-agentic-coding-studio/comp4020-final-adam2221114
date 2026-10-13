@@ -5,6 +5,7 @@ import {
   MAX_TURRETS,
   MEDKIT_COST,
   MEDKIT_MAX,
+  REVIVE_RANGE,
   resurrectCostForDay,
   TURRET_BUILD_RADIUS,
   TURRET_INTERACT_RANGE,
@@ -12,8 +13,9 @@ import {
   TURRET_MAX_LEVEL,
   WALL_LEVELS,
   WALL_MAX_LEVEL,
+  WALL_RING_RADIUS,
 } from "./defense-config.ts";
-import type { ClientMessage, ControlMessage, GamePhase, InteractAction, ServerMessage, StateMessage, TurretAction } from "./protocol.ts";
+import type { ClientMessage, ControlMessage, GamePhase, InteractAction, PlayerSnapshot, ServerMessage, StateMessage, TurretAction, ZombieSnapshot, ZombieType } from "./protocol.ts";
 import { InputController } from "./input.ts";
 import { interpolateState } from "./interpolate.ts";
 import { LocalPlayerPrediction } from "./prediction.ts";
@@ -21,17 +23,28 @@ import {
   collectDeathEffects,
   render,
   renderCrosshair,
+  renderDamageNumbers,
+  renderDamageVignette,
   renderDayIntro,
   renderDayProgress,
   renderDeathEffects,
+  renderFlyingZombie,
+  renderImpactEffects,
   renderShotEffects,
   renderTurretPlacementPreview,
+  renderZombieProjectiles,
+  DAMAGE_NUMBER_MS,
+  EXPLOSION_EFFECT_MS,
+  PROJECTILE_TRAVEL_MS,
   TRACER_LIFETIME_MS,
-  UI_REGIONS,
-  uiIconStyle,
+  uiIcon,
+  type DamageNumber,
   type DeathEffect,
+  type ImpactEffect,
   type ShotEffect,
+  type ZombieProjectile,
 } from "./render.ts";
+import { isReady, ZOMBIE_SHEETS, type UiIconName } from "./sprites.ts";
 
 // Must match src/server/game-state.ts's MAP_SIZE (see protocol.ts's comment
 // on why this is a duplicated constant, not a shared import).
@@ -71,6 +84,22 @@ const banner = document.querySelector<HTMLDivElement>("#phase-banner");
 if (!banner) throw new Error("index.html is missing #phase-banner");
 const menu = document.querySelector<HTMLDivElement>("#interact-menu");
 if (!menu) throw new Error("index.html is missing #interact-menu");
+const teamPanel = document.querySelector<HTMLDivElement>("#team-panel");
+if (!teamPanel) throw new Error("index.html is missing #team-panel");
+const prompt = document.querySelector<HTMLDivElement>("#prompt");
+if (!prompt) throw new Error("index.html is missing #prompt");
+const enemyIntro = document.querySelector<HTMLDivElement>("#enemy-intro");
+if (!enemyIntro) throw new Error("index.html is missing #enemy-intro");
+const introPortrait = document.querySelector<HTMLCanvasElement>("#intro-portrait");
+if (!introPortrait) throw new Error("index.html is missing #intro-portrait");
+const introPortraitCtx = introPortrait.getContext("2d");
+if (!introPortraitCtx) throw new Error("2d canvas context unavailable for #intro-portrait");
+const introName = document.querySelector<HTMLDivElement>("#intro-name");
+if (!introName) throw new Error("index.html is missing #intro-name");
+const introBullets = document.querySelector<HTMLUListElement>("#intro-bullets");
+if (!introBullets) throw new Error("index.html is missing #intro-bullets");
+const introDismissBtn = document.querySelector<HTMLButtonElement>("#intro-dismiss");
+if (!introDismissBtn) throw new Error("index.html is missing #intro-dismiss");
 const btnStart = document.querySelector<HTMLButtonElement>("#btn-start");
 if (!btnStart) throw new Error("index.html is missing #btn-start");
 const btnPause = document.querySelector<HTMLButtonElement>("#btn-pause");
@@ -113,6 +142,116 @@ const prediction = new LocalPlayerPrediction();
 const effects: ShotEffect[] = [];
 const lastTurretShotsFired = new Map<string, number>();
 
+// --- Zombie attack feedback: all driven by diffing consecutive snapshots
+// against real server fields (ZombieSnapshot.attacksLanded/lastHitKind,
+// PlayerSnapshot.hp) in the "state" handler below — never a client-side
+// guess at whether or when a hit happened. See render.ts for the drawing. ---
+const impactEffects: ImpactEffect[] = [];
+const zombieProjectiles: ZombieProjectile[] = [];
+const damageNumbers: DamageNumber[] = [];
+const lastZombieAttacksLanded = new Map<string, number>();
+const zombieLungeUntil = new Map<string, number>(); // zombie id -> lunge started at (performance.now())
+const playerFlashUntil = new Map<string, number>(); // player id -> flash started at (performance.now())
+let selfFlashAt: number | undefined; // local-player screen vignette
+
+// --- "New enemy" intro popups ------------------------------------------------
+//
+// Shown the first time a zombie type appears in a run (not every wave it's
+// in). Driven by StateMessage.dayWaveComposition — the day's fixed, known-
+// in-advance composition — rather than waiting for an actual instance of
+// that type to spawn, so the warning arrives before the player is already
+// fighting one. Text content is exactly what the brief specified; `bullets`
+// only exist for the two types asked for (giant, flying) — anything else in
+// ZombieType simply has no entry and is never queued.
+const ENEMY_INTRO: Partial<Record<ZombieType, { name: string; bullets: string[] }>> = {
+  flying: { name: "Flying Zombie", bullets: ["Ranged attacker", "Ignores walls", "Stay moving and keep distance"] },
+  giant: { name: "Giant Zombie", bullets: ["High HP", "Heavy melee threat", "Explodes on death"] },
+};
+const ALL_ZOMBIE_TYPES: readonly ZombieType[] = ["normal", "flying", "giant", "boss"];
+const INTRO_AUTO_DISMISS_MS = 9000;
+
+const seenEnemyTypes = new Set<ZombieType>();
+let introLastCheckedDay: number | undefined;
+const introQueue: ZombieType[] = [];
+let currentIntro: ZombieType | undefined;
+let introShownAt: number | undefined;
+
+// Called once per "state" message. On the very first snapshot after
+// connecting, just records what the CURRENT day already contains as
+// "already known" (so reconnecting mid-run on, say, Day 5 doesn't suddenly
+// show three intros at once for types that appeared days ago) — only a
+// day boundary crossed AFTER that point can queue a new intro.
+const checkForNewEnemies = (state: StateMessage): void => {
+  if (introLastCheckedDay === undefined) {
+    introLastCheckedDay = state.day;
+    for (const t of ALL_ZOMBIE_TYPES) if (state.dayWaveComposition[t] > 0) seenEnemyTypes.add(t);
+    return;
+  }
+  if (state.day === introLastCheckedDay) return; // same day (e.g. a tick, or a retry) — nothing new to check
+  introLastCheckedDay = state.day;
+  for (const t of ALL_ZOMBIE_TYPES) {
+    if (state.dayWaveComposition[t] > 0 && !seenEnemyTypes.has(t)) {
+      seenEnemyTypes.add(t);
+      if (ENEMY_INTRO[t]) introQueue.push(t);
+    }
+  }
+  advanceIntroQueue();
+};
+
+const drawIntroPortrait = (type: ZombieType): void => {
+  const ctx2 = introPortraitCtx;
+  ctx2.clearRect(0, 0, introPortrait.width, introPortrait.height);
+  ctx2.imageSmoothingEnabled = false;
+  const cx = introPortrait.width / 2;
+  const cy = introPortrait.height / 2;
+  if (type === "flying") {
+    ctx2.save();
+    ctx2.translate(cx, cy);
+    renderFlyingZombie(ctx2, 84, true, 0, 0, performance.now());
+    ctx2.restore();
+    return;
+  }
+  const sheets = ZOMBIE_SHEETS[type as "normal" | "giant" | "boss"];
+  const sheet = sheets?.idle;
+  if (sheet && isReady(sheet.image)) {
+    const size = 90;
+    ctx2.drawImage(sheet.image, 0, 0, sheet.frameWidth, sheet.frameHeight, cx - size / 2, cy - size / 2, size, size);
+  }
+};
+
+const advanceIntroQueue = (): void => {
+  if (currentIntro !== undefined) return;
+  const next = introQueue.shift();
+  if (!next) return;
+  const info = ENEMY_INTRO[next];
+  if (!info) return;
+  currentIntro = next;
+  introShownAt = performance.now();
+  introName.textContent = info.name;
+  introBullets.innerHTML = info.bullets.map((b) => `<li>${b}</li>`).join("");
+  drawIntroPortrait(next);
+  enemyIntro.hidden = false;
+};
+
+const dismissIntro = (): void => {
+  if (currentIntro === undefined) return;
+  currentIntro = undefined;
+  introShownAt = undefined;
+  enemyIntro.hidden = true;
+  advanceIntroQueue();
+};
+
+// A full restart means a genuinely new run — the next time flying/giant show
+// up (Day 3/4) should introduce them again, same as a real first encounter.
+const resetEnemyIntros = (): void => {
+  seenEnemyTypes.clear();
+  introQueue.length = 0;
+  introLastCheckedDay = undefined;
+  dismissIntro();
+};
+
+introDismissBtn.addEventListener("click", dismissIntro);
+
 const setConnStatus = (status: "connecting" | "connected" | "disconnected", detail?: string): void => {
   conn.textContent = detail ?? (status === "connected" ? "connected" : status === "connecting" ? "connecting…" : "disconnected");
   conn.className = status;
@@ -134,7 +273,10 @@ btnStart.addEventListener("click", () => sendControl("start"));
 btnPause.addEventListener("click", () => sendControl("pause"));
 btnResume.addEventListener("click", () => sendControl("resume"));
 btnRetry.addEventListener("click", () => sendControl("retry_day"));
-btnRestart.addEventListener("click", () => sendControl("restart"));
+btnRestart.addEventListener("click", () => {
+  sendControl("restart");
+  resetEnemyIntros();
+});
 
 const sendInteract = (action: InteractAction): void => {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "interact", action }));
@@ -171,9 +313,9 @@ const input = new InputController({
 // round-trips to the server, which re-checks range/cost/state against its
 // own authoritative data; this is all preview-only.
 type MenuChoice =
-  | { key: string; label: string; kind: "interact"; action: InteractAction }
-  | { key: string; label: string; kind: "place_turret" }
-  | { key: string; label: string; kind: "turret_action"; turretId: string; action: TurretAction };
+  | { key: string; label: string; cost: number; icon: UiIconName; kind: "interact"; action: InteractAction }
+  | { key: string; label: string; cost: number; icon: UiIconName; kind: "place_turret" }
+  | { key: string; label: string; cost: number; icon: UiIconName; kind: "turret_action"; turretId: string; action: TurretAction };
 
 type MenuContext = { kind: "base" } | { kind: "turret"; turretId: string };
 
@@ -183,6 +325,26 @@ let menuChoices: MenuChoice[] = [];
 let placementMode = false;
 
 const distance = (a: { x: number; y: number }, b: { x: number; y: number }): number => Math.hypot(a.x - b.x, a.y - b.y);
+
+// Where a zombie's just-landed hit should visually appear, read straight off
+// the server's own lastHitKind/lastHitTargetId (protocol.ts) — never guessed
+// from which target merely looks nearest on this client.
+const zombieHitTargetPos = (z: ZombieSnapshot, state: StateMessage): { x: number; y: number } | undefined => {
+  if (z.lastHitKind === "player") {
+    const target = state.players.find((p) => p.id === z.lastHitTargetId);
+    return target ? { x: target.x, y: target.y } : undefined;
+  }
+  if (z.lastHitKind === "turret") {
+    const target = state.turrets.find((t) => t.id === z.lastHitTargetId);
+    return target ? { x: target.x, y: target.y } : undefined;
+  }
+  if (z.lastHitKind === "wall") {
+    const d = distance(z, BASE_POS) || 1;
+    return { x: BASE_POS.x + ((z.x - BASE_POS.x) / d) * WALL_RING_RADIUS, y: BASE_POS.y + ((z.y - BASE_POS.y) / d) * WALL_RING_RADIUS };
+  }
+  if (z.lastHitKind === "base") return BASE_POS;
+  return undefined;
+};
 
 const playerInBaseRange = (): boolean =>
   distance(prediction.getDisplayPos(performance.now()), BASE_POS) <= BASE_INTERACT_RANGE;
@@ -209,30 +371,46 @@ const isValidTurretSpot = (pos: { x: number; y: number }): boolean => {
   return d >= BASE_ATTACK_RANGE && d <= TURRET_BUILD_RADIUS;
 };
 
+// Display-only proximity check, same purpose as nearestTurretInRange/
+// playerInBaseRange above — mirrors the server's own REVIVE_RANGE purely to
+// decide whether to show a "[Hold E] Revive" prompt. The server independently
+// re-validates range/status on every input; nothing here can revive anyone.
+const nearestDownedTeammate = (state: StateMessage | undefined): PlayerSnapshot | undefined => {
+  if (!state) return undefined;
+  const pos = prediction.getDisplayPos(performance.now());
+  let best: { player: PlayerSnapshot; d: number } | undefined;
+  for (const p of state.players) {
+    if (p.id === myPlayerId || p.status !== "downed") continue;
+    const d = distance(pos, p);
+    if (d <= REVIVE_RANGE && (!best || d < best.d)) best = { player: p, d };
+  }
+  return best?.player;
+};
+
 // A manual distributive-Omit equivalent — plain `Omit<MenuChoice, "key">`
 // collapses a union down to its common keys only, which would lose the
 // `action`/`turretId` fields that only exist on some branches.
 type UnkeyedChoice =
-  | { label: string; kind: "interact"; action: InteractAction }
-  | { label: string; kind: "place_turret" }
-  | { label: string; kind: "turret_action"; turretId: string; action: TurretAction };
+  | { label: string; cost: number; icon: UiIconName; kind: "interact"; action: InteractAction }
+  | { label: string; cost: number; icon: UiIconName; kind: "place_turret" }
+  | { label: string; cost: number; icon: UiIconName; kind: "turret_action"; turretId: string; action: TurretAction };
 
 const computeBaseChoices = (state: StateMessage, self: StateMessage["players"][number] | undefined): UnkeyedChoice[] => {
   const choices: UnkeyedChoice[] = [];
   if (state.wallLevel === 0) {
-    choices.push({ label: `Build Wall — ${WALL_LEVELS[1].cost} XP`, kind: "interact", action: "build_wall" });
+    choices.push({ label: "Build Wall", cost: WALL_LEVELS[1].cost, icon: "shield", kind: "interact", action: "build_wall" });
   } else if (state.wallLevel < WALL_MAX_LEVEL) {
     const next = WALL_LEVELS[state.wallLevel + 1];
-    if (next) choices.push({ label: `Upgrade Wall — ${next.cost} XP`, kind: "interact", action: "upgrade_wall" });
+    if (next) choices.push({ label: `Upgrade Wall (Lv${state.wallLevel}→${state.wallLevel + 1})`, cost: next.cost, icon: "shield", kind: "interact", action: "upgrade_wall" });
   }
   if (state.turrets.length < MAX_TURRETS) {
-    choices.push({ label: `Build Turret — ${TURRET_LEVELS[1].cost} XP`, kind: "place_turret" });
+    choices.push({ label: "Build Turret", cost: TURRET_LEVELS[1].cost, icon: "coin", kind: "place_turret" });
   }
   if (state.players.some((p) => p.status === "dead")) {
-    choices.push({ label: `Revive Dead Teammate — ${resurrectCostForDay(state.day)} XP`, kind: "interact", action: "revive_dead" });
+    choices.push({ label: "Revive Dead Teammate", cost: resurrectCostForDay(state.day), icon: "skull", kind: "interact", action: "revive_dead" });
   }
   if (self && self.medkits < MEDKIT_MAX) {
-    choices.push({ label: `Buy Medkit — ${MEDKIT_COST} XP (${self.medkits}/${MEDKIT_MAX} carried)`, kind: "interact", action: "buy_medkit" });
+    choices.push({ label: `Buy Medkit (${self.medkits}/${MEDKIT_MAX} carried)`, cost: MEDKIT_COST, icon: "medkit", kind: "interact", action: "buy_medkit" });
   }
   return choices;
 };
@@ -243,11 +421,11 @@ const computeTurretChoices = (state: StateMessage, turretId: string): UnkeyedCho
   const choices: UnkeyedChoice[] = [];
   if (turret.level < TURRET_MAX_LEVEL) {
     const next = TURRET_LEVELS[turret.level + 1];
-    choices.push({ label: `Upgrade This Turret (Lv${turret.level}→${turret.level + 1}) — ${next.cost} XP`, kind: "turret_action", turretId, action: "upgrade" });
+    choices.push({ label: `Upgrade This Turret (Lv${turret.level}→${turret.level + 1})`, cost: next.cost, icon: "coin", kind: "turret_action", turretId, action: "upgrade" });
   }
   if (turret.hp < turret.maxHp) {
     const cost = TURRET_LEVELS[turret.level].repairCost;
-    choices.push({ label: `Repair This Turret (${turret.hp}/${turret.maxHp} HP) — ${cost} XP`, kind: "turret_action", turretId, action: "repair" });
+    choices.push({ label: `Repair This Turret (${turret.hp}/${turret.maxHp} HP)`, cost, icon: "coin", kind: "turret_action", turretId, action: "repair" });
   }
   return choices;
 };
@@ -260,7 +438,11 @@ const computeMenuChoices = (state: StateMessage, context: MenuContext): MenuChoi
 
 const renderMenu = (state: StateMessage | undefined): void => {
   if (placementMode) {
-    menu.textContent = ["PLACING TURRET", "", "Click a valid spot (dashed ring around the base)", "[X / Esc] Cancel"].join("\n");
+    menu.innerHTML = [
+      `<div class="menu-heading">${uiIcon("shield")} PLACING TURRET</div>`,
+      `<div class="menu-hint">Click a valid spot (dashed ring around the base)</div>`,
+      `<div class="menu-hint">[X / Esc] Cancel</div>`,
+    ].join("");
     menu.hidden = false;
     return;
   }
@@ -270,8 +452,18 @@ const renderMenu = (state: StateMessage | undefined): void => {
   }
   menuChoices = computeMenuChoices(state, menuContext);
   const heading = menuContext.kind === "base" ? "BASE" : "TURRET";
-  const lines = [heading, "", ...menuChoices.map((o) => `[${o.key}] ${o.label}`), "[X / Esc] Close"];
-  menu.textContent = lines.join("\n");
+  const rows = menuChoices.map((o) => {
+    const affordable = state.sharedXp >= o.cost;
+    return [
+      `<div class="menu-row${affordable ? "" : " menu-row-disabled"}">`,
+      `<span class="menu-key">[${o.key}]</span>`,
+      `${uiIcon(o.icon)}`,
+      `<span class="menu-label">${o.label}</span>`,
+      `<span class="menu-cost${affordable ? "" : " menu-cost-insufficient"}">${uiIcon("coin", 14)}${o.cost} XP</span>`,
+      `</div>`,
+    ].join("");
+  });
+  menu.innerHTML = [`<div class="menu-heading">${heading}</div>`, ...rows, `<div class="menu-hint">[X / Esc] Close</div>`].join("");
   menu.hidden = false;
 };
 
@@ -286,8 +478,38 @@ const cancelPlacement = (): void => {
   menu.hidden = true;
 };
 
+// A passive "here's what you can do" hint — every action it names already
+// exists (X-menu, hold E, H); this only surfaces them contextually instead of
+// requiring the player to remember keybinds. Hidden whenever the menu/
+// placement overlay is already showing its own instructions.
+const updatePrompt = (state: StateMessage | undefined): void => {
+  if (!state || state.phase !== "running" || menuOpen || placementMode) {
+    prompt.hidden = true;
+    return;
+  }
+  const self = findSelf(state);
+  const hints: string[] = [];
+  const turretId = nearestTurretInRange(state);
+  if (turretId) hints.push("[X] Turret Menu");
+  else if (playerInBaseRange()) hints.push("[X] Base Menu");
+  if (self?.status === "alive" && nearestDownedTeammate(state)) hints.push("[Hold E] Revive");
+  if (self?.status === "alive" && self.medkits > 0 && self.hp < self.maxHp) hints.push("[H] Use Medkit");
+
+  if (hints.length === 0) {
+    prompt.hidden = true;
+    return;
+  }
+  prompt.innerHTML = hints.map((h) => `<span class="prompt-hint">${h}</span>`).join("");
+  prompt.hidden = false;
+};
+
 window.addEventListener("keydown", (e) => {
   const key = e.key.toLowerCase();
+
+  if (currentIntro !== undefined && (key === "enter" || key === " " || key === "escape")) {
+    dismissIntro();
+    return;
+  }
 
   if (key === "h") {
     sendUseMedkit();
@@ -392,57 +614,170 @@ socket.addEventListener("message", (ev) => {
     lastTurretShotsFired.set(t.id, t.shotsFired);
   }
 
+  // Player damage feedback: driven purely by the real hp drop between two
+  // authoritative snapshots (works for every damage source — zombie melee,
+  // a flying zombie's "ranged" hit, a giant's death explosion — since
+  // #damagePlayer is the one place anything server-side can lower hp; see
+  // PROCESS.md). Never a guessed/predicted hit.
+  const now0 = performance.now();
+  for (const p of currentState.players) {
+    const prevP = previousState?.players.find((q) => q.id === p.id);
+    if (prevP && p.hp < prevP.hp) {
+      const amount = prevP.hp - p.hp;
+      damageNumbers.push({ x: p.x, y: p.y, amount, spawnedAt: now0 });
+      playerFlashUntil.set(p.id, now0);
+      if (p.id === myPlayerId) selfFlashAt = now0;
+    }
+  }
+
+  // Zombie attack effects: driven by ZombieSnapshot.attacksLanded actually
+  // increasing (a real landed hit this tick — see protocol.ts), never by
+  // `attacking`/cooldown timing alone. lastHitKind/lastHitTargetId say
+  // exactly what was hit, so the effect lands exactly where the server's
+  // own combat resolution says it did.
+  for (const z of currentState.zombies) {
+    const prevLanded = lastZombieAttacksLanded.get(z.id) ?? 0;
+    if (z.attacksLanded > prevLanded) {
+      const targetPos = zombieHitTargetPos(z, currentState);
+      if (targetPos) {
+        if (z.type === "flying") {
+          zombieProjectiles.push({ fromX: z.x, fromY: z.y, toX: targetPos.x, toY: targetPos.y, firedAt: now0 });
+          impactEffects.push({ x: targetPos.x, y: targetPos.y, kind: "melee", startedAt: now0 + PROJECTILE_TRAVEL_MS });
+        } else {
+          impactEffects.push({ x: targetPos.x, y: targetPos.y, kind: "melee", startedAt: now0 });
+          zombieLungeUntil.set(z.id, now0);
+        }
+      }
+    }
+    lastZombieAttacksLanded.set(z.id, z.attacksLanded);
+  }
+
+  // A giant that just vanished died — collectDeathEffects already covers the
+  // generic fade; a death explosion additionally gets its own shockwave,
+  // since "giant exploded on an ally across the base" is exactly the kind of
+  // damage source a player can otherwise completely fail to notice.
+  if (previousState) {
+    const currentZombieIds = new Set(currentState.zombies.map((z) => z.id));
+    for (const z of previousState.zombies) {
+      if (z.type === "giant" && !currentZombieIds.has(z.id)) {
+        impactEffects.push({ x: z.x, y: z.y, kind: "explosion", startedAt: now0 });
+      }
+    }
+  }
+
+  checkForNewEnemies(currentState);
   updateHud(currentState);
+  updateTeamPanel(currentState);
   updatePhaseUi(currentState.phase);
   renderMenu(currentState);
 });
 
-const icon = (region: { sx: number; sy: number; sw: number; sh: number }, size = 16): string =>
-  `<span style="${uiIconStyle(region, size)}"></span>`;
+// A small HP/XP-style meter bar: a fixed-colour track with a proportional
+// fill, used by both the HUD (base/player HP, wall HP) and the team panel
+// (per-player HP) instead of numbers alone — numbers are always shown
+// alongside it too (CLAUDE.md: "do not hide important game state behind
+// decorative UI").
+const bar = (value: number, max: number, variant: "hp" | "xp" | "wall"): string => {
+  const fraction = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;
+  return `<span class="bar bar-${variant}"><span class="bar-fill" style="width:${(fraction * 100).toFixed(0)}%"></span></span>`;
+};
 
 const updateHud = (state: StateMessage): void => {
-  const wallLine = state.wallLevel > 0 ? `${icon(UI_REGIONS.shield)} Wall Lv${state.wallLevel} HP ${state.wallHp} / ${state.wallMaxHp}` : `${icon(UI_REGIONS.shield)} Wall: none`;
-  const turretLine = `Turrets: ${state.turrets.length} / ${MAX_TURRETS}`;
   const self = findSelf(state);
+
+  const wallLine =
+    state.wallLevel > 0
+      ? `${uiIcon("shield")} Wall Lv${state.wallLevel} ${bar(state.wallHp, state.wallMaxHp, "wall")} ${state.wallHp}/${state.wallMaxHp}`
+      : `${uiIcon("shield")} Wall: none`;
+  const turretLine = `Turrets: ${state.turrets.length} / ${MAX_TURRETS}`;
 
   const statusLine = self
     ? self.status === "alive"
-      ? `${icon(UI_REGIONS.heart)} ${self.hp} / ${self.maxHp}${self.healing ? " (healing…)" : ""}${self.invulnerable ? " (invulnerable)" : ""}`
+      ? `${uiIcon("heart")} ${bar(self.hp, self.maxHp, "hp")} ${self.hp}/${self.maxHp}${self.healing ? " (healing…)" : ""}${self.invulnerable ? " (invulnerable)" : ""}`
       : self.status === "downed"
-        ? `${icon(UI_REGIONS.skull)} DOWNED — ${Math.ceil(self.downedRemainingMs / 1000)}s left (hold E near a teammate to revive, or wait)`
-        : `${icon(UI_REGIONS.skull)} DEAD — a teammate can resurrect you at the base`
+        ? `${uiIcon("skull")} DOWNED — ${Math.ceil(self.downedRemainingMs / 1000)}s left (hold E near a teammate to revive, or wait)`
+        : `${uiIcon("skull")} DEAD — a teammate can resurrect you at the base`
     : "—";
 
-  const aliveCount = state.players.filter((p) => p.status === "alive").length;
-  const downedCount = state.players.filter((p) => p.status === "downed").length;
-  const deadCount = state.players.filter((p) => p.status === "dead").length;
-  const teamLine = `Team: ${aliveCount} alive, ${downedCount} downed, ${deadCount}${deadCount > 0 ? ` ${icon(UI_REGIONS.skull)}` : ""} dead`;
-
   hud.innerHTML = [
-    `${icon(UI_REGIONS.house)} Day ${state.day}`,
-    `${icon(UI_REGIONS.heart)} Base HP ${state.baseHp} / ${state.baseMaxHp}`,
+    `${uiIcon("house")} Day ${state.day}`,
+    `${uiIcon("heart")} Base ${bar(state.baseHp, state.baseMaxHp, "hp")} ${state.baseHp}/${state.baseMaxHp}`,
     wallLine,
     turretLine,
-    `${icon(UI_REGIONS.star)} Shared XP: ${state.sharedXp}`,
+    `${uiIcon("coin")} Shared XP: ${state.sharedXp}`,
     `You: ${statusLine}`,
-    self ? `${icon(UI_REGIONS.medkit)} Medkits: ${self.medkits} / ${MEDKIT_MAX} (H to use)` : "",
-    teamLine,
+    self ? `${uiIcon("medkit")} Medkits: ${self.medkits} / ${MEDKIT_MAX} (H to use)` : "",
     ...(rejectionNotice ? [`<span class="rejected">${rejectionNotice}</span>`] : []),
   ]
     .filter(Boolean)
     .join("<br>");
 };
 
-const PHASE_LABELS: Record<GamePhase, string> = {
-  waiting: "READY",
-  running: "",
-  paused: "PAUSED",
-  game_over: `${icon(UI_REGIONS.skull, 32)} GAME OVER`,
-  victory: `${icon(UI_REGIONS.star, 32)} VICTORY`,
+// Crit 10's gameplay-expansion requirement "their own HP/status... and any
+// teammate's status" — previously only a team-wide alive/downed/dead count
+// (updateHud's old teamLine); this shows each of up to 4 players by name-
+// colour (matching the canvas's own per-player colour), HP bar, explicit
+// downed/dead status, and — while someone's actively reviving them — a
+// revival progress bar with its remaining time, straight from
+// state.reviveProgress (already authoritative, already sent every tick).
+const REMOTE_PLAYER_COLORS = ["#ff6666", "#66b2ff", "#66ff99", "#ffcc66"];
+const LOCAL_PLAYER_COLOR = "#ffcc00";
+
+const updateTeamPanel = (state: StateMessage): void => {
+  const rows = state.players.map((p) => {
+    const isSelf = p.id === myPlayerId;
+    const color = isSelf ? LOCAL_PLAYER_COLOR : REMOTE_PLAYER_COLORS[p.colorIndex % REMOTE_PLAYER_COLORS.length];
+    const swatch = `<span class="player-swatch" style="background:${color}"></span>`;
+    const label = isSelf ? "You" : `P${p.colorIndex + 1}`;
+
+    let statusHtml: string;
+    if (p.status === "alive") {
+      statusHtml = `${bar(p.hp, p.maxHp, "hp")} ${p.hp}/${p.maxHp}`;
+    } else if (p.status === "downed") {
+      const revive = state.reviveProgress.find((r) => r.targetId === p.id);
+      statusHtml = `<span class="player-downed">${uiIcon("skull", 14)} DOWNED ${Math.ceil(p.downedRemainingMs / 1000)}s</span>`;
+      if (revive) {
+        const reviveFraction = Math.max(0, Math.min(1, 1 - revive.remainingMs / 3000));
+        statusHtml += ` <span class="bar bar-revive"><span class="bar-fill" style="width:${(reviveFraction * 100).toFixed(0)}%"></span></span> reviving ${Math.ceil(revive.remainingMs / 1000)}s`;
+      }
+    } else {
+      statusHtml = `<span class="player-dead">${uiIcon("skull", 14)} DEAD</span>`;
+    }
+    return `<div class="player-row">${swatch}<span class="player-label">${label}</span>${statusHtml}</div>`;
+  });
+  teamPanel.innerHTML = [`<div class="menu-heading">TEAM (${state.players.length}/4)</div>`, ...rows].join("");
 };
 
+const PHASE_LABELS: Record<GamePhase, { title: string; icon?: UiIconName; subtitle?: string }> = {
+  waiting: { title: "LAST STAND", subtitle: "Press Start to begin Day 1" },
+  running: { title: "" },
+  paused: { title: "PAUSED", subtitle: "Press Resume to continue" },
+  game_over: { title: "GAME OVER", icon: "skull" },
+  victory: { title: "VICTORY", icon: "trophy", subtitle: "All 28 days survived" },
+};
+
+const CONTROLS_LEGEND = [
+  ["WASD", "Move"],
+  ["Mouse", "Aim / Shoot"],
+  ["X", "Base / turret menu"],
+  ["Hold E", "Revive downed teammate"],
+  ["H", "Use medkit"],
+];
+
+const controlsLegendHtml = (): string =>
+  `<div class="controls-legend">${CONTROLS_LEGEND.map(([key, desc]) => `<div><span class="legend-key">${key}</span>${desc}</div>`).join("")}</div>`;
+
 const updatePhaseUi = (phase: GamePhase): void => {
-  banner.innerHTML = PHASE_LABELS[phase];
+  const info = PHASE_LABELS[phase];
+  if (!info.title) {
+    banner.innerHTML = "";
+  } else {
+    const titleLine = `${info.icon ? uiIcon(info.icon, 32) : ""} ${info.title}`;
+    const subtitle = phase === "game_over" && currentState ? `Reached Day ${currentState.day}` : info.subtitle;
+    const legend = phase === "waiting" || phase === "paused" ? controlsLegendHtml() : "";
+    const panelClass = phase === "game_over" ? " danger" : phase === "victory" ? " success" : "";
+    banner.innerHTML = `<div class="phase-panel${panelClass}"><div class="phase-title">${titleLine}</div>${subtitle ? `<div class="phase-subtitle">${subtitle}</div>` : ""}${legend}</div>`;
+  }
   btnStart.hidden = phase !== "waiting";
   btnPause.hidden = phase !== "running";
   btnResume.hidden = phase !== "paused";
@@ -459,6 +794,10 @@ let frozenAt: number | undefined;
 const frame = (timestamp: number): void => {
   const dtMs = lastFrameTimestamp === undefined ? 0 : timestamp - lastFrameTimestamp;
   lastFrameTimestamp = timestamp;
+
+  if (currentIntro !== undefined && introShownAt !== undefined && timestamp - introShownAt > INTRO_AUTO_DISMISS_MS) {
+    dismissIntro();
+  }
 
   if (currentState) {
     const self = findSelf(currentState);
@@ -480,9 +819,9 @@ const frame = (timestamp: number): void => {
       p.id === myPlayerId && p.status === "alive" ? { ...p, x: predictedPos.x, y: predictedPos.y } : p,
     );
 
-    render(ctx, CANVAS_SIZE, displayState, input.getAimAngle(), myPlayerId);
+    render(ctx, CANVAS_SIZE, displayState, input.getAimAngle(), myPlayerId, zombieLungeUntil, playerFlashUntil);
     renderDeathEffects(ctx, CANVAS_SIZE / WORLD_SIZE, deathEffects, timestamp);
-    renderDayProgress(ctx, CANVAS_SIZE, displayState.day, displayState.killedZombies, displayState.totalZombiesForDay);
+    renderDayProgress(ctx, CANVAS_SIZE, displayState.day, displayState.killedZombies, displayState.totalZombiesForDay, displayState.dayWaveComposition);
     if (displayState.dayIntroRemainingMs > 0) {
       renderDayIntro(ctx, CANVAS_SIZE, displayState.day, displayState.dayIntroRemainingMs);
     }
@@ -491,6 +830,23 @@ const frame = (timestamp: number): void => {
       if (timestamp - effects[i].firedAt > TRACER_LIFETIME_MS) effects.splice(i, 1);
     }
     renderShotEffects(ctx, CANVAS_SIZE, effects, timestamp);
+
+    for (let i = zombieProjectiles.length - 1; i >= 0; i--) {
+      if (timestamp - zombieProjectiles[i].firedAt > PROJECTILE_TRAVEL_MS) zombieProjectiles.splice(i, 1);
+    }
+    renderZombieProjectiles(ctx, CANVAS_SIZE, zombieProjectiles, timestamp);
+
+    for (let i = impactEffects.length - 1; i >= 0; i--) {
+      if (timestamp - impactEffects[i].startedAt > EXPLOSION_EFFECT_MS) impactEffects.splice(i, 1);
+    }
+    renderImpactEffects(ctx, CANVAS_SIZE, impactEffects, timestamp);
+
+    for (let i = damageNumbers.length - 1; i >= 0; i--) {
+      if (timestamp - damageNumbers[i].spawnedAt > DAMAGE_NUMBER_MS) damageNumbers.splice(i, 1);
+    }
+    renderDamageNumbers(ctx, CANVAS_SIZE, damageNumbers, timestamp);
+
+    renderDamageVignette(ctx, CANVAS_SIZE, selfFlashAt, timestamp);
 
     const mouse = input.getMouseWorldPos();
     if (mouse) renderCrosshair(ctx, CANVAS_SIZE, mouse);
@@ -507,6 +863,7 @@ const frame = (timestamp: number): void => {
       if (!stillNear) closeMenu();
     }
     if (placementMode && !playerInBaseRange()) cancelPlacement();
+    updatePrompt(currentState);
   }
   requestAnimationFrame(frame);
 };
