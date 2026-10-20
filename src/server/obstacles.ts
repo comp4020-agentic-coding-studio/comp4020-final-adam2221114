@@ -67,71 +67,81 @@ export const TOWN_BUILDINGS: Rect[] = [
   { x: 232, y: 282, w: 80, h: 60 },
 ];
 
-// The base fortress: a walled square (half-extent H=116, wall thickness
-// T=16, outer bounds (384,384)-(616,616)) around BASE_POS, with one open
-// gate gap (GATE_WIDTH=90) in the south wall facing PLAYER_START_POS
-// (500,560) — a new/reconnecting player always spawns just outside the
-// gate, already facing the way in — plus four 40x40 corner platforms.
-// North/east/west are single solid rects; south is split into two rects
-// (south-west / south-east of the gap) so the gate is simply open space,
-// not a special-cased tile. Geometry chosen so every corner
-// (H*sqrt(2)≈164 from BASE_POS) stays well clear of the nearest town
-// building (227 units — see TOWN_BUILDINGS' own comment) and the inner
-// wall face (H-T=100 from base) stays outside WALL_RING_RADIUS=60, so the
-// existing player Wall ring/pad fit inside the courtyard with room to
-// spare. assertMapIsFullyConnected() (below) verifies the gate gap keeps
-// interior and exterior one connected region; spec/map-collision.test.ts /
-// spec/zombie-pathing.test.ts exercise this same list generically (via
-// BUILDINGS[0]) with no assumption about which rect that is.
+// The purchasable Wall's physical geometry: a square ring (half-extent
+// H=116, thickness T=16, outer bounds (384,384)-(616,616)) around BASE_POS,
+// present ONLY while wallLevel > 0 (game-state.ts's wallLevel/wallHp) — no
+// fixed always-on fortress and no corner towers (both removed; see git
+// history for the Crit 11 fortress this replaces). Geometry (half-extent/
+// thickness/gate-width) is unchanged from that fortress's own numbers, just
+// now conditional on wallLevel instead of always present.
 //
-// This is PURELY the fortress's physical footprint (what blocks movement
-// and sight) — it has no connection to the player's own upgradeable Wall
-// mechanic (wallLevel/wallHp, WALL_RING_RADIUS) elsewhere in game-state.ts,
-// which continues to render/function exactly as it always has, now simply
-// inside this courtyard instead of in open air. Visual rendering of these
-// rects lives in src/client/render.ts's FORTRESS_TILES lookup — client-
-// side art has no bearing on this file's collision geometry.
-const FORTRESS_HALF_EXTENT = 116;
-const FORTRESS_WALL_THICKNESS = 16;
-const FORTRESS_GATE_WIDTH = 90;
-const FORTRESS_TOWER_SIZE = 40;
+// PLAYERS and ZOMBIES see deliberately DIFFERENT wall shapes once built:
+//   - wallRectsForPlayers: north/east/west solid, south split around a
+//     GATE_WIDTH=90 gap facing PLAYER_START_POS (500,560) — a player can
+//     always walk in/out through the gate once the wall stands.
+//   - wallRectsForZombies: all four sides solid, NO gate at all.
+// This asymmetry is deliberate, not an oversight: CLAUDE.md's invariant is
+// "ground zombies cannot cross an intact wall to reach the base" with no
+// exception for the gate — if zombies shared the player's gated shape,
+// they'd simply walk in through it. Both shapes share the same half-extent/
+// thickness, so visually it reads as one wall; only the gate differs by
+// who's asking.
+//
+// Neither shape is folded into BUILDINGS/the flow field: the flow field
+// (buildFlowField/cachedField, below) is a lazy-once, never-recomputed
+// singleton per CLAUDE.md's "no runtime recomputation" invariant, and a
+// wall that appears/disappears with wallLevel can't live inside it without
+// violating that. Instead, every (re)build of these rects is a handful of
+// plain object literals computed fresh on every call — resolveMove takes
+// them as an extra-rects parameter (see below) and advanceZombie
+// (game-state.ts) consults wallRectsForZombies directly, independent of
+// BUILDINGS/the BFS entirely.
+export const WALL_HALF_EXTENT = 116;
+export const WALL_THICKNESS = 16;
+export const WALL_GATE_WIDTH = 90;
+// How far inside the outer half-extent the wall's inner face sits — the
+// boundary of the courtyard a player/the base sits inside once walled in.
+export const WALL_INTERIOR_HALF_EXTENT = WALL_HALF_EXTENT - WALL_THICKNESS;
 
-export const FORTRESS_WALLS: Rect[] = [
-  // North wall (solid)
-  { x: BASE_POS.x - FORTRESS_HALF_EXTENT, y: BASE_POS.y - FORTRESS_HALF_EXTENT, w: FORTRESS_HALF_EXTENT * 2, h: FORTRESS_WALL_THICKNESS },
-  // South wall, split around the gate gap
-  {
-    x: BASE_POS.x - FORTRESS_HALF_EXTENT,
-    y: BASE_POS.y + FORTRESS_HALF_EXTENT - FORTRESS_WALL_THICKNESS,
-    w: FORTRESS_HALF_EXTENT - FORTRESS_GATE_WIDTH / 2,
-    h: FORTRESS_WALL_THICKNESS,
-  },
-  {
-    x: BASE_POS.x + FORTRESS_GATE_WIDTH / 2,
-    y: BASE_POS.y + FORTRESS_HALF_EXTENT - FORTRESS_WALL_THICKNESS,
-    w: FORTRESS_HALF_EXTENT - FORTRESS_GATE_WIDTH / 2,
-    h: FORTRESS_WALL_THICKNESS,
-  },
-  // East wall (solid)
-  { x: BASE_POS.x + FORTRESS_HALF_EXTENT - FORTRESS_WALL_THICKNESS, y: BASE_POS.y - FORTRESS_HALF_EXTENT, w: FORTRESS_WALL_THICKNESS, h: FORTRESS_HALF_EXTENT * 2 },
-  // West wall (solid)
-  { x: BASE_POS.x - FORTRESS_HALF_EXTENT, y: BASE_POS.y - FORTRESS_HALF_EXTENT, w: FORTRESS_WALL_THICKNESS, h: FORTRESS_HALF_EXTENT * 2 },
-];
+function wallRects(wallLevel: number, gated: boolean): Rect[] {
+  if (wallLevel <= 0) return [];
+  const rects: Rect[] = [
+    // North wall (solid either way)
+    { x: BASE_POS.x - WALL_HALF_EXTENT, y: BASE_POS.y - WALL_HALF_EXTENT, w: WALL_HALF_EXTENT * 2, h: WALL_THICKNESS },
+  ];
+  if (gated) {
+    // South wall, split around the gate gap so the gate is simply open
+    // space, not a special-cased tile.
+    rects.push(
+      { x: BASE_POS.x - WALL_HALF_EXTENT, y: BASE_POS.y + WALL_HALF_EXTENT - WALL_THICKNESS, w: WALL_HALF_EXTENT - WALL_GATE_WIDTH / 2, h: WALL_THICKNESS },
+      { x: BASE_POS.x + WALL_GATE_WIDTH / 2, y: BASE_POS.y + WALL_HALF_EXTENT - WALL_THICKNESS, w: WALL_HALF_EXTENT - WALL_GATE_WIDTH / 2, h: WALL_THICKNESS },
+    );
+  } else {
+    // South wall, solid — the zombie side has no gate at all.
+    rects.push({ x: BASE_POS.x - WALL_HALF_EXTENT, y: BASE_POS.y + WALL_HALF_EXTENT - WALL_THICKNESS, w: WALL_HALF_EXTENT * 2, h: WALL_THICKNESS });
+  }
+  rects.push(
+    // East wall (solid)
+    { x: BASE_POS.x + WALL_HALF_EXTENT - WALL_THICKNESS, y: BASE_POS.y - WALL_HALF_EXTENT, w: WALL_THICKNESS, h: WALL_HALF_EXTENT * 2 },
+    // West wall (solid)
+    { x: BASE_POS.x - WALL_HALF_EXTENT, y: BASE_POS.y - WALL_HALF_EXTENT, w: WALL_THICKNESS, h: WALL_HALF_EXTENT * 2 },
+  );
+  return rects;
+}
 
-export const FORTRESS_TOWERS: Rect[] = [
-  { x: BASE_POS.x - FORTRESS_HALF_EXTENT - FORTRESS_TOWER_SIZE / 2, y: BASE_POS.y - FORTRESS_HALF_EXTENT - FORTRESS_TOWER_SIZE / 2, w: FORTRESS_TOWER_SIZE, h: FORTRESS_TOWER_SIZE }, // NW
-  { x: BASE_POS.x + FORTRESS_HALF_EXTENT - FORTRESS_TOWER_SIZE / 2, y: BASE_POS.y - FORTRESS_HALF_EXTENT - FORTRESS_TOWER_SIZE / 2, w: FORTRESS_TOWER_SIZE, h: FORTRESS_TOWER_SIZE }, // NE
-  { x: BASE_POS.x - FORTRESS_HALF_EXTENT - FORTRESS_TOWER_SIZE / 2, y: BASE_POS.y + FORTRESS_HALF_EXTENT - FORTRESS_TOWER_SIZE / 2, w: FORTRESS_TOWER_SIZE, h: FORTRESS_TOWER_SIZE }, // SW
-  { x: BASE_POS.x + FORTRESS_HALF_EXTENT - FORTRESS_TOWER_SIZE / 2, y: BASE_POS.y + FORTRESS_HALF_EXTENT - FORTRESS_TOWER_SIZE / 2, w: FORTRESS_TOWER_SIZE, h: FORTRESS_TOWER_SIZE }, // SE
-];
+// Empty array while wallLevel is 0 — no wall exists until it's built.
+export function wallRectsForPlayers(wallLevel: number): Rect[] {
+  return wallRects(wallLevel, true);
+}
+export function wallRectsForZombies(wallLevel: number): Rect[] {
+  return wallRects(wallLevel, false);
+}
 
-// The full solid-obstacle set every collision/pathing function below
-// actually uses — town buildings plus the fortress's walls and corner
-// towers. Keeping TOWN_BUILDINGS/FORTRESS_WALLS/FORTRESS_TOWERS as separate
-// named exports (rather than one flat list) lets render.ts draw each
-// category with its own visual treatment without re-deriving which rect is
-// which from shape/position heuristics.
-export const BUILDINGS: Rect[] = [...TOWN_BUILDINGS, ...FORTRESS_WALLS, ...FORTRESS_TOWERS];
+// Town buildings are the only fixed, always-on solid obstacles now — the
+// wall is live state, handled separately above. spec/map-collision.test.ts/
+// spec/zombie-pathing.test.ts exercise this generically via BUILDINGS[0]
+// with no assumption about which rect that is.
+export const BUILDINGS: Rect[] = [...TOWN_BUILDINGS];
 
 // Entities are treated as points (this project's existing model — see
 // movePlayer/advanceZombie, neither of which has an entity radius), so a
@@ -148,8 +158,18 @@ export function pointInRect(p: Vec2, r: Rect): boolean {
   return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
 }
 
-function pointBlocked(p: Vec2): boolean {
+const NO_EXTRA_RECTS: readonly Rect[] = [];
+
+// extraRects lets a caller fold in rects beyond the fixed BUILDINGS set
+// without touching BUILDINGS itself — used for the wall, whose rects are
+// live state (wallRectsForPlayers/wallRectsForZombies above), never a fixed
+// constant, and deliberately kept out of BUILDINGS/the flow field (see the
+// wall geometry comment above for why).
+function pointBlocked(p: Vec2, extraRects: readonly Rect[] = NO_EXTRA_RECTS): boolean {
   for (const b of BUILDINGS) {
+    if (pointInRect(p, inflated(b, COLLISION_MARGIN))) return true;
+  }
+  for (const b of extraRects) {
     if (pointInRect(p, inflated(b, COLLISION_MARGIN))) return true;
   }
   return false;
@@ -159,20 +179,49 @@ function pointBlocked(p: Vec2): boolean {
 // it doesn't land inside a building; then try the Y move alone (from
 // whatever X ended up being) the same way. This is what gives "sliding along
 // a wall" for free instead of a glancing touch killing all movement — the
-// same standard approach the brief's "合理的沿墙滑动" asked for.
-export function resolveMove(from: Vec2, desired: Vec2): Vec2 {
+// same standard approach the brief's "合理的沿墙滑动" asked for. The same
+// function (not a parallel copy) resolves BOTH player movement and, via
+// extraRects, ground-zombie movement against the live wall rects — one
+// shared collision code path for both, per the project's own "do not
+// duplicate game logic" rule.
+export function resolveMove(from: Vec2, desired: Vec2, extraRects: readonly Rect[] = NO_EXTRA_RECTS): Vec2 {
   let x = from.x;
   let y = from.y;
   const clampedDesiredX = Math.min(Math.max(desired.x, 0), MAP_SIZE);
   const clampedDesiredY = Math.min(Math.max(desired.y, 0), MAP_SIZE);
 
-  if (!pointBlocked({ x: clampedDesiredX, y })) {
+  if (!pointBlocked({ x: clampedDesiredX, y }, extraRects)) {
     x = clampedDesiredX;
   }
-  if (!pointBlocked({ x, y: clampedDesiredY })) {
+  if (!pointBlocked({ x, y: clampedDesiredY }, extraRects)) {
     y = clampedDesiredY;
   }
   return { x, y };
+}
+
+// Shortest distance from a point to an (uninflated) rect's edge — 0 if the
+// point is inside it. Used by advanceZombie to decide "close enough to the
+// wall to attack it" without re-deriving a circular stand-in, now that the
+// wall is real rectangle geometry.
+function distanceToRect(p: Vec2, r: Rect): number {
+  const dx = Math.max(r.x - p.x, 0, p.x - (r.x + r.w));
+  const dy = Math.max(r.y - p.y, 0, p.y - (r.y + r.h));
+  return Math.hypot(dx, dy);
+}
+
+export function nearestRectDistance(p: Vec2, rects: readonly Rect[]): number {
+  let best = Infinity;
+  for (const r of rects) best = Math.min(best, distanceToRect(p, r));
+  return best;
+}
+
+// Point-in-square test against the wall's INNER face (the courtyard the
+// wall encloses) — used by advanceZombie to decide whether a zombie's real
+// target (the base, or a player who made it inside through the gate) is
+// "behind the wall" and must be approached as BASE_POS instead, exactly the
+// role the old circular WALL_RING_RADIUS test played.
+export function isWithinWallInterior(pos: Vec2): boolean {
+  return Math.abs(pos.x - BASE_POS.x) <= WALL_INTERIOR_HALF_EXTENT && Math.abs(pos.y - BASE_POS.y) <= WALL_INTERIOR_HALF_EXTENT;
 }
 
 // Liang-Barsky style segment/rect test, used to decide whether a zombie's
@@ -348,4 +397,15 @@ export function flowDirectionAt(pos: Vec2): Vec2 {
 // solid building) and by map-collision tests.
 export function overlapsAnyBuilding(pos: Vec2): boolean {
   return pointBlocked(pos);
+}
+
+// Used by placeTurret's validation to also reject a spot inside the wall's
+// own rects (BUILDINGS never includes the wall — see its own comment on
+// why — so this is a separate, explicit check rather than folded into
+// overlapsAnyBuilding).
+export function overlapsWallRect(pos: Vec2, wallRects: readonly Rect[]): boolean {
+  for (const r of wallRects) {
+    if (pointInRect(pos, inflated(r, COLLISION_MARGIN))) return true;
+  }
+  return false;
 }

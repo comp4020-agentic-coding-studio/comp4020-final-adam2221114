@@ -19,6 +19,10 @@ export interface DayWave {
 export interface PlayerSnapshot {
   id: string;
   colorIndex: number;
+  // Which of the 4 character sheets this player chose — -1 means "hasn't
+  // chosen yet". See src/server/protocol.ts's matching comment.
+  characterIndex: number;
+  displayName: string;
   x: number;
   y: number;
   hp: number;
@@ -149,6 +153,12 @@ export interface UseMedkitMessage {
   type: "use_medkit";
 }
 
+export interface SelectCharacterMessage {
+  type: "select_character";
+  characterIndex: number;
+  displayName: string;
+}
+
 export type ClientMessage =
   | InputMessage
   | ShootMessage
@@ -156,4 +166,5 @@ export type ClientMessage =
   | InteractMessage
   | PlaceTurretMessage
   | TurretInteractMessage
-  | UseMedkitMessage;
+  | UseMedkitMessage
+  | SelectCharacterMessage;

@@ -159,6 +159,8 @@ function fakePlayer(x: number, y: number): Player {
   return {
     id: "p1",
     colorIndex: 0,
+    characterIndex: 0,
+    displayName: "Test",
     pos: { x, y },
     hp: 100,
     maxHp: 100,

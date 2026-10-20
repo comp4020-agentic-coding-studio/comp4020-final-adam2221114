@@ -50,6 +50,13 @@ subset was (`src/server/index.ts`'s `serveSprite`).
      → `players/soldier-grey/*.png`, `players/soldier-gold/*.png` (4
      directional 9-frame walk cycles each, cropped from the sheet's
      up/left/down/right rows).
+   - **Daniel Armstrong (HughSpectrum)** — `tiles/castlewalls.png` (see
+     `assets/LPC/base-assets/CREDITS.TXT`'s "Castle work" entry).
+     → `fortress/wall-segment.png` (a 32×32 tileable ashlar-stone crop from
+     the sheet's solid masonry region, original coords (64,220)-(96,252)).
+     Replaces the earlier magenta/yellow "WALL" construction-blockout
+     placeholder (render.ts's `drawPlaceholderBlockout`) the purchasable
+     Wall used before real art existed at this path.
 
 3. **[LPC] Zombie** by Benjamin K. Smith, commissioned by castelonia, based
    on the LPC male base by Stephen Challener (Redshrike) and the animation
@@ -87,8 +94,9 @@ subset was (`src/server/index.ts`'s `serveSprite`).
 - LPC Terrains: credit bluecarrot16 and the full contributor list above;
   link back to <https://opengameart.org/content/lpc-terrains>.
 - LPC Base Assets: credit Lanea Zimmerman (Sharm), Charles Sanchez
-  (CharlesGabriel), and Manuel Riecke (MrBeast) for the specific files used
-  (see `assets/LPC/base-assets/CREDITS.TXT`); link back to
+  (CharlesGabriel), Manuel Riecke (MrBeast), and Daniel Armstrong
+  (HughSpectrum) for the specific files used (see
+  `assets/LPC/base-assets/CREDITS.TXT`); link back to
   <https://opengameart.org/content/liberated-pixel-cup-lpc-base-assets-sprites-map-tiles>.
 - LPC Zombie: credit Benjamin K. Smith (graphic artist), Stephen "Redshrike"
   Challener (base character), and Johannes Sjölund (wulax) (animation);
@@ -113,3 +121,16 @@ Turrets stay Canvas-drawn geometry (no LPC turret sprite exists; same
 "prefer simple Canvas geometry over a mismatched asset" reasoning this
 project already applied before — see `sprites.ts`'s own comment), restyled
 only in colour to fit the new palette.
+
+## Later change: the fixed fortress became a buildable wall, with real art
+
+A later change (see PROCESS.md) removed the always-on fortress walls/corner
+towers and replaced them with the purchasable Wall's own dynamic rectangle
+geometry (only present once built, with a gate only on the player-facing
+side — see `src/server/obstacles.ts`'s own comment). The corner-tower and
+gate-post art slots were cut entirely (no towers in the new design; the
+gate renders as open space, not a tile). `fortress/wall-segment.png` (item
+2's Daniel Armstrong crop above) is real, finished art from day one of that
+change — the earlier magenta/yellow placeholder blockout this NOTES.md used
+to describe as still-pending was resolved at the same time the fortress was
+redesigned, not left outstanding.

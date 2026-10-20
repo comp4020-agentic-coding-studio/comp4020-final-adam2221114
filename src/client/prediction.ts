@@ -4,13 +4,13 @@
 // since the local player's own input is the one thing this client knows
 // about instantly, without waiting on a round trip.
 //
-// Movement math (speed, diagonal normalization, map clamping, and — Crit 11
-// — building collision) mirrors src/server/game-state.ts's movePlayer()/
-// PLAYER_SPEED/MAP_SIZE/resolveMove exactly — duplicated for the same
-// build-separation reason as protocol.ts (see its comment). If the two drift
-// apart, prediction stops matching the server and reconciliation corrections
-// stop being rare.
-import { resolveMove } from "./obstacles.ts";
+// Movement math (speed, diagonal normalization, map clamping, building
+// collision, and the live wall ring once built) mirrors
+// src/server/game-state.ts's movePlayer()/PLAYER_SPEED/MAP_SIZE/
+// resolveMove exactly — duplicated for the same build-separation reason as
+// protocol.ts (see its comment). If the two drift apart, prediction stops
+// matching the server and reconciliation corrections stop being rare.
+import { resolveMove, wallRectsForPlayers } from "./obstacles.ts";
 
 interface Vec2 {
   x: number;
@@ -60,8 +60,10 @@ export class LocalPlayerPrediction {
 
   // Advances the dead-reckoned position by whatever's currently held. Call
   // once per animation frame with the real elapsed time since the last
-  // call — this never waits for a server snapshot.
-  tick(move: MoveState, dtMs: number): void {
+  // call — this never waits for a server snapshot. wallLevel is read from
+  // the latest server snapshot (main.ts) purely for local prediction; the
+  // server's own movePlayer is still the sole authority.
+  tick(move: MoveState, dtMs: number, wallLevel: number): void {
     let dx = 0;
     let dy = 0;
     if (move.up) dy -= 1;
@@ -76,7 +78,7 @@ export class LocalPlayerPrediction {
       x: clamp(this.#pos.x + (dx / len) * step, 0, WORLD_SIZE),
       y: clamp(this.#pos.y + (dy / len) * step, 0, WORLD_SIZE),
     };
-    this.#pos = resolveMove(this.#pos, desired);
+    this.#pos = resolveMove(this.#pos, desired, wallRectsForPlayers(wallLevel));
   }
 
   // Called whenever a new authoritative player position arrives. #pos is

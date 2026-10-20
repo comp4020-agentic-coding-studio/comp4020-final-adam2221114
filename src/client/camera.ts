@@ -14,21 +14,27 @@ export interface Camera {
   // target's own position (that's the viewport's centre, not its corner).
   originX: number;
   originY: number;
-  // World units visible across the (square) canvas — the "zoom": smaller
-  // means more zoomed in (bigger on-screen characters), larger means more
-  // of the map visible at once.
-  viewSize: number;
-  // Canvas size in CSS pixels (the canvas is always square here).
-  canvasSize: number;
+  // World units visible across the canvas's WIDTH/HEIGHT respectively — the
+  // canvas fills the whole (possibly non-square) browser window now, so a
+  // wide window shows MORE world side-to-side at the same zoom, rather than
+  // stretching a square view to fit. viewWidth/viewHeight are always in the
+  // same ratio as canvasWidth/canvasHeight (see computeCamera), which is
+  // exactly what keeps cameraScale() a single valid scalar for both axes.
+  viewWidth: number;
+  viewHeight: number;
+  // Canvas size in CSS pixels — independently sized now, not forced square.
+  canvasWidth: number;
+  canvasHeight: number;
 }
 
-// How many world units are visible across the canvas. Characters draw in
-// world units (e.g. PLAYER_DRAW_SIZE=34 — see render.ts), so a smaller
-// viewSize means a larger on-screen character for the same canvasSize. The
-// old whole-map view was effectively viewSize=1000 on an 800px canvas; 420
-// roughly doubles apparent character size at that same canvas size, and
-// more again once the canvas itself grows past 800px (index.html's
-// responsive resize).
+// How many world units are visible across the canvas's SHORTER axis — the
+// "zoom": smaller means more zoomed in (bigger on-screen characters), larger
+// means more of the map visible at once. computeCamera derives the LONGER
+// axis's view size from the canvas's own aspect ratio, so this one number
+// keeps meaning the same thing (and the zoom-wheel UX in main.ts stays
+// unchanged) regardless of window shape. Characters draw in world units
+// (e.g. PLAYER_DRAW_SIZE=34 — see render.ts), so a smaller viewSize means a
+// larger on-screen character for the same canvas size.
 export const DEFAULT_VIEW_SIZE = 420;
 
 // Mouse-wheel zoom range (main.ts owns the actual wheel listener and the
@@ -55,21 +61,65 @@ function clamp(v: number, min: number, max: number): number {
 // the map edge — a standard camera clamp, not a gameplay rule; it has no
 // effect on where a player can actually move (obstacles.ts/game-state.ts
 // own that entirely).
-export function computeCamera(followX: number, followY: number, canvasSize: number, viewSize: number = DEFAULT_VIEW_SIZE): Camera {
-  const half = viewSize / 2;
-  // If viewSize ever exceeds WORLD_SIZE the clamp range would invert (min >
-  // max); guard by capping the half-extent so the camera just centres on
-  // the map instead of producing nonsense bounds.
-  const clampedHalf = Math.min(half, WORLD_SIZE / 2);
-  const centerX = clamp(followX, clampedHalf, WORLD_SIZE - clampedHalf);
-  const centerY = clamp(followY, clampedHalf, WORLD_SIZE - clampedHalf);
-  return { originX: centerX - viewSize / 2, originY: centerY - viewSize / 2, viewSize, canvasSize };
+//
+// viewSize is "world units visible across the SHORTER canvas axis" — the
+// longer axis's view size is derived from the canvas's own aspect ratio
+// (fit-to-shorter-axis, extend-the-longer-one), so a wide window sees MORE
+// world horizontally at the same zoom instead of a stretched image.
+export function computeCamera(followX: number, followY: number, canvasWidth: number, canvasHeight: number, viewSize: number = DEFAULT_VIEW_SIZE): Camera {
+  const aspect = canvasWidth / canvasHeight;
+
+  // Bug fixed here: this used to only clamp the CENTER so it couldn't pan
+  // past the map edge, without ever shrinking viewWidth/viewHeight
+  // themselves. On a wide window zoomed far out, viewWidth (= viewSize *
+  // aspect) could exceed WORLD_SIZE even though the center was still
+  // clamped "correctly" — the view then genuinely extended past the map on
+  // both sides. render()'s terrain blit samples the baked map using exactly
+  // this origin/viewWidth/viewHeight; once the sampled rect ran outside the
+  // baked canvas's own bounds, drawImage silently skips painting the
+  // out-of-bounds destination columns (per spec, a source rect clipped to
+  // the source image also clips the destination by the same amount) — nothing
+  // redraws those edge columns, so whatever was drawn there last frame (e.g.
+  // a full-canvas red damage-flash fill) stayed stuck there indefinitely,
+  // visible as a persistent red band down the sides that only scrolling/
+  // resizing back into bounds would clear.
+  //
+  // Fix: clamp viewSize itself, before deriving width/height, to whatever
+  // the canvas's aspect ratio can actually support without either axis
+  // exceeding WORLD_SIZE. On an aspect ratio far from square this means you
+  // can't zoom out quite as far as MAX_VIEW_SIZE on an ultra-wide window —
+  // a real, necessary limit at that aspect ratio (there isn't that much map
+  // to show on the long axis), not a bug.
+  const maxViewSizeForAspect = WORLD_SIZE * Math.min(1 / aspect, aspect);
+  const effectiveViewSize = Math.min(viewSize, maxViewSizeForAspect);
+
+  const viewWidth = aspect >= 1 ? effectiveViewSize * aspect : effectiveViewSize;
+  const viewHeight = aspect >= 1 ? effectiveViewSize : effectiveViewSize / aspect;
+
+  // viewWidth/viewHeight can now never exceed WORLD_SIZE on their own axis
+  // (by construction above), so half <= WORLD_SIZE/2 always holds and this
+  // clamp range can never invert.
+  const halfX = viewWidth / 2;
+  const halfY = viewHeight / 2;
+  const centerX = clamp(followX, halfX, WORLD_SIZE - halfX);
+  const centerY = clamp(followY, halfY, WORLD_SIZE - halfY);
+  return {
+    originX: centerX - halfX,
+    originY: centerY - halfY,
+    viewWidth,
+    viewHeight,
+    canvasWidth,
+    canvasHeight,
+  };
 }
 
 // Pixels per world unit — used for SIZES (draw dimensions, line widths,
 // radii) that need uniform scaling only, not the camera's pan offset.
+// Correct as a SINGLE scalar for both axes by construction: viewWidth/
+// canvasWidth and viewHeight/canvasHeight are always equal (both derive from
+// the same viewSize and the same canvas aspect ratio — see computeCamera).
 export function cameraScale(camera: Camera): number {
-  return camera.canvasSize / camera.viewSize;
+  return camera.canvasWidth / camera.viewWidth;
 }
 
 // World -> screen (canvas pixel) coordinates for a POSITION — applies both

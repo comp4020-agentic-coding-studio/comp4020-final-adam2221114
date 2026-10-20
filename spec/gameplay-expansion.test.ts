@@ -103,6 +103,74 @@ it("buying a medkit or reviving a dead teammate with insufficient XP is rejected
   }
 });
 
+it(
+  "once a wall is built, a turret can't be placed inside its footprint",
+  async () => {
+    const id = `spec-turret-in-wall-${Date.now()}`;
+    const conn = await connect(id);
+    const send = (msg: unknown): void => conn.ws.send(JSON.stringify(msg));
+    try {
+      await waitFor(conn.messages, "welcome");
+      send({ type: "restart" });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // A character must be confirmed before shoot/interact/place_turret are
+      // allowed (see GameLoop's "select a character first" guard).
+      send({ type: "select_character", characterIndex: 0, displayName: "Tester" });
+      send({ type: "start" });
+      await waitForMatch(conn.messages, (m) => m.type === "state" && m.phase === "running", 5000);
+
+      // Farm enough shared XP for a level-1 wall (100) by shooting whatever
+      // zombie is nearest — real combat, not a shortcut around the mechanic
+      // being tested — then build it.
+      const farmLoop = setInterval(() => {
+        const state = [...conn.messages].reverse().find((m) => m.type === "state") as
+          | (ServerMsg & { players?: { id: string; x: number; y: number }[]; zombies?: { x: number; y: number }[] })
+          | undefined;
+        if (!state?.players || !state.zombies) return;
+        const self = state.players.find((p) => p.id === id);
+        if (!self || state.zombies.length === 0) return;
+        let nearest = state.zombies[0];
+        let bestD = Infinity;
+        for (const z of state.zombies) {
+          const d = Math.hypot(z.x - self.x, z.y - self.y);
+          if (d < bestD) {
+            bestD = d;
+            nearest = z;
+          }
+        }
+        const aimAngle = Math.atan2(nearest.y - self.y, nearest.x - self.x);
+        send({ type: "input", move: { up: false, down: false, left: false, right: false }, aimAngle, reviving: false });
+        if (bestD <= 600) send({ type: "shoot" });
+      }, 50);
+      // Farm 250: 100 for the wall, plus 150 so the later placeTurret call
+      // fails on the wall-overlap check specifically, not an XP check that
+      // would otherwise fire first (placeTurret validates cost before
+      // position — see game-loop.ts's own ordering).
+      try {
+        await waitForMatch(conn.messages, (m) => m.type === "state" && typeof m.sharedXp === "number" && (m.sharedXp as number) >= 250, 30000);
+      } finally {
+        clearInterval(farmLoop);
+      }
+      send({ type: "interact", action: "build_wall" });
+      await waitForMatch(conn.messages, (m) => m.type === "state" && m.wallLevel === 1, 5000);
+
+      // (500, 392) sits inside the wall's own north side (BASE_POS (500,500),
+      // WALL_HALF_EXTENT 116, WALL_THICKNESS 16 => north wall spans y
+      // 384-400, i.e. 100-116 units from base) — well inside
+      // TURRET_BUILD_RADIUS (150) and outside BASE_ATTACK_RANGE (40), so
+      // only the wall-overlap check can be what rejects it.
+      send({ type: "place_turret", x: 500, y: 392 });
+      const rejected = await waitForMatch(conn.messages, (m) => m.type === "rejected" && m.action === "place_turret", 5000);
+      expect(rejected.reason).toMatch(/wall/i);
+    } finally {
+      send({ type: "restart" });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      conn.ws.close();
+    }
+  },
+  45000,
+);
+
 it("turret_interact is rejected outside a running round, without ever reaching 'no such turret'", async () => {
   // Deliberately does NOT start the round — this suite's test files run
   // sequentially against one shared live app (see vitest.config.ts), and

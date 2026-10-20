@@ -41,12 +41,21 @@ export interface TurretRecord {
 // fresh from whoever is CURRENTLY connected each time, same as Crit 9.
 // Persisting it against identity would wrongly exhaust the 4 colour slots
 // across everyone who's ever played, not just who's online at once.
+//
+// characterIndex/displayName are the opposite case, deliberately: a
+// player's own durable CHOICE of which character sheet and name to use,
+// made once via the select-character overlay and meant to survive
+// reconnects — unlike colorIndex, nothing about this needs to be re-derived
+// fresh from who's currently connected. -1/"" means "never chosen yet" (a
+// brand new identity, or one that disconnected before confirming).
 export interface PlayerRecord {
   id: string;
   hp: number;
   maxHp: number;
   status: "alive" | "downed" | "dead";
   medkits: number;
+  characterIndex: number;
+  displayName: string;
 }
 
 export const DEFAULT_PROGRESS: Progress = {
@@ -95,6 +104,8 @@ interface PlayerRow {
   max_hp: number;
   status: string;
   medkits: number;
+  character_index: number;
+  display_name: string;
 }
 
 export function defaultDataDir(): string {
@@ -186,9 +197,23 @@ export function openDatabase(dir: string = defaultDataDir()): Database.Database 
       hp INTEGER NOT NULL,
       max_hp INTEGER NOT NULL,
       status TEXT NOT NULL,
-      medkits INTEGER NOT NULL DEFAULT 0
+      medkits INTEGER NOT NULL DEFAULT 0,
+      character_index INTEGER NOT NULL DEFAULT -1,
+      display_name TEXT NOT NULL DEFAULT ''
     )
   `);
+
+  // Columns a pre-existing data/game.db's players table might be missing —
+  // same guarded-ALTER pattern as game_state's MIGRATIONS above, so an
+  // existing players row survives rather than being dropped/recreated.
+  const playerColumns = db.prepare("PRAGMA table_info(players)").all() as Array<{ name: string }>;
+  const playerColumnNames = new Set(playerColumns.map((c) => c.name));
+  if (!playerColumnNames.has("character_index")) {
+    db.exec("ALTER TABLE players ADD COLUMN character_index INTEGER NOT NULL DEFAULT -1");
+  }
+  if (!playerColumnNames.has("display_name")) {
+    db.exec("ALTER TABLE players ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
+  }
 
   // One-time migration: a save from before Crit 10 has its one turret
   // sitting in game_state's legacy scalar columns. Seed the new `turrets`
@@ -267,7 +292,7 @@ export function saveState(db: Database.Database, state: Progress): void {
 // worth not losing, the same judgment call already applied to a build/upgrade
 // or a day change.
 export function loadPlayerRecord(db: Database.Database, id: string): PlayerRecord | undefined {
-  const row = db.prepare("SELECT id, hp, max_hp, status, medkits FROM players WHERE id = ?").get(id) as PlayerRow | undefined;
+  const row = db.prepare("SELECT id, hp, max_hp, status, medkits, character_index, display_name FROM players WHERE id = ?").get(id) as PlayerRow | undefined;
   if (!row) return undefined;
   return {
     id: row.id,
@@ -275,17 +300,21 @@ export function loadPlayerRecord(db: Database.Database, id: string): PlayerRecor
     maxHp: row.max_hp,
     status: row.status as PlayerRecord["status"],
     medkits: row.medkits,
+    characterIndex: row.character_index,
+    displayName: row.display_name,
   };
 }
 
 export function savePlayerRecord(db: Database.Database, record: PlayerRecord): void {
   db.prepare(
-    `INSERT INTO players (id, hp, max_hp, status, medkits)
-     VALUES (@id, @hp, @maxHp, @status, @medkits)
+    `INSERT INTO players (id, hp, max_hp, status, medkits, character_index, display_name)
+     VALUES (@id, @hp, @maxHp, @status, @medkits, @characterIndex, @displayName)
      ON CONFLICT(id) DO UPDATE SET
        hp = excluded.hp,
        max_hp = excluded.max_hp,
        status = excluded.status,
-       medkits = excluded.medkits`,
+       medkits = excluded.medkits,
+       character_index = excluded.character_index,
+       display_name = excluded.display_name`,
   ).run(record);
 }

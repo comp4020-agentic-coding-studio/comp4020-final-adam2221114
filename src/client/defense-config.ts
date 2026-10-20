@@ -11,7 +11,6 @@ export interface Vec2 {
 export const WORLD_SIZE = 1000;
 export const BASE_POS: Vec2 = { x: WORLD_SIZE / 2, y: WORLD_SIZE / 2 };
 export const BASE_ATTACK_RANGE = 40;
-export const WALL_RING_RADIUS = 60;
 export const WALL_PULSE_RADIUS = 110;
 export const BASE_INTERACT_RANGE = 80;
 export const TURRET_INTERACT_RANGE = 80;

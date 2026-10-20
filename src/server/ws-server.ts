@@ -78,6 +78,12 @@ function parseClientMessage(data: unknown): ClientMessage | undefined {
 
   if (parsed.type === "use_medkit") return { type: "use_medkit" };
 
+  if (parsed.type === "select_character") {
+    const { characterIndex, displayName } = parsed as { characterIndex?: unknown; displayName?: unknown };
+    if (typeof characterIndex !== "number" || typeof displayName !== "string") return undefined;
+    return { type: "select_character", characterIndex, displayName };
+  }
+
   return undefined;
 }
 
@@ -145,6 +151,9 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
           break;
         case "use_medkit":
           sendRejected("use_medkit", gameLoop.useMedkit(id));
+          break;
+        case "select_character":
+          sendRejected("select_character", gameLoop.selectCharacter(id, msg.characterIndex, msg.displayName));
           break;
       }
     });

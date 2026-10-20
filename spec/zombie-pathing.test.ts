@@ -18,7 +18,7 @@ describe("ground zombie pathing around a building", () => {
     const maxTicks = 4000; // 50ms/tick * 4000 = 200s of sim time — generous
     let reached = false;
     for (let i = 0; i < maxTicks; i++) {
-      advanceZombie(zombie, 50, [], false); // wall down: nothing but the building itself can block it
+      advanceZombie(zombie, 50, [], 0); // wallLevel 0: nothing but the building itself can block it
       if (distance(zombie.pos, BASE_POS) <= BASE_ATTACK_RANGE || zombie.attacking) {
         reached = true;
         break;

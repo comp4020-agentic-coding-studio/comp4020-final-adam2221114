@@ -5,7 +5,7 @@
 // (wall pulse radius, turret splash radius, melee/aggro ranges, boss
 // damage/speed, etc.) a reasonable default was chosen and is called out in
 // the comment next to it — see PROCESS.md for the full list of assumptions.
-import { flowDirectionAt, lineOfSightClear, resolveMove } from "./obstacles.ts";
+import { flowDirectionAt, isWithinWallInterior, lineOfSightClear, nearestRectDistance, resolveMove, wallRectsForPlayers, wallRectsForZombies } from "./obstacles.ts";
 
 export interface Vec2 {
   x: number;
@@ -85,6 +85,13 @@ export type PlayerStatus = "alive" | "downed" | "dead";
 export interface Player {
   id: string;
   colorIndex: number;
+  // Which of the 4 character sheets this player chose (durable, via
+  // selectCharacter) — -1 means "hasn't chosen yet". Unlike colorIndex
+  // (a live-connection slot, never persisted), this is the player's own
+  // deliberate, persisted preference and is NEVER reassigned by the
+  // server itself.
+  characterIndex: number;
+  displayName: string;
   pos: Vec2;
   hp: number;
   maxHp: number;
@@ -100,6 +107,12 @@ export interface Player {
 // scope. Each gets the next free colour slot / start offset below, so they
 // don't spawn stacked on top of each other.
 export const MAX_PLAYERS = 4;
+// How many character sheets a player can choose from (sprites.ts's
+// PLAYER_SHEETS) — kept here, not imported from the client, since the
+// server's own selectCharacter() needs this range independently of any
+// client art.
+export const CHARACTER_COUNT = 4;
+export const DISPLAY_NAME_MAX_LENGTH = 20;
 export const PLAYER_START_OFFSETS: Vec2[] = [
   { x: 0, y: 0 },
   { x: 30, y: 0 },
@@ -124,9 +137,6 @@ export const MAP_SIZE = 1000;
 export const BASE_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 };
 // Where ground zombies stop once the wall is gone — right up against the base.
 export const BASE_ATTACK_RANGE = 40;
-// Where ground zombies stop while the wall still has HP — must be further out
-// than BASE_ATTACK_RANGE, or a zombie would visually sit inside the wall.
-export const WALL_RING_RADIUS = 60;
 // How close a player has to be to the base / to a turret to open its X-menu.
 export const BASE_INTERACT_RANGE = 80;
 export const TURRET_INTERACT_RANGE = 80;
@@ -434,7 +444,7 @@ function clamp(v: number, min: number, max: number): number {
 // resolveMove purely for responsiveness, and gets corrected by this if it
 // ever disagrees (same reconciliation path every other prediction error
 // already takes).
-export function movePlayer(player: Player, input: InputState, dtMs: number): void {
+export function movePlayer(player: Player, input: InputState, dtMs: number, wallLevel: number): void {
   let dx = 0;
   let dy = 0;
   if (input.up) dy -= 1;
@@ -449,7 +459,7 @@ export function movePlayer(player: Player, input: InputState, dtMs: number): voi
     x: clamp(player.pos.x + (dx / len) * step, 0, MAP_SIZE),
     y: clamp(player.pos.y + (dy / len) * step, 0, MAP_SIZE),
   };
-  player.pos = resolveMove(player.pos, desired);
+  player.pos = resolveMove(player.pos, desired, wallRectsForPlayers(wallLevel));
 }
 
 function angleTo(from: Vec2, to: Vec2): number {
@@ -514,43 +524,44 @@ export function pickTarget(zombiePos: Vec2, players: readonly Player[]): { pos: 
 
 // Moves one zombie a dtMs-sized step toward whatever it's currently hunting
 // (pickTarget), or flips it into "attacking" once in range. Ground zombies
-// (ranged: false) can never cross an intact wall to reach anything inside its
-// ring — including a player who wandered in there — and fall back to
-// attacking the wall/base instead, exactly like the single-target version of
-// this game always did. Flying zombies ignore the wall entirely ("may attack
-// over walls"): they always go straight for the real target.
-export function advanceZombie(z: Zombie, dtMs: number, players: readonly Player[], wallUp: boolean): void {
+// (ranged: false) can never cross an intact wall to reach anything inside
+// it — including a player who made it inside through the gate — and fall
+// back to attacking the wall/base instead, exactly like this game always
+// did. Flying zombies ignore the wall entirely ("may attack over walls"):
+// they always go straight for the real target.
+//
+// wallLevel drives wallRectsForZombies (obstacles.ts), the all-sides-solid,
+// NO-gate shape a ground zombie sees — deliberately different from the
+// player-facing gated shape resolveMove uses for movePlayer, so a zombie
+// can never walk in through where a player's gate is (see obstacles.ts's
+// own comment on this asymmetry). Collision against these rects reuses the
+// exact same resolveMove axis-separated slide used for player movement and
+// static buildings — one shared collision function, not a parallel copy.
+export function advanceZombie(z: Zombie, dtMs: number, players: readonly Player[], wallLevel: number): void {
   const cfg = ZOMBIE_TYPES[z.type];
   const target = pickTarget(z.pos, players);
+  const zombieWallRects = cfg.ranged ? [] : wallRectsForZombies(wallLevel);
 
   let aimPos = target.pos;
-  let stopRadius = target.isPlayer ? cfg.attackRange : wallUp ? WALL_RING_RADIUS : BASE_ATTACK_RANGE;
   let attackTarget: Zombie["attackTarget"] = target.isPlayer && target.playerId ? { kind: "player", playerId: target.playerId } : { kind: "structure" };
 
-  // The real target (base, or a player standing inside the wall ring) is
-  // behind an intact wall — stop at the ring and attack the wall itself.
-  //
-  // Bug fixed here: this used to also require the ZOMBIE to currently be
-  // outside the ring before applying. Since that was re-checked fresh every
-  // tick from the zombie's own (just-moved) position, the first tick a
-  // zombie's ordinary per-tick approach step happened to land it at/inside
-  // the ring — a couple of units' overshoot, not a deliberate breach — it
-  // was judged "no longer outside" and permanently stopped being blocked:
-  // every tick after that it walked straight to real melee range of the
-  // player, through a fully intact, undamaged wall, for the rest of its
-  // life. Whether a ground zombie can reach something inside the ring must
-  // depend only on whether that target is behind the wall, not on where
-  // this zombie's last movement step happened to leave it.
-  const targetInsideRing = distance(target.pos, BASE_POS) <= WALL_RING_RADIUS;
-  const blockedByWall = !cfg.ranged && wallUp && targetInsideRing;
+  // The real target (base, or a player who made it inside through the
+  // gate) is behind an intact wall — redirect to the base and stop at the
+  // wall itself rather than reaching straight through it.
+  const blockedByWall = zombieWallRects.length > 0 && isWithinWallInterior(target.pos);
   if (blockedByWall) {
     aimPos = BASE_POS;
-    stopRadius = WALL_RING_RADIUS;
     attackTarget = { kind: "structure" };
   }
 
-  const d = distance(z.pos, aimPos);
-  if (d <= stopRadius) {
+  // "Close enough to attack" differs by shape: a rectangle's nearest edge
+  // for the wall, a plain point distance for everything else (an exposed
+  // player, or the base once the wall's down).
+  const closeEnoughToAttack = blockedByWall
+    ? nearestRectDistance(z.pos, zombieWallRects) <= MELEE_RANGE
+    : distance(z.pos, aimPos) <= (target.isPlayer ? cfg.attackRange : BASE_ATTACK_RANGE);
+
+  if (closeEnoughToAttack) {
     z.attacking = true;
     z.attackTarget = attackTarget;
     return;
@@ -569,12 +580,17 @@ export function advanceZombie(z: Zombie, dtMs: number, players: readonly Player[
   // base (CLAUDE.md: "a static, precomputed flow field toward the base", not
   // a per-target route), acceptable since the brief only requires zombies
   // reliably reach the base, not take an optimal path to a moving player.
+  // The wall is NOT part of the flow field (it's live state, not a fixed
+  // obstacle — see obstacles.ts's own comment on why); a zombie routing
+  // around it instead slides along it via the same resolveMove collision
+  // every other obstacle already uses, same as how players round a corner.
   const useFlowField = !cfg.ranged && !lineOfSightClear(z.pos, aimPos);
   let nextPos: Vec2;
   if (useFlowField) {
     const dir = flowDirectionAt(z.pos);
     nextPos = { x: z.pos.x + dir.x * step, y: z.pos.y + dir.y * step };
   } else {
+    const d = distance(z.pos, aimPos) || 1;
     const ratio = Math.min(step / d, 1);
     nextPos = {
       x: z.pos.x + (aimPos.x - z.pos.x) * ratio,
@@ -582,30 +598,11 @@ export function advanceZombie(z: Zombie, dtMs: number, players: readonly Player[
     };
   }
   // Final safety clamp: never let a ground zombie's resolved step actually
-  // end up inside a building, whichever path produced it (direct lerp can
-  // still clip a corner; the flow field is cell-coarse, not exact).
+  // end up inside a building or the wall, whichever path produced it
+  // (direct lerp can still clip a corner; the flow field is cell-coarse,
+  // not exact).
   if (!cfg.ranged) {
-    nextPos = resolveMove(z.pos, nextPos);
-  }
-  // Belt and braces: even with the fix above, a single large step could in
-  // principle still carry a blocked zombie across the ring boundary in one
-  // tick (it can't today at these speed values, but nothing should rely on
-  // that). Clamp the result so it can never end up closer to the base than
-  // the ring while the wall blocks it.
-  if (blockedByWall) {
-    const distFromBase = distance(nextPos, BASE_POS);
-    if (distFromBase < WALL_RING_RADIUS) {
-      // distFromBase === 0 has no defined direction to push back along;
-      // fall back to the zombie's own pre-move position, which is always
-      // further out (it approached from outside the ring).
-      const from = distFromBase === 0 ? z.pos : nextPos;
-      const fromDist = distFromBase === 0 ? distance(z.pos, BASE_POS) || 1 : distFromBase;
-      const pullBack = WALL_RING_RADIUS / fromDist;
-      nextPos = {
-        x: BASE_POS.x + (from.x - BASE_POS.x) * pullBack,
-        y: BASE_POS.y + (from.y - BASE_POS.y) * pullBack,
-      };
-    }
+    nextPos = resolveMove(z.pos, nextPos, zombieWallRects);
   }
   z.pos = nextPos;
 }

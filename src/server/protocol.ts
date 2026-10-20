@@ -8,6 +8,16 @@ import type { DayWave, PlayerStatus, ZombieType } from "./game-state.ts";
 export interface PlayerSnapshot {
   id: string;
   colorIndex: number;
+  // Which of the 4 character sheets this player chose (game-state.ts's
+  // CHARACTER_COUNT) — distinct from colorIndex, which only ever decides
+  // spawn offset (a live-connection slot), never which outfit renders.
+  // -1 means "hasn't chosen yet" (see GameLoop.addPlayer/selectCharacter):
+  // the client shows the character-select overlay for itself and skips
+  // sprite/name-tag rendering for anyone else still in this state.
+  characterIndex: number;
+  // "" exactly when characterIndex is -1; otherwise the player's own chosen
+  // display name, already trimmed/length-capped server-side.
+  displayName: string;
   x: number;
   y: number;
   hp: number;
@@ -179,6 +189,18 @@ export interface UseMedkitMessage {
   type: "use_medkit";
 }
 
+// Sent once a player picks a character card and confirms a name on the
+// select-character overlay (shown while characterIndex is -1). The server
+// re-validates range/uniqueness-among-connected-players/name length
+// independently — this message is a request, not a grant, same as every
+// other action here. Re-sending it (e.g. changing your mind before
+// confirming) is also how a connected player would change their own pick.
+export interface SelectCharacterMessage {
+  type: "select_character";
+  characterIndex: number;
+  displayName: string;
+}
+
 export type ClientMessage =
   | InputMessage
   | ShootMessage
@@ -186,4 +208,5 @@ export type ClientMessage =
   | InteractMessage
   | PlaceTurretMessage
   | TurretInteractMessage
-  | UseMedkitMessage;
+  | UseMedkitMessage
+  | SelectCharacterMessage;

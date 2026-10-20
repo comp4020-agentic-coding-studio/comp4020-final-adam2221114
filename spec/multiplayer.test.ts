@@ -69,6 +69,15 @@ it("a duplicate simultaneous build_wall request is rejected, not double-charged"
     await waitFor(a.messages, "welcome");
     await waitFor(b.messages, "welcome");
 
+    // A character must be confirmed before any gameplay action is allowed
+    // (see GameLoop's "select a character first" guard) — unrelated to what
+    // this test actually checks, but required for both connections to reach
+    // the real build_wall rejection path instead of this one. A broadcast
+    // happens every 50ms; 150ms is comfortably past the next one.
+    a.ws.send(JSON.stringify({ type: "select_character", characterIndex: 0, displayName: "A" }));
+    b.ws.send(JSON.stringify({ type: "select_character", characterIndex: 1, displayName: "B" }));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
     // Both requests race against the same (likely insufficient) shared XP —
     // the point here isn't affording the wall, it's that the server gives
     // the same consistent answer to both instead of two different ones, and

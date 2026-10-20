@@ -122,9 +122,13 @@ export class InputController {
     // canvas's own backing-store width/height if CSS ever scales it — divide
     // out that ratio before converting through the camera, whose origin/
     // scale are expressed in backing-store pixels (canvas.width/height).
-    const cssToBacking = this.#canvas.width / rect.width;
-    const canvasX = (e.clientX - rect.left) * cssToBacking;
-    const canvasY = (e.clientY - rect.top) * cssToBacking;
+    // Computed per axis (not one shared ratio) since the canvas now fills
+    // the whole, possibly non-square, window — width and height can scale
+    // differently.
+    const cssToBackingX = this.#canvas.width / rect.width;
+    const cssToBackingY = this.#canvas.height / rect.height;
+    const canvasX = (e.clientX - rect.left) * cssToBackingX;
+    const canvasY = (e.clientY - rect.top) * cssToBackingY;
     this.#mouseWorldPos = screenToWorld(this.#getCamera(), canvasX, canvasY);
   }
 

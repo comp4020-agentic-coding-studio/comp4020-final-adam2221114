@@ -107,20 +107,21 @@ export const PROP_IMAGES = {
   chest: loadImage("/sprites/lpc/props/chest.png"),
 } as const;
 
-// --- Base fortress (obstacles.ts's FORTRESS_WALLS/FORTRESS_TOWERS):
-// sprite-swappable by design — these files do NOT exist on disk yet, which
-// is intentional. isReady() (same helper every other tile in this file
-// already uses) returns false until real art is dropped in at these exact
-// paths, and render.ts's fortress-drawing functions already have the
+// --- The purchasable Wall's own tiles (obstacles.ts's wallRectsForPlayers)
+// and the base's courtyard floor. wallSegment is a real cropped LPC
+// castle-wall tile (sprites/lpc/NOTES.md); floorPad still has no art and
+// stays sprite-swappable the same way — isReady() (same helper every other
+// tile in this file already uses) returns false until a real PNG is
+// dropped in, and render.ts's drawing functions already have the
 // established "real tile if ready, else a clearly-labelled placeholder"
 // branch every other asset in this project uses (see renderBuilding's own
 // tile ? ... : fillStyle pattern). No code change is needed to go from
-// placeholder to final art — only adding the PNG files here. See the
-// fortress art spec (delivered separately) for exact size/format per slot.
+// placeholder to final art — only adding the PNG file here. No corner-
+// tower or gate-post slots — towers are cut entirely from this design, and
+// the gate is drawn as open space (render.ts's traceWallPerimeter), not a
+// tile.
 export const FORTRESS_TILES = {
   wallSegment: loadImage("/sprites/lpc/fortress/wall-segment.png"),
-  cornerTower: loadImage("/sprites/lpc/fortress/corner-tower.png"),
-  gatePost: loadImage("/sprites/lpc/fortress/gate-post.png"),
   floorPad: loadImage("/sprites/lpc/fortress/floor-pad.png"),
 } as const;
 

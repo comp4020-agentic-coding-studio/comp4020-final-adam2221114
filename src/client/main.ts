@@ -13,8 +13,8 @@ import {
   TURRET_MAX_LEVEL,
   WALL_LEVELS,
   WALL_MAX_LEVEL,
-  WALL_RING_RADIUS,
 } from "./defense-config.ts";
+import { WALL_HALF_EXTENT } from "./obstacles.ts";
 import type { ClientMessage, ControlMessage, GamePhase, InteractAction, PlayerSnapshot, ServerMessage, StateMessage, TurretAction, ZombieSnapshot, ZombieType } from "./protocol.ts";
 import { InputController } from "./input.ts";
 import { interpolateState } from "./interpolate.ts";
@@ -44,17 +44,18 @@ import {
   type ShotEffect,
   type ZombieProjectile,
 } from "./render.ts";
-import { isReady, zombieWalkSheet, type SpritedZombieType, type UiIconName } from "./sprites.ts";
+import { isReady, zombieWalkSheet, PLAYER_SHEETS, type SpritedZombieType, type UiIconName } from "./sprites.ts";
 import { overlapsAnyBuilding } from "./obstacles.ts";
 import { computeCamera, clampViewSize, screenToWorld, DEFAULT_VIEW_SIZE, type Camera } from "./camera.ts";
 
 // Must match src/server/game-state.ts's MAP_SIZE (see protocol.ts's comment
 // on why this is a duplicated constant, not a shared import).
 const WORLD_SIZE = 1000;
-// The canvas now resizes to fill the available viewport (see
-// resizeCanvas() below) instead of staying a fixed 800x800 — canvasSize is
-// read fresh every frame from the live canvas element rather than this
-// constant, which only sets the very first size before layout runs.
+// The canvas now resizes to fill the entire browser window (see
+// resizeCanvas() below) instead of staying a fixed 800x800 — canvas.width/
+// height are read fresh every frame from the live canvas element rather
+// than this constant, which only sets the very first size before layout
+// runs.
 const INITIAL_CANVAS_SIZE = 800;
 
 // Crit 10: a browser-persistent identity, generated once and kept in
@@ -117,6 +118,16 @@ const btnRetry = document.querySelector<HTMLButtonElement>("#btn-retry");
 if (!btnRetry) throw new Error("index.html is missing #btn-retry");
 const btnRestart = document.querySelector<HTMLButtonElement>("#btn-restart");
 if (!btnRestart) throw new Error("index.html is missing #btn-restart");
+const characterSelect = document.querySelector<HTMLDivElement>("#character-select");
+if (!characterSelect) throw new Error("index.html is missing #character-select");
+const characterGrid = document.querySelector<HTMLDivElement>("#character-grid");
+if (!characterGrid) throw new Error("index.html is missing #character-grid");
+const characterCards = [...characterGrid.querySelectorAll<HTMLDivElement>(".character-card")];
+if (characterCards.length !== PLAYER_SHEETS.length) throw new Error("index.html's #character-grid card count doesn't match PLAYER_SHEETS");
+const characterNameInput = document.querySelector<HTMLInputElement>("#character-name-input");
+if (!characterNameInput) throw new Error("index.html is missing #character-name-input");
+const characterConfirmBtn = document.querySelector<HTMLButtonElement>("#character-confirm-btn");
+if (!characterConfirmBtn) throw new Error("index.html is missing #character-confirm-btn");
 
 canvas.width = INITIAL_CANVAS_SIZE;
 canvas.height = INITIAL_CANVAS_SIZE;
@@ -125,18 +136,20 @@ if (!ctxOrNull) throw new Error("2d canvas context unavailable");
 const ctx: CanvasRenderingContext2D = ctxOrNull;
 ctx.imageSmoothingEnabled = false; // pixel-art sprites stay crisp when scaled up, not blurred
 
-// Responsive canvas: fills the available viewport instead of a fixed
-// 800x800 square, so the game area actually uses the browser window rather
-// than sitting in a small fixed box surrounded by unused space. Still
-// always square (world is square, camera.ts assumes a square viewport).
-// Changing canvas.width/height clears its contents, which is fine — the
-// very next animation frame redraws everything from currentState.
-const CANVAS_MARGIN = 24;
+// Responsive canvas: fills the ENTIRE browser window edge-to-edge,
+// independently sized per axis — not fit-to-the-shorter-axis-and-letterbox
+// (the old behaviour), and not forced square. camera.ts's computeCamera
+// derives the world window's width/height from this canvas's own aspect
+// ratio, so a wide window shows more world side-to-side rather than a
+// stretched image. Changing canvas.width/height clears its contents, which
+// is fine — the very next animation frame redraws everything from
+// currentState.
 function resizeCanvas(): void {
-  const size = Math.max(320, Math.min(window.innerWidth, window.innerHeight) - CANVAS_MARGIN);
-  if (canvas.width !== size || canvas.height !== size) {
-    canvas.width = size;
-    canvas.height = size;
+  const width = Math.max(320, window.innerWidth);
+  const height = Math.max(240, window.innerHeight);
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
     ctx.imageSmoothingEnabled = false; // resizing resets context state, including this
   }
 }
@@ -280,6 +293,99 @@ const resetEnemyIntros = (): void => {
 
 introDismissBtn.addEventListener("click", dismissIntro);
 
+// --- Character select: shown while the LOCAL player's own characterIndex
+// is -1 (brand new identity, or never confirmed) — see updateCharacterSelectUi
+// below, called from the "state" handler alongside updateHud/updateTeamPanel.
+const characterPortraitCtxs = characterCards.map((card) => {
+  const portraitCanvas = card.querySelector<HTMLCanvasElement>(".character-portrait");
+  if (!portraitCanvas) throw new Error("a .character-card is missing its .character-portrait canvas");
+  const pctx = portraitCanvas.getContext("2d");
+  if (!pctx) throw new Error("2d canvas context unavailable for a .character-portrait");
+  return { canvas: portraitCanvas, ctx: pctx };
+});
+
+// Same technique drawIntroPortrait already established: frame 0 of the
+// walk-down cycle doubles as a standing portrait pose (no dedicated idle
+// sheet in the LPC set) — drawn once per card, re-drawn on every call since
+// isReady() may flip from false to true after the sprite finishes loading.
+const drawCharacterPortraits = (): void => {
+  for (let i = 0; i < PLAYER_SHEETS.length; i++) {
+    const { canvas: portraitCanvas, ctx: pctx } = characterPortraitCtxs[i];
+    const sheet = PLAYER_SHEETS[i].down;
+    pctx.clearRect(0, 0, portraitCanvas.width, portraitCanvas.height);
+    if (!isReady(sheet.image)) continue;
+    pctx.imageSmoothingEnabled = false;
+    const size = 56;
+    const cx = portraitCanvas.width / 2;
+    const cy = portraitCanvas.height / 2;
+    pctx.drawImage(sheet.image, 0, 0, sheet.frameWidth, sheet.frameHeight, cx - size / 2, cy - size / 2, size, size);
+  }
+};
+drawCharacterPortraits();
+
+// Local in-progress pick, not yet sent — the confirm button is what actually
+// sends select_character. undefined until the player clicks a card.
+let selectedCharacterIndex: number | undefined;
+
+const sendSelectCharacter = (characterIndex: number, displayName: string): void => {
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "select_character", characterIndex, displayName }));
+};
+
+const refreshCharacterConfirmEnabled = (): void => {
+  const name = characterNameInput.value.trim();
+  const card = selectedCharacterIndex !== undefined ? characterCards[selectedCharacterIndex] : undefined;
+  const taken = card?.classList.contains("taken") ?? true;
+  characterConfirmBtn.disabled = selectedCharacterIndex === undefined || name.length === 0 || taken;
+};
+
+characterGrid.addEventListener("click", (e) => {
+  const card = (e.target as HTMLElement).closest<HTMLDivElement>(".character-card");
+  if (!card || card.classList.contains("taken")) return;
+  const index = Number(card.dataset.index);
+  selectedCharacterIndex = index;
+  for (const c of characterCards) c.classList.toggle("selected", c === card);
+  refreshCharacterConfirmEnabled();
+});
+characterNameInput.addEventListener("input", refreshCharacterConfirmEnabled);
+characterConfirmBtn.addEventListener("click", () => {
+  if (selectedCharacterIndex === undefined) return;
+  const name = characterNameInput.value.trim();
+  if (!name) return;
+  sendSelectCharacter(selectedCharacterIndex, name);
+});
+
+// Called once per "state" message. If self hasn't confirmed a character yet
+// (characterIndex -1, whether a brand new identity or simply never
+// finished), show the overlay regardless of game phase — a late joiner
+// should still get a chance to pick, not just a stuck "connected, nothing
+// to do" screen. Once confirmed (fresh pick OR a resumed reconnect — same
+// check covers both), hide it; no separate reconnect-specific code path.
+const updateCharacterSelectUi = (state: StateMessage): void => {
+  const self = findSelf(state);
+  if (self && self.characterIndex >= 0) {
+    characterSelect.hidden = true;
+    return;
+  }
+  characterSelect.hidden = false;
+  drawCharacterPortraits();
+
+  const takenByOthers = new Set(state.players.filter((p) => p.id !== myPlayerId && p.characterIndex >= 0).map((p) => p.characterIndex));
+  for (const card of characterCards) {
+    const index = Number(card.dataset.index);
+    const taken = takenByOthers.has(index);
+    card.classList.toggle("taken", taken);
+    card.classList.toggle("selected", index === selectedCharacterIndex);
+    const takenLabel = card.querySelector<HTMLDivElement>(".character-card-taken-label");
+    if (takenLabel) takenLabel.hidden = !taken;
+  }
+  if (selectedCharacterIndex !== undefined && takenByOthers.has(selectedCharacterIndex)) {
+    // Someone else just grabbed our in-progress (unsent) pick — clear it
+    // rather than leave a now-taken card looking selected.
+    selectedCharacterIndex = undefined;
+  }
+  refreshCharacterConfirmEnabled();
+};
+
 const setConnStatus = (status: "connecting" | "connected" | "disconnected", detail?: string): void => {
   conn.textContent = detail ?? (status === "connected" ? "connected" : status === "connecting" ? "connecting…" : "disconnected");
   conn.className = status;
@@ -324,7 +430,7 @@ const sendUseMedkit = (): void => {
 // tracking and every render call this frame reads the SAME camera instance,
 // so aim/placement never desyncs from what's actually drawn even as the
 // player moves and the view pans to follow.
-let currentCamera: Camera = computeCamera(WORLD_SIZE / 2, WORLD_SIZE / 2, canvas.width);
+let currentCamera: Camera = computeCamera(WORLD_SIZE / 2, WORLD_SIZE / 2, canvas.width, canvas.height);
 
 // --- Mouse-wheel zoom: client-only, purely a camera.viewSize change — never
 // touches any server-authoritative number (speed, ranges, build distances).
@@ -401,8 +507,14 @@ const zombieHitTargetPos = (z: ZombieSnapshot, state: StateMessage): { x: number
     return target ? { x: target.x, y: target.y } : undefined;
   }
   if (z.lastHitKind === "wall") {
-    const d = distance(z, BASE_POS) || 1;
-    return { x: BASE_POS.x + ((z.x - BASE_POS.x) / d) * WALL_RING_RADIUS, y: BASE_POS.y + ((z.y - BASE_POS.y) / d) * WALL_RING_RADIUS };
+    // Project the zombie's direction from the base onto the wall's SQUARE
+    // boundary (Chebyshev projection) — the square analogue of the old
+    // circular WALL_RING_RADIUS projection, now that the wall is a real
+    // rectangle rather than a free-floating ring.
+    const dx = z.x - BASE_POS.x;
+    const dy = z.y - BASE_POS.y;
+    const scale = WALL_HALF_EXTENT / (Math.max(Math.abs(dx), Math.abs(dy)) || 1);
+    return { x: BASE_POS.x + dx * scale, y: BASE_POS.y + dy * scale };
   }
   if (z.lastHitKind === "base") return BASE_POS;
   return undefined;
@@ -732,31 +844,22 @@ socket.addEventListener("message", (ev) => {
   updateHud(currentState);
   updateTeamPanel(currentState);
   updatePhaseUi(currentState.phase);
+  updateCharacterSelectUi(currentState);
   renderMenu(currentState);
 });
 
-// A small HP/XP-style meter bar: a fixed-colour track with a proportional
-// fill, used by both the HUD (base/player HP, wall HP) and the team panel
-// (per-player HP) instead of numbers alone — numbers are always shown
-// alongside it too (CLAUDE.md: "do not hide important game state behind
-// decorative UI").
-const bar = (value: number, max: number, variant: "hp" | "xp" | "wall"): string => {
-  const fraction = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;
-  return `<span class="bar bar-${variant}"><span class="bar-fill" style="width:${(fraction * 100).toFixed(0)}%"></span></span>`;
-};
-
+// HP bars live in-world now (base/wall/player each have their own — see
+// render.ts's renderBase/the wall's dashed perimeter/renderPlayer), so this
+// panel keeps plain text only: numbers and status, no bar widgets.
 const updateHud = (state: StateMessage): void => {
   const self = findSelf(state);
 
-  const wallLine =
-    state.wallLevel > 0
-      ? `${uiIcon("shield")} Wall Lv${state.wallLevel} ${bar(state.wallHp, state.wallMaxHp, "wall")} ${state.wallHp}/${state.wallMaxHp}`
-      : `${uiIcon("shield")} Wall: none`;
+  const wallLine = state.wallLevel > 0 ? `${uiIcon("shield")} Wall Lv${state.wallLevel}` : `${uiIcon("shield")} Wall: none`;
   const turretLine = `Turrets: ${state.turrets.length} / ${MAX_TURRETS}`;
 
   const statusLine = self
     ? self.status === "alive"
-      ? `${uiIcon("heart")} ${bar(self.hp, self.maxHp, "hp")} ${self.hp}/${self.maxHp}${self.healing ? " (healing…)" : ""}${self.invulnerable ? " (invulnerable)" : ""}`
+      ? `${uiIcon("heart")} ${self.hp}/${self.maxHp}${self.healing ? " (healing…)" : ""}${self.invulnerable ? " (invulnerable)" : ""}`
       : self.status === "downed"
         ? `${uiIcon("skull")} DOWNED — ${Math.ceil(self.downedRemainingMs / 1000)}s left (hold E near a teammate to revive, or wait)`
         : `${uiIcon("skull")} DEAD — a teammate can resurrect you at the base`
@@ -764,7 +867,7 @@ const updateHud = (state: StateMessage): void => {
 
   hud.innerHTML = [
     `${uiIcon("house")} Day ${state.day}`,
-    `${uiIcon("heart")} Base ${bar(state.baseHp, state.baseMaxHp, "hp")} ${state.baseHp}/${state.baseMaxHp}`,
+    `${uiIcon("heart")} Base: ${state.baseHp}/${state.baseMaxHp}`,
     wallLine,
     turretLine,
     `${uiIcon("coin")} Shared XP: ${state.sharedXp}`,
@@ -779,23 +882,35 @@ const updateHud = (state: StateMessage): void => {
 // Crit 10's gameplay-expansion requirement "their own HP/status... and any
 // teammate's status" — previously only a team-wide alive/downed/dead count
 // (updateHud's old teamLine); this shows each of up to 4 players by name-
-// colour (matching the canvas's own per-player colour), HP bar, explicit
-// downed/dead status, and — while someone's actively reviving them — a
-// revival progress bar with its remaining time, straight from
-// state.reviveProgress (already authoritative, already sent every tick).
+// colour (matching the canvas's own per-player colour), status (alive/
+// downed/dead — HP numbers moved to the in-world bar above each player, see
+// render.ts's renderPlayer), and — while someone's actively reviving them —
+// a revival progress bar with its remaining time (visible to the whole team
+// regardless of camera position, unlike its in-world twin which only shows
+// near the target — not fully redundant), straight from state.reviveProgress
+// (already authoritative, already sent every tick).
 const REMOTE_PLAYER_COLORS = ["#ff6666", "#66b2ff", "#66ff99", "#ffcc66"];
 const LOCAL_PLAYER_COLOR = "#ffcc00";
 
 const updateTeamPanel = (state: StateMessage): void => {
-  const rows = state.players.map((p) => {
+  teamPanel.replaceChildren();
+  const heading = document.createElement("div");
+  heading.className = "menu-heading";
+  heading.textContent = `TEAM (${state.players.length}/4)`;
+  teamPanel.appendChild(heading);
+
+  for (const p of state.players) {
     const isSelf = p.id === myPlayerId;
-    const color = isSelf ? LOCAL_PLAYER_COLOR : REMOTE_PLAYER_COLORS[p.colorIndex % REMOTE_PLAYER_COLORS.length];
-    const swatch = `<span class="player-swatch" style="background:${color}"></span>`;
-    const label = isSelf ? "You" : `P${p.colorIndex + 1}`;
+    const hasCharacter = p.characterIndex >= 0;
+    const color = isSelf ? LOCAL_PLAYER_COLOR : hasCharacter ? REMOTE_PLAYER_COLORS[p.characterIndex % REMOTE_PLAYER_COLORS.length] : "#888";
+    // p.displayName is the first user-authored free text this project puts
+    // into the DOM — built via textContent, never interpolated into an
+    // innerHTML string, so a malicious name can never inject markup here.
+    const label = p.displayName || (isSelf ? "You" : `P${p.colorIndex + 1}`);
 
     let statusHtml: string;
     if (p.status === "alive") {
-      statusHtml = `${bar(p.hp, p.maxHp, "hp")} ${p.hp}/${p.maxHp}`;
+      statusHtml = hasCharacter ? "" : "(choosing character…)";
     } else if (p.status === "downed") {
       const revive = state.reviveProgress.find((r) => r.targetId === p.id);
       statusHtml = `<span class="player-downed">${uiIcon("skull", 14)} DOWNED ${Math.ceil(p.downedRemainingMs / 1000)}s</span>`;
@@ -806,9 +921,20 @@ const updateTeamPanel = (state: StateMessage): void => {
     } else {
       statusHtml = `<span class="player-dead">${uiIcon("skull", 14)} DEAD</span>`;
     }
-    return `<div class="player-row">${swatch}<span class="player-label">${label}</span>${statusHtml}</div>`;
-  });
-  teamPanel.innerHTML = [`<div class="menu-heading">TEAM (${state.players.length}/4)</div>`, ...rows].join("");
+
+    const row = document.createElement("div");
+    row.className = "player-row";
+    const swatch = document.createElement("span");
+    swatch.className = "player-swatch";
+    swatch.style.background = color;
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "player-label";
+    labelSpan.textContent = label;
+    const statusSpan = document.createElement("span");
+    statusSpan.innerHTML = statusHtml; // no user-controlled text in statusHtml — built entirely from fixed strings/numbers above
+    row.append(swatch, labelSpan, statusSpan);
+    teamPanel.appendChild(row);
+  }
 };
 
 const PHASE_LABELS: Record<GamePhase, { title: string; icon?: UiIconName; subtitle?: string }> = {
@@ -869,7 +995,7 @@ const frame = (timestamp: number): void => {
     // position either (GameLoop's own tick skips non-alive players).
     const isRunning = currentState.phase === "running" && self?.status === "alive";
     if (isRunning) {
-      prediction.tick(input.getMoveState(), dtMs);
+      prediction.tick(input.getMoveState(), dtMs, currentState.wallLevel);
       frozenAt = undefined;
     } else if (frozenAt === undefined) {
       frozenAt = timestamp;
@@ -898,13 +1024,13 @@ const frame = (timestamp: number): void => {
       const t = 1 - Math.exp(-(ZOOM_EASE_PER_SEC * dtMs) / 1000);
       zoomCurrent += (zoomTarget - zoomCurrent) * t;
     }
-    currentCamera = computeCamera(followPos.x, followPos.y, canvas.width, zoomCurrent);
+    currentCamera = computeCamera(followPos.x, followPos.y, canvas.width, canvas.height, zoomCurrent);
 
     render(ctx, currentCamera, displayState, input.getAimAngle(), myPlayerId, zombieLungeUntil, playerFlashUntil);
     renderDeathEffects(ctx, currentCamera, deathEffects, timestamp);
     renderDayProgress(ctx, canvas.width, displayState.day, displayState.killedZombies, displayState.totalZombiesForDay, displayState.dayWaveComposition);
     if (displayState.dayIntroRemainingMs > 0) {
-      renderDayIntro(ctx, canvas.width, displayState.day, displayState.dayIntroRemainingMs);
+      renderDayIntro(ctx, canvas.width, canvas.height, displayState.day, displayState.dayIntroRemainingMs);
     }
 
     for (let i = effects.length - 1; i >= 0; i--) {
@@ -927,7 +1053,7 @@ const frame = (timestamp: number): void => {
     }
     renderDamageNumbers(ctx, currentCamera, damageNumbers, timestamp);
 
-    renderDamageVignette(ctx, canvas.width, selfFlashAt, timestamp);
+    renderDamageVignette(ctx, canvas.width, canvas.height, selfFlashAt, timestamp);
 
     const mouse = input.getMouseWorldPos();
     if (mouse) renderCrosshair(ctx, currentCamera, mouse);

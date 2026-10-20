@@ -6,9 +6,11 @@ import {
   BASE_ATTACK_RANGE,
   BASE_INTERACT_RANGE,
   BASE_POS,
+  CHARACTER_COUNT,
   DAILY_HEAL_AMOUNT,
   DAY_INTRO_MS,
   DAY_VICTORY,
+  DISPLAY_NAME_MAX_LENGTH,
   DOWNED_DURATION_MS,
   FIELD_REVIVE_HP,
   FIELD_REVIVE_INVULN_MS,
@@ -58,7 +60,7 @@ import {
   type Zombie,
   type ZombieType,
 } from "./game-state.ts";
-import { assertMapIsFullyConnected, overlapsAnyBuilding } from "./obstacles.ts";
+import { assertMapIsFullyConnected, overlapsAnyBuilding, overlapsWallRect, wallRectsForPlayers } from "./obstacles.ts";
 
 // Why an action returns a result instead of just logging and no-op'ing: with
 // several sockets, the loser of a simultaneous race (build/upgrade/repair/
@@ -206,6 +208,8 @@ export class GameLoop {
     const player: Player = {
       id,
       colorIndex,
+      characterIndex: record?.characterIndex ?? -1,
+      displayName: record?.displayName ?? "",
       pos: { x: PLAYER_START_POS.x + offset.x, y: PLAYER_START_POS.y + offset.y },
       hp: record?.hp ?? PLAYER_MAX_HP,
       maxHp: record?.maxHp ?? PLAYER_MAX_HP,
@@ -240,8 +244,46 @@ export class GameLoop {
   }
 
   #persistPlayer(player: Player): void {
-    const record: PlayerRecord = { id: player.id, hp: player.hp, maxHp: player.maxHp, status: player.status, medkits: player.medkits };
+    const record: PlayerRecord = {
+      id: player.id,
+      hp: player.hp,
+      maxHp: player.maxHp,
+      status: player.status,
+      medkits: player.medkits,
+      characterIndex: player.characterIndex,
+      displayName: player.displayName,
+    };
     savePlayerRecord(this.#db, record);
+  }
+
+  // Validates and applies a player's choice of character sheet + display
+  // name (the select-character overlay, shown while characterIndex is -1).
+  // No phase gate: must work during "waiting" (the whole point), and is
+  // harmless during "running" too (a late joiner confirming, or an existing
+  // player changing their mind). Re-sending this for an already-confirmed
+  // player is how they'd change their pick — their OWN current characterIndex
+  // never blocks their own re-pick (see the uniqueness check below).
+  selectCharacter(id: string, characterIndex: number, displayName: string): ActionResult {
+    const player = this.#players.get(id);
+    if (!player) return reject("not a connected player");
+    if (!Number.isInteger(characterIndex) || characterIndex < 0 || characterIndex >= CHARACTER_COUNT) {
+      return reject(`characterIndex must be an integer in [0, ${CHARACTER_COUNT})`);
+    }
+    const trimmedName = displayName.trim();
+    if (trimmedName.length === 0) return reject("name cannot be empty");
+    if (trimmedName.length > DISPLAY_NAME_MAX_LENGTH) return reject(`name must be at most ${DISPLAY_NAME_MAX_LENGTH} characters`);
+
+    for (const other of this.#players.values()) {
+      if (other.id !== id && other.characterIndex === characterIndex) {
+        return reject("that character is already taken");
+      }
+    }
+
+    player.characterIndex = characterIndex;
+    player.displayName = trimmedName;
+    this.#persistPlayer(player);
+    console.log(`player ${id} selected character ${characterIndex} ("${trimmedName}")`);
+    return OK;
   }
 
   #nextTurretId(): string {
@@ -277,7 +319,10 @@ export class GameLoop {
   }
 
   // Full reset to Day 1 defaults, from any phase — unlike retryDay(), which
-  // only rewinds to the CURRENT day's start.
+  // only rewinds to the CURRENT day's start. Deliberately does NOT touch
+  // characterIndex/displayName: those are identity preferences (which
+  // character/name a player chose), not run progress, same as colorIndex
+  // is already never reset here.
   restart(): void {
     this.#zombies.length = 0;
     this.#reviveProgress.clear();
@@ -316,6 +361,9 @@ export class GameLoop {
   // count) and replays the same day's wave — day itself is untouched. Only
   // valid after a Game Over; XP/damage/kills from the failed attempt are not
   // preserved (they were never written back into the snapshot).
+  // Also deliberately does NOT touch characterIndex/displayName — the
+  // DaySnapshot below never carried either field, same "identity
+  // preference, not run progress" reasoning as restart() above.
   retryDay(): ActionResult {
     if (this.#phase !== "game_over") return reject("can only retry the day after a game over");
 
@@ -367,6 +415,7 @@ export class GameLoop {
     const player = this.#players.get(id);
     const input = this.#inputs.get(id);
     if (!player || !input) return;
+    if (player.characterIndex < 0) return; // hasn't confirmed a character yet
     if (player.status !== "alive" || player.healingSince !== null) return; // can't shoot downed/dead, or mid-medkit
     const target = resolveShot(player.pos, input.aimAngle, this.#zombies);
     if (!target) return;
@@ -382,6 +431,7 @@ export class GameLoop {
     if (this.#phase !== "running") return reject("round is not running");
     const player = this.#players.get(id);
     if (!player || player.status !== "alive") return reject("not a connected, alive player");
+    if (player.characterIndex < 0) return reject("select a character first");
     if (distance(player.pos, BASE_POS) > BASE_INTERACT_RANGE) return reject("too far from the base");
 
     const progress = this.#progress.get();
@@ -401,6 +451,7 @@ export class GameLoop {
     if (this.#phase !== "running") return reject("round is not running");
     const player = this.#players.get(id);
     if (!player || player.status !== "alive") return reject("not a connected, alive player");
+    if (player.characterIndex < 0) return reject("select a character first");
     if (distance(player.pos, BASE_POS) > BASE_INTERACT_RANGE) return reject("too far from the base");
 
     const progress = this.#progress.get();
@@ -413,14 +464,17 @@ export class GameLoop {
     if (d < BASE_ATTACK_RANGE || d > TURRET_BUILD_RADIUS) {
       return reject(`(${x}, ${y}) is outside the allowed ring (${BASE_ATTACK_RANGE}-${TURRET_BUILD_RADIUS} from base)`);
     }
-    // Crit 11 map-visual pass: a turret can't legally stand inside a solid
-    // building. In practice BUILDINGS all sit outside TURRET_BUILD_RADIUS
-    // (obstacles.ts's own comment), so this never actually rejects anything
-    // today — kept as an explicit, independently-checked invariant rather
-    // than an implicit one, same reasoning as every other "the server
-    // re-validates even what looks geometrically impossible" rule here.
-    if (overlapsAnyBuilding(spot)) {
-      return reject(`(${x}, ${y}) overlaps a building`);
+    // A turret can't legally stand inside a solid building. In practice
+    // BUILDINGS all sit outside TURRET_BUILD_RADIUS (obstacles.ts's own
+    // comment), so this never actually rejects anything today — kept as an
+    // explicit, independently-checked invariant rather than an implicit
+    // one, same reasoning as every other "the server re-validates even what
+    // looks geometrically impossible" rule here. The wall, once built, DOES
+    // genuinely overlap part of the turret ring (its half-extent is 116,
+    // inside TURRET_BUILD_RADIUS=150), so this check is what actually
+    // rejects an in-wall spot once a wall stands.
+    if (overlapsAnyBuilding(spot) || overlapsWallRect(spot, wallRectsForPlayers(progress.wallLevel))) {
+      return reject(`(${x}, ${y}) overlaps a building or the wall`);
     }
     for (const t of progress.turrets) {
       if (distance(spot, { x: t.x, y: t.y }) < TURRET_MIN_SEPARATION) {
@@ -443,6 +497,7 @@ export class GameLoop {
     if (this.#phase !== "running") return reject("round is not running");
     const player = this.#players.get(id);
     if (!player || player.status !== "alive") return reject("not a connected, alive player");
+    if (player.characterIndex < 0) return reject("select a character first");
 
     const progress = this.#progress.get();
     const turret = progress.turrets.find((t) => t.id === turretId);
@@ -539,6 +594,7 @@ export class GameLoop {
     if (this.#phase !== "running") return reject("round is not running");
     const player = this.#players.get(id);
     if (!player || player.status !== "alive") return reject("not a connected, alive player");
+    if (player.characterIndex < 0) return reject("select a character first");
     if (player.healingSince !== null) return reject("already healing");
     if (player.medkits <= 0) return reject("no medkits");
     if (player.hp >= player.maxHp) return reject("already at full health");
@@ -699,6 +755,8 @@ export class GameLoop {
       players: [...this.#players.values()].map((p) => ({
         id: p.id,
         colorIndex: p.colorIndex,
+        characterIndex: p.characterIndex,
+        displayName: p.displayName,
         x: p.pos.x,
         y: p.pos.y,
         hp: p.hp,
@@ -754,10 +812,11 @@ export class GameLoop {
   #tick(dtMs: number): void {
     if (this.#phase !== "running") return;
     this.#clockMs += dtMs;
+    const wallLevel = this.#progress.get().wallLevel;
     for (const [id, player] of this.#players) {
       if (player.status !== "alive") continue;
       const input = this.#inputs.get(id);
-      if (input) movePlayer(player, input, dtMs);
+      if (input) movePlayer(player, input, dtMs, wallLevel);
     }
     this.#updateRevives();
     this.#updateHealing();
@@ -870,10 +929,10 @@ export class GameLoop {
   #updateZombies(): void {
     const now = this.#clockMs;
     const progress = this.#progress.get();
-    const wallUp = progress.wallHp > 0;
+    const wallLevel = progress.wallHp > 0 ? progress.wallLevel : 0;
     const players = [...this.#players.values()];
     for (const z of this.#zombies) {
-      advanceZombie(z, TICK_MS, players, wallUp);
+      advanceZombie(z, TICK_MS, players, wallLevel);
       if (z.attacking && now - z.lastAttackAt >= ZOMBIE_TYPES[z.type].attackIntervalMs) {
         z.lastAttackAt = now;
         this.#applyZombieHit(z);

@@ -23,7 +23,7 @@ import {
   type UiIconName,
 } from "./sprites.ts";
 import { DECORATIVE_PROPS, distanceToRoad, GROUND_MARKS, OUTER_ZONE_RADIUS, ROAD_HALF_WIDTH, type GroundMark, type Prop } from "./terrain.ts";
-import { BUILDINGS, FORTRESS_HALF_EXTENT, FORTRESS_INTERIOR_HALF_EXTENT, FORTRESS_TOWERS, FORTRESS_WALLS, TOWN_BUILDINGS, type Rect } from "./obstacles.ts";
+import { BUILDINGS, TOWN_BUILDINGS, WALL_GATE_WIDTH, WALL_HALF_EXTENT, WALL_INTERIOR_HALF_EXTENT, wallRectsForPlayers, type Rect } from "./obstacles.ts";
 import type { StateMessage, TurretSnapshot, ZombieSnapshot, ZombieType } from "./protocol.ts";
 
 // Just enough visual distinction per wall level — colour/thickness, plus
@@ -176,13 +176,17 @@ function buildTerrainLayer(): HTMLCanvasElement {
   return layer;
 }
 
-// Interior courtyard floor: fills the square the fortress walls enclose
-// (FORTRESS_INTERIOR_HALF_EXTENT around BASE_POS) so the ground reads as
+// Interior courtyard floor: fills the square the wall encloses once built
+// (WALL_INTERIOR_HALF_EXTENT around BASE_POS) so the ground reads as
 // "inside the walls" right up to them, rather than leaving bare grass
-// visible between the walls and the base. Tiles FORTRESS_TILES.floorPad once
-// that art exists; until then, a flat-colour + border placeholder fill.
+// visible between the walls and the base. Deliberately unconditional —
+// baked once into the static terrain layer regardless of wallLevel, same
+// as every other decorative ground tile, so the base always has a
+// consistent "home" patch whether or not a wall currently stands. Tiles
+// FORTRESS_TILES.floorPad once that art exists; until then, a flat-colour +
+// border placeholder fill.
 function renderFortressCourtyardFloor(ctx: CanvasRenderingContext2D): void {
-  const half = FORTRESS_INTERIOR_HALF_EXTENT * BAKE_PX_PER_UNIT;
+  const half = WALL_INTERIOR_HALF_EXTENT * BAKE_PX_PER_UNIT;
   const cx = BASE_POS.x * BAKE_PX_PER_UNIT;
   const cy = BASE_POS.y * BAKE_PX_PER_UNIT;
   const x = cx - half;
@@ -323,8 +327,8 @@ function renderProps(ctx: CanvasRenderingContext2D, camera: Camera): void {
   const scale = cameraScale(camera);
   const left = camera.originX - PROP_CULL_MARGIN;
   const top = camera.originY - PROP_CULL_MARGIN;
-  const right = camera.originX + camera.viewSize + PROP_CULL_MARGIN;
-  const bottom = camera.originY + camera.viewSize + PROP_CULL_MARGIN;
+  const right = camera.originX + camera.viewWidth + PROP_CULL_MARGIN;
+  const bottom = camera.originY + camera.viewHeight + PROP_CULL_MARGIN;
   for (const prop of DECORATIVE_PROPS) {
     if (prop.x < left || prop.x > right || prop.y < top || prop.y > bottom) continue;
     const img = PROP_IMAGES[prop.type];
@@ -395,15 +399,16 @@ function renderBuilding(ctx: CanvasRenderingContext2D, camera: Camera, b: Rect):
   ctx.restore();
 }
 
-// --- Fortress placeholder blockout: deliberately NOT an attempt at finished
+// --- Wall placeholder blockout: deliberately NOT an attempt at finished
 // art. The user explicitly rejected composing "fake" finished visuals out of
 // Canvas primitives (sandbags/fencing/etc drawn with shapes) — this instead
 // reads unmistakably as a construction blockout (flat magenta/cyan debug
-// fill, diagonal hazard hatch, a text label) until real PNGs exist at
-// FORTRESS_TILES' paths, at which point isReady() flips these to the
-// `tile ? ... : placeholder` branch automatically, same pattern renderBuilding
-// already uses for BUILDING_STONE_TILE/BUILDING_BRICK_TILE. No logic needs to
-// change when art is dropped in — only the files on disk. ---
+// fill, diagonal hazard hatch, a text label), kept only as a fallback for
+// if FORTRESS_TILES.wallSegment is ever missing again; the real cropped LPC
+// castle-wall tile (sprites/lpc/NOTES.md) is what actually renders today.
+// isReady() flips between the two automatically, same pattern renderBuilding
+// already uses for BUILDING_STONE_TILE/BUILDING_BRICK_TILE — no logic needs
+// to change if the art file ever moves/goes missing. ---
 const FORTRESS_PLACEHOLDER_FILL = "rgba(180, 40, 160, 0.35)";
 const FORTRESS_PLACEHOLDER_HATCH = "rgba(255, 255, 0, 0.55)";
 
@@ -443,10 +448,13 @@ function drawPlaceholderBlockout(ctx: CanvasRenderingContext2D, x: number, y: nu
   ctx.restore();
 }
 
-// Fortress wall segment: tiled FORTRESS_TILES.wallSegment once art exists
-// (same tiling loop renderBuilding uses for town buildings), else an
-// explicit "WALL" blockout — see the comment above.
-function renderFortressWall(ctx: CanvasRenderingContext2D, camera: Camera, b: Rect): void {
+// Wall segment: tiled FORTRESS_TILES.wallSegment (same tiling loop
+// renderBuilding uses for town buildings), else an explicit "WALL"
+// blockout — see the comment above. Only ever called for rects
+// wallRectsForPlayers actually returned, i.e. only while wallLevel > 0, so
+// nothing draws before the wall is built or after it's destroyed. No corner
+// towers — cut entirely from this design.
+function renderWallSegment(ctx: CanvasRenderingContext2D, camera: Camera, b: Rect): void {
   const scale = cameraScale(camera);
   const screen = worldToScreen(camera, b.x, b.y);
   const w = b.w * scale;
@@ -466,24 +474,6 @@ function renderFortressWall(ctx: CanvasRenderingContext2D, camera: Camera, b: Re
     ctx.restore();
   } else {
     drawPlaceholderBlockout(ctx, screen.x, screen.y, w, h, "WALL");
-  }
-}
-
-// Fortress corner tower platform: FORTRESS_TILES.cornerTower once art
-// exists, else a "TOWER" blockout.
-function renderFortressTower(ctx: CanvasRenderingContext2D, camera: Camera, b: Rect): void {
-  const scale = cameraScale(camera);
-  const screen = worldToScreen(camera, b.x, b.y);
-  const w = b.w * scale;
-  const h = b.h * scale;
-  const tile = FORTRESS_TILES.cornerTower;
-  if (isReady(tile)) {
-    ctx.save();
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(tile, screen.x, screen.y, w, h);
-    ctx.restore();
-  } else {
-    drawPlaceholderBlockout(ctx, screen.x, screen.y, w, h, "TOWER");
   }
 }
 
@@ -748,8 +738,7 @@ export function renderDeathEffects(ctx: CanvasRenderingContext2D, camera: Camera
 // stay in the simple unsorted pass below.
 type Drawable =
   | { kind: "building"; sortY: number; rect: Rect }
-  | { kind: "fortress-wall"; sortY: number; rect: Rect }
-  | { kind: "fortress-tower"; sortY: number; rect: Rect }
+  | { kind: "wall-segment"; sortY: number; rect: Rect }
   | { kind: "zombie"; sortY: number; z: ZombieSnapshot; lungeStartedAt: number | undefined }
   | { kind: "player"; sortY: number; p: StateMessage["players"][number]; isSelf: boolean; aimAngle: number; flashStartedAt: number | undefined };
 
@@ -769,7 +758,8 @@ export function render(
   zombieLunge: ReadonlyMap<string, number> = new Map(),
   playerFlash: ReadonlyMap<string, number> = new Map(),
 ): void {
-  const canvasSize = camera.canvasSize;
+  const canvasWidth = camera.canvasWidth;
+  const canvasHeight = camera.canvasHeight;
   const scale = cameraScale(camera);
   const toScreen = (x: number, y: number) => worldToScreen(camera, x, y);
 
@@ -781,26 +771,29 @@ export function render(
     // never needs rebaking.
     const sx = camera.originX * BAKE_PX_PER_UNIT;
     const sy = camera.originY * BAKE_PX_PER_UNIT;
-    const sSize = camera.viewSize * BAKE_PX_PER_UNIT;
+    const sWidth = camera.viewWidth * BAKE_PX_PER_UNIT;
+    const sHeight = camera.viewHeight * BAKE_PX_PER_UNIT;
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(terrain, sx, sy, sSize, sSize, 0, 0, canvasSize, canvasSize);
+    ctx.drawImage(terrain, sx, sy, sWidth, sHeight, 0, 0, canvasWidth, canvasHeight);
   } else {
     ctx.fillStyle = "#2a2622";
-    ctx.fillRect(0, 0, canvasSize, canvasSize);
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
   }
   renderProps(ctx, camera);
 
   const base = toScreen(BASE_POS.x, BASE_POS.y);
-  // Wall status is now drawn mapped onto the rectangular fortress footprint
-  // (FORTRESS_HALF_EXTENT, the same rect FORTRESS_WALLS physically occupies)
-  // instead of the old free-floating WALL_RING_RADIUS circle, so the Wall's
-  // level/HP/ability feedback reads as part of the one rectangular base
-  // rather than a separate circular shape drawn over it. This is a visual
-  // mapping only — wallHp/wallLevel/ability resolution are untouched.
-  const fortressHalf = scale * FORTRESS_HALF_EXTENT;
+  // Wall status is drawn mapped onto the square WALL_HALF_EXTENT footprint
+  // the wall's own collision rects physically occupy once built
+  // (obstacles.ts's wallRectsForPlayers) — this is a visual mapping only;
+  // wallHp/wallLevel/ability resolution are untouched. The south side's
+  // gate gap (WALL_GATE_WIDTH, the same gap players actually walk through)
+  // is traced into every stroke below via traceWallPerimeter instead of one
+  // unbroken strokeRect, so the drawn wall always matches real collision.
+  const fortressHalf = scale * WALL_HALF_EXTENT;
   const fortX = base.x - fortressHalf;
   const fortY = base.y - fortressHalf;
   const fortSize = fortressHalf * 2;
+  const gateHalf = (scale * WALL_GATE_WIDTH) / 2;
 
   // Base interact range: always visible (not just while placing a turret),
   // highlighted once the local player is actually inside it — the same
@@ -818,10 +811,15 @@ export function render(
   ctx.setLineDash([]);
   ctx.restore();
 
-  if (state.wallHp <= 0 || state.wallLevel === 0) {
-    // No protection at all — a dim, clearly "broken" dashed outline traced
-    // over the fortress rectangle itself (not a free-floating circle) so
-    // "I have no wall" reads at a glance instead of only by its absence.
+  // Nothing square draws at all before the wall is ever built — the dashed
+  // "no protection" hint only makes sense once there's a real wall (however
+  // damaged) to warn about; pre-build, the always-visible base-interact
+  // range above already shows where the base is.
+  if (state.wallLevel > 0 && state.wallHp <= 0) {
+    // Wall was destroyed — a dim, clearly "broken" dashed outline traced
+    // over the square footprint it occupied (full closed square: once
+    // destroyed there's no real gate-shaped geometry left to match, it's
+    // purely a "build again here" hint).
     ctx.save();
     ctx.setLineDash([2, 6]);
     ctx.strokeStyle = "rgba(224, 92, 92, 0.35)";
@@ -834,35 +832,52 @@ export function render(
   if (state.wallHp > 0 && state.wallLevel > 0) {
     const visual = WALL_VISUALS[state.wallLevel] ?? WALL_VISUALS[1];
 
-    // A solid border tinted by the level's colour, traced over the
-    // rectangular fortress perimeter (rather than a separate circle drawn
-    // over it), with a thicker inner wash for a bit of material depth — no
-    // fence-panel sprite exists for this (the LPC set has no tileable
-    // barricade texture at this scale), so this is deliberately simple
-    // Canvas geometry (CLAUDE.md: "prefer simple Canvas geometry over
-    // inventing assets that don't exist").
+    // The wall's real perimeter as ONE open path, starting/ending at the
+    // south gate's two edges and running the long way around (SW corner ->
+    // NW -> NE -> SE corner) — exactly the shape wallRectsForPlayers
+    // physically occupies, so every stroke below (border, HP dash, etc.)
+    // leaves the gate visibly open rather than drawing over it.
+    const traceWallPerimeter = (): void => {
+      ctx.beginPath();
+      ctx.moveTo(base.x - gateHalf, fortY + fortSize);
+      ctx.lineTo(fortX, fortY + fortSize);
+      ctx.lineTo(fortX, fortY);
+      ctx.lineTo(fortX + fortSize, fortY);
+      ctx.lineTo(fortX + fortSize, fortY + fortSize);
+      ctx.lineTo(base.x + gateHalf, fortY + fortSize);
+    };
+
+    // A solid border tinted by the level's colour, traced over the wall's
+    // real (gated) perimeter, with a thicker inner wash for a bit of
+    // material depth — no fence-panel sprite exists for this (the LPC set
+    // has no tileable barricade texture at this scale), so this is
+    // deliberately simple Canvas geometry (CLAUDE.md: "prefer simple Canvas
+    // geometry over inventing assets that don't exist").
     ctx.save();
     ctx.globalAlpha = 0.85;
     ctx.strokeStyle = visual.color;
     ctx.lineWidth = visual.lineWidth;
-    ctx.strokeRect(fortX, fortY, fortSize, fortSize);
+    traceWallPerimeter();
+    ctx.stroke();
     ctx.globalAlpha = 0.25;
     ctx.lineWidth = visual.lineWidth * 2;
-    ctx.strokeRect(fortX, fortY, fortSize, fortSize);
+    traceWallPerimeter();
+    ctx.stroke();
     ctx.restore();
 
     if (visual.ability === "spike") {
-      // Tick marks along the rectangle's own perimeter (evenly spaced by
-      // side) instead of radiating out from a circle.
+      // Tick marks along each REAL wall segment (south split into its two
+      // gated halves, so no tick ever floats in the open gate gap).
       const spikeLength = 7;
       const perSide = 4;
       ctx.strokeStyle = visual.color;
       ctx.lineWidth = 2;
       const sides: Array<{ x0: number; y0: number; x1: number; y1: number; nx: number; ny: number }> = [
-        { x0: fortX, y0: fortY, x1: fortX + fortSize, y1: fortY, nx: 0, ny: -1 }, // top
-        { x0: fortX + fortSize, y0: fortY, x1: fortX + fortSize, y1: fortY + fortSize, nx: 1, ny: 0 }, // right
-        { x0: fortX + fortSize, y0: fortY + fortSize, x1: fortX, y1: fortY + fortSize, nx: 0, ny: 1 }, // bottom
-        { x0: fortX, y0: fortY + fortSize, x1: fortX, y1: fortY, nx: -1, ny: 0 }, // left
+        { x0: fortX, y0: fortY, x1: fortX + fortSize, y1: fortY, nx: 0, ny: -1 }, // north
+        { x0: fortX + fortSize, y0: fortY, x1: fortX + fortSize, y1: fortY + fortSize, nx: 1, ny: 0 }, // east
+        { x0: fortX + fortSize, y0: fortY + fortSize, x1: base.x + gateHalf, y1: fortY + fortSize, nx: 0, ny: 1 }, // south-east
+        { x0: base.x - gateHalf, y0: fortY + fortSize, x1: fortX, y1: fortY + fortSize, nx: 0, ny: 1 }, // south-west
+        { x0: fortX, y0: fortY + fortSize, x1: fortX, y1: fortY, nx: -1, ny: 0 }, // west
       ];
       for (const side of sides) {
         for (let i = 1; i <= perSide; i++) {
@@ -878,9 +893,11 @@ export function render(
     } else if (visual.ability === "pulse") {
       // Pulse's actual AOE radius (WALL_PULSE_RADIUS) stays a circle in the
       // server's own damage resolution (game-loop.ts) — this is purely the
-      // player-facing indicator, now drawn as a dashed rectangle just
-      // outside the fortress footprint so it reads as "this base's ability"
-      // rather than a separate circular shape floating over it.
+      // player-facing indicator, drawn as a dashed rectangle just outside
+      // the wall footprint so it reads as "this base's ability" rather than
+      // a separate circular shape floating over it. Kept a plain closed
+      // rect (not gate-traced) since it's a margin OUTSIDE the wall, not
+      // the wall itself.
       const pulseMargin = 12 * scale;
       ctx.strokeStyle = "rgba(111, 194, 166, 0.3)";
       ctx.lineWidth = 2;
@@ -889,18 +906,19 @@ export function render(
       ctx.setLineDash([]);
     }
 
-    // Wall HP traced as a partial border over the fortress rectangle's own
-    // perimeter (via a dash pattern sized to the rect's perimeter length) —
+    // Wall HP traced as a partial border over the wall's own real (gated)
+    // perimeter (via a dash pattern sized to its actual stroked length) —
     // "how much wall is left" readable at a glance, without checking the
     // HUD, and turning visibly red as it nears breaking instead of only the
     // HUD number changing colour.
     const hpFraction = Math.max(0, Math.min(1, state.wallHp / state.wallMaxHp));
-    const perimeter = fortSize * 4;
+    const perimeter = fortSize * 4 - gateHalf * 2;
     ctx.save();
     ctx.lineWidth = 4;
     ctx.strokeStyle = hpFraction > 0.5 ? "rgba(140, 230, 160, 0.9)" : hpFraction > 0.2 ? "rgba(255, 205, 90, 0.9)" : "rgba(255, 90, 90, 0.95)";
     ctx.setLineDash([perimeter * hpFraction, perimeter]);
-    ctx.strokeRect(fortX, fortY, fortSize, fortSize);
+    traceWallPerimeter();
+    ctx.stroke();
     ctx.setLineDash([]);
     ctx.restore();
 
@@ -916,7 +934,7 @@ export function render(
     ctx.textAlign = "left";
   }
 
-  renderBase(ctx, base, scale);
+  renderBase(ctx, base, scale, state.baseHp, state.baseMaxHp);
 
   for (const turret of state.turrets) {
     renderTurret(ctx, camera, turret);
@@ -931,11 +949,12 @@ export function render(
   for (const b of TOWN_BUILDINGS) {
     drawables.push({ kind: "building", sortY: b.y + b.h, rect: b });
   }
-  for (const b of FORTRESS_WALLS) {
-    drawables.push({ kind: "fortress-wall", sortY: b.y + b.h, rect: b });
-  }
-  for (const b of FORTRESS_TOWERS) {
-    drawables.push({ kind: "fortress-tower", sortY: b.y + b.h, rect: b });
+  // Wall segments only exist to draw once wallLevel > 0 — wallRectsForPlayers
+  // returns [] otherwise, so nothing solid-textured appears before the wall
+  // is actually built (the dashed HP/level overlay above is the only
+  // pre-build/post-destruction hint). No corner towers — cut entirely.
+  for (const b of wallRectsForPlayers(state.wallLevel)) {
+    drawables.push({ kind: "wall-segment", sortY: b.y + b.h, rect: b });
   }
   for (const z of state.zombies) {
     drawables.push({ kind: "zombie", sortY: z.y, z, lungeStartedAt: zombieLunge.get(z.id) });
@@ -946,8 +965,7 @@ export function render(
   drawables.sort((a, b) => a.sortY - b.sortY);
   for (const d of drawables) {
     if (d.kind === "building") renderBuilding(ctx, camera, d.rect);
-    else if (d.kind === "fortress-wall") renderFortressWall(ctx, camera, d.rect);
-    else if (d.kind === "fortress-tower") renderFortressTower(ctx, camera, d.rect);
+    else if (d.kind === "wall-segment") renderWallSegment(ctx, camera, d.rect);
     else if (d.kind === "zombie") renderZombie(ctx, camera, d.z, d.lungeStartedAt);
     else renderPlayer(ctx, camera, d.p, d.isSelf, d.aimAngle, d.flashStartedAt);
   }
@@ -959,7 +977,7 @@ export function render(
   }
 }
 
-function renderBase(ctx: CanvasRenderingContext2D, base: { x: number; y: number }, scale: number): void {
+function renderBase(ctx: CanvasRenderingContext2D, base: { x: number; y: number }, scale: number, hp: number, maxHp: number): void {
   const size = 44 * scale;
   if (isReady(BUILDING_STONE_TILE)) {
     ctx.save();
@@ -988,6 +1006,20 @@ function renderBase(ctx: CanvasRenderingContext2D, base: { x: number; y: number 
     ctx.fillStyle = "#4477cc";
     ctx.fillRect(base.x - size / 2, base.y - size / 2, size, size);
   }
+
+  // In-world HP bar — same shape/position convention renderTurret already
+  // uses above its own plate, now the base's own (the one entity that had
+  // no in-world HP representation at all before this; the HUD's "Base
+  // HP/HP" DOM bar was removed in favour of this).
+  const barWidth = Math.max(24, size * 0.6);
+  const barHeight = 4;
+  const barX = base.x - barWidth / 2;
+  const barY = base.y - size / 2 - 10;
+  const fraction = Math.max(0, Math.min(1, hp / maxHp));
+  ctx.fillStyle = "#552222";
+  ctx.fillRect(barX, barY, barWidth, barHeight);
+  ctx.fillStyle = fraction > 0.3 ? "#5fd35f" : "#e05c5c";
+  ctx.fillRect(barX, barY, barWidth * fraction, barHeight);
 }
 
 // Last known aim angle per turret id, so an idle turret (no current target)
@@ -1108,7 +1140,14 @@ function renderPlayer(
 ): void {
   const scale = cameraScale(camera);
   const screen = worldToScreen(camera, p.x, p.y);
-  const color = isSelf ? LOCAL_PLAYER_COLOR : REMOTE_PLAYER_COLORS[p.colorIndex % REMOTE_PLAYER_COLORS.length];
+  // characterIndex is the player's own CHOSEN outfit (select-character
+  // overlay) — distinct from colorIndex, which only ever decides spawn
+  // offset. -1 means "hasn't chosen yet"; render as the same flat-colour
+  // placeholder every other not-yet-ready sprite in this project already
+  // falls back to, keyed off a neutral grey rather than indexing into
+  // REMOTE_PLAYER_COLORS/PLAYER_SHEETS with a negative index.
+  const hasCharacter = p.characterIndex >= 0;
+  const color = isSelf ? LOCAL_PLAYER_COLOR : hasCharacter ? REMOTE_PLAYER_COLORS[p.characterIndex % REMOTE_PLAYER_COLORS.length] : "#888";
   const now = performance.now();
   const flashFrac = flashStartedAt === undefined ? 0 : Math.max(0, 1 - (now - flashStartedAt) / PLAYER_FLASH_MS);
 
@@ -1126,7 +1165,7 @@ function renderPlayer(
     face.dir = directionFromVector(Math.cos(aimAngle), Math.sin(aimAngle), face.dir);
   }
 
-  const sheet = PLAYER_SHEETS[p.colorIndex % PLAYER_SHEETS.length][face.dir];
+  const sheet = hasCharacter ? PLAYER_SHEETS[p.characterIndex % PLAYER_SHEETS.length][face.dir] : undefined;
   const drawSize = PLAYER_DRAW_SIZE * scale;
 
   // Ground shadow — drawn before the sprite, same light-direction
@@ -1151,7 +1190,7 @@ function renderPlayer(
     ctx.translate(0, drawSize * 0.2);
   }
 
-  if (isReady(sheet.image)) {
+  if (sheet && isReady(sheet.image)) {
     // Idle when not actually moving this frame (face.moving, captured by
     // updateFacing from the real position delta above) — frame 0 of the
     // walk cycle doubles as a standing pose, same "no dedicated idle sheet,
@@ -1233,6 +1272,21 @@ function renderPlayer(
     ctx.fillText("HEALING…", screen.x, screen.y - drawSize / 2 - 14);
     ctx.textAlign = "left";
   }
+
+  // The player's own chosen display name, above the status text so the two
+  // never collide — unconditional on status (still shown downed/dead), same
+  // text-rendering convention this function already uses. Skipped entirely
+  // for a not-yet-confirmed player (no name to show).
+  if (hasCharacter && p.displayName) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = color;
+    ctx.font = "bold 11px system-ui, sans-serif";
+    ctx.shadowColor = "rgba(0, 0, 0, 0.7)";
+    ctx.shadowBlur = 3;
+    ctx.fillText(p.displayName, screen.x, screen.y - drawSize / 2 - 20);
+    ctx.shadowBlur = 0;
+    ctx.textAlign = "left";
+  }
 }
 
 function renderReviveProgress(ctx: CanvasRenderingContext2D, screen: { x: number; y: number }, remainingMs: number): void {
@@ -1264,13 +1318,13 @@ const WAVE_BADGES: Array<{ key: "flying" | "giant" | "boss"; color: string; labe
 
 export function renderDayProgress(
   ctx: CanvasRenderingContext2D,
-  canvasSize: number,
+  canvasWidth: number,
   day: number,
   killed: number,
   total: number,
   composition?: { flying: number; giant: number; boss: number },
 ): void {
-  const centerX = canvasSize / 2;
+  const centerX = canvasWidth / 2;
   const activeBadges = composition ? WAVE_BADGES.filter((b) => composition[b.key] > 0) : [];
   const panelHeight = 78 + (activeBadges.length > 0 ? 20 : 0);
 
@@ -1329,13 +1383,13 @@ export function renderDayProgress(
   ctx.textAlign = "left";
 }
 
-export function renderDayIntro(ctx: CanvasRenderingContext2D, canvasSize: number, day: number, remainingMs: number): void {
-  const centerX = canvasSize / 2;
-  const centerY = canvasSize / 2;
+export function renderDayIntro(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasHeight: number, day: number, remainingMs: number): void {
+  const centerX = canvasWidth / 2;
+  const centerY = canvasHeight / 2;
   const t = Math.max(0, Math.min(1, remainingMs / 5000));
 
   ctx.fillStyle = `rgba(0, 0, 0, ${0.35 + 0.25 * t})`;
-  ctx.fillRect(0, 0, canvasSize, canvasSize);
+  ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
   const scale = 1 + 0.15 * Math.sin(performance.now() / 180);
   ctx.save();
@@ -1564,17 +1618,30 @@ export function renderDamageNumbers(ctx: CanvasRenderingContext2D, camera: Camer
 // the centre of the view.
 const VIGNETTE_MS = 320;
 
-export function renderDamageVignette(ctx: CanvasRenderingContext2D, canvasSize: number, flashedAt: number | undefined, now: number): void {
+export function renderDamageVignette(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasHeight: number, flashedAt: number | undefined, now: number): void {
   if (flashedAt === undefined) return;
   const age = now - flashedAt;
   if (age < 0 || age > VIGNETTE_MS) return;
   const alpha = 0.35 * (1 - age / VIGNETTE_MS);
-  const grad = ctx.createRadialGradient(canvasSize / 2, canvasSize / 2, canvasSize * 0.35, canvasSize / 2, canvasSize / 2, canvasSize * 0.72);
+  const centerX = canvasWidth / 2;
+  const centerY = canvasHeight / 2;
+  // Outer radius reaches the canvas's farthest corner (half the diagonal) —
+  // a radial gradient paints its LAST colour stop solid everywhere beyond
+  // its outer radius, so sizing this off the shorter axis (as it used to)
+  // left two solid-red bars down the long sides on a wide window once the
+  // canvas stopped being forced square. Reaching the corner guarantees every
+  // on-screen pixel falls inside the gradient's own fade, on any aspect
+  // ratio. Inner radius keeps the same ratio to outer the old square-canvas
+  // numbers (0.35/0.72) had, just rebased onto the corner distance.
+  const cornerDist = Math.hypot(canvasWidth, canvasHeight) / 2;
+  const outerRadius = cornerDist;
+  const innerRadius = outerRadius * (0.35 / 0.72);
+  const grad = ctx.createRadialGradient(centerX, centerY, innerRadius, centerX, centerY, outerRadius);
   grad.addColorStop(0, "rgba(255, 0, 0, 0)");
   grad.addColorStop(1, `rgba(200, 0, 0, ${alpha})`);
   ctx.save();
   ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, canvasSize, canvasSize);
+  ctx.fillRect(0, 0, canvasWidth, canvasHeight);
   ctx.restore();
 }
 
