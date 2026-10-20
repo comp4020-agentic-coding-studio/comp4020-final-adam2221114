@@ -99,15 +99,17 @@ see PROCESS.md's Crit 10 entry for what changed and why, and
 docs/decisions/ for the one documented concurrency-style decision that
 entry links (simultaneous turret build/upgrade/repair conflicts).
 
-Map/obstacles (added Crit 11, map-visual pass)
-Buildings (obstacles.ts's BUILDINGS, a fixed hand-placed rectangle list) are
-real, server-authoritative obstacles: players and GROUND zombies cannot walk
-through them. Decorative props (terrain.ts's trees/bushes/crates/benches/
-etc.) stay purely cosmetic exactly as before and never block movement.
-Flying zombies ignore buildings the same way they already ignore the wall.
-Player movement resolves against buildings with axis-separated collision
-(obstacles.ts's resolveMove), which gives sliding along a wall for free
-instead of a glancing touch stopping movement entirely.
+Map/obstacles (added Crit 11, map-visual pass; wall made dynamic in a later
+change)
+Buildings (obstacles.ts's BUILDINGS, a fixed hand-placed rectangle list —
+town buildings only, not the wall) are real, server-authoritative obstacles:
+players and GROUND zombies cannot walk through them. Decorative props
+(terrain.ts's trees/bushes/crates/benches/etc.) stay purely cosmetic exactly
+as before and never block movement. Flying zombies ignore buildings the
+same way they already ignore the wall. Player movement resolves against
+buildings with axis-separated collision (obstacles.ts's resolveMove), which
+gives sliding along a wall for free instead of a glancing touch stopping
+movement entirely.
 A ground zombie whose direct line to its current target is blocked by a
 building follows a single precomputed flow field toward the base instead
 (obstacles.ts's flowDirectionAt) — this is the ONLY pathfinding this project
@@ -119,6 +121,18 @@ The BUILDINGS layout must always leave every map cell able to reach the base
 — assertMapIsFullyConnected() enforces this at every startup (throws if a
 hand-edit to BUILDINGS ever seals off a region) and spec/map-connectivity.
 test.ts re-asserts the same thing in CI.
+The purchasable Wall's own rectangle geometry (obstacles.ts's
+wallRectsForPlayers/wallRectsForZombies, built fresh from wallLevel on every
+call) is deliberately NOT part of BUILDINGS or the flow field above — it is
+live state that appears/disappears with wallLevel, and folding it into the
+flow field's BFS would mean recomputing that field whenever a wall is
+built/destroyed, which conflicts with the flow field's own "never
+recomputed" invariant. Instead, movePlayer and advanceZombie each take the
+current wallLevel and resolve collision against the wall's rects directly
+(still via the SAME resolveMove axis-separated collision function
+buildings use — not a parallel copy), independent of the flow field
+entirely. See the Wall entry below for the wall's own rules, including why
+players and zombies see different wall shapes.
 
 Waves
 A day advances only after its complete zombie wave (every type, including
@@ -185,16 +199,30 @@ game_over) restores that day's start snapshot (sharedXp/baseHp/wall/
 turrets/player hp-status-medkits) and replays the same day — it does not
 reset to Day 1, and does not preserve XP/damage from the failed attempt.
 Wall
-The wall must physically block ground zombies while it has HP; flying
-zombies bypass it entirely (see Zombies above).
-While wallHp > 0, ground zombies stop at the wall and attack it; the base
-must not take zombie damage through it. Only after the wall is destroyed may
-ground zombies continue to the base.
+The wall is a real, physical square obstacle that exists ONLY while
+wallLevel > 0 — there is no fixed always-on fortress. It must physically
+block ground zombies while it has HP; flying zombies bypass it entirely
+(see Zombies above). While wallHp > 0, ground zombies stop at the wall and
+attack it; the base must not take zombie damage through it. Only after the
+wall is destroyed may ground zombies continue to the base.
+Once built, the wall ALSO physically blocks players — a player must walk
+through its gate (a gap in the south side, same side PLAYER_START_POS
+faces) to get in or out; there is no gate on the side GROUND ZOMBIES see
+(obstacles.ts's wallRectsForZombies is solid on all four sides, no gap at
+all). This asymmetry is deliberate, not an oversight: it is what keeps "a
+player's gate" and "ground zombies cannot cross an intact wall" both true
+at once — if zombies shared the player's gated shape, they could simply
+walk in through it. Do not give zombies the gated shape without first
+reconciling this invariant.
 Five levels (game-state.ts's WALL_LEVELS): level 2's ability is a periodic
 AOE pulse (not an on-hit reflect); levels 3-4 are an on-hit spike reflect;
 level 5 adds both the spike reflect AND a flat 20% damage reduction on
 incoming wall damage. A destroyed wall must be rebuilt from Level 1 rather
-than restoring its previous level for free.
+than restoring its previous level for free — and once destroyed, it stops
+physically blocking anyone (player or zombie) until rebuilt, the same as
+wallHp reaching 0 already stopped it from damage-blocking the base.
+No corner towers exist in this design (cut entirely) — only the plain
+square wall.
 Turret
 Up to MAX_TURRETS (4) independent turrets at once, shared by the whole team
 — each with its own id, position, level, HP, and fire cooldown

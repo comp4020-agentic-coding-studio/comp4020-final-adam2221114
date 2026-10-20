@@ -667,6 +667,205 @@ and `pnpm run build` both pass clean. The real `data/game.db` was untouched
 exact-PID-kill approach from the previous entry's fix, not a `pkill -f`
 guess.
 
+## Fortress redesign: the fixed walled base became the real, buildable Wall
+
+The Crit 11 map-visual pass had added a fixed square fortress (four wall
+segments plus four 40×40 corner towers, `obstacles.ts`'s `FORTRESS_WALLS`/
+`FORTRESS_TOWERS`) around the base from game start, with one permanent gate
+gap. It was real, server-authoritative collision geometry for both players
+and zombies — but it had no connection to the actual purchasable Wall
+mechanic (`wallLevel`/`wallHp`). The Wall's own HP/level/ability feedback
+was drawn mapped onto the fortress's fixed footprint purely as a visual
+overlay; physically, zombies were stopped by a completely separate circular
+check (`WALL_RING_RADIUS`), and the fortress itself never appeared,
+upgraded, or disappeared with the Wall's real state. On top of that, the
+fortress wall segment had no real art yet — it rendered as an unmistakable
+magenta/yellow hazard-stripe "under construction" placeholder
+(`render.ts`'s `drawPlaceholderBlockout`), which read as visibly unfinished.
+
+Requested change: remove the always-on fortress and corner towers entirely,
+and make the square wall a REAL thing players build — present only once
+`wallLevel > 0`, with real finished art, and physically blocking players
+(not just zombies) through a gate they can walk in and out of.
+
+**Design decision: keep the wall OUT of `BUILDINGS`/the flow field.**
+`obstacles.ts`'s flow field (`buildFlowField`/`cachedField`) is a lazy
+singleton built once and never invalidated — CLAUDE.md is explicit that
+this must never be recomputed per-tick or per-zombie. A wall that
+appears/disappears with `wallLevel` can't live inside `BUILDINGS` without
+either violating that invariant (recomputing the BFS on every wall-state
+change) or silently going stale (a built wall that the flow field doesn't
+know about). Instead, the wall's rects (`wallRectsForPlayers`/
+`wallRectsForZombies`) are a handful of plain object literals computed
+fresh on every call — cheap enough that caching would be premature — and
+`resolveMove` takes them as an additional, optional `extraRects` parameter
+alongside the fixed `BUILDINGS` constant it already checks. `movePlayer`
+and `advanceZombie` each thread the current `wallLevel` through from
+`game-loop.ts`'s tick, independent of the BFS/flow field entirely, which
+continues to serve only town-building pathing exactly as before.
+
+**Design decision: players and zombies see deliberately different wall
+shapes.** CLAUDE.md's Wall invariant is unconditional: "ground zombies
+cannot cross an intact wall to reach anything inside its ring." If the
+gate a player walks through were shared verbatim with zombie collision, a
+zombie could simply walk in through the same gate — a real gameplay hole,
+not a cosmetic one. So `wallRectsForPlayers` (north/east/west solid, south
+split around a gate gap) and `wallRectsForZombies` (all four sides solid,
+no gate at all) are two different rect lists built from the same
+half-extent/thickness, sharing one geometry but diverging only in whether
+the south side has a gap. `advanceZombie`'s old circular `WALL_RING_RADIUS`
+check (and its accompanying "stale recompute" bug-fix machinery — see the
+entry above) is gone; it now tests the zombie's real target against the
+rectangle's interior (`isWithinWallInterior`) and, once blocked, treats
+"close enough to attack" as "within `MELEE_RANGE` of the nearest wall
+rect's edge" instead of a fixed ring radius.
+
+**What stayed the same, deliberately.** The wall's level/HP/cost/ability
+state machine (`WALL_LEVELS`, `#buildWall`/`#upgradeWall`/the destroy path
+in `#applyZombieHit`) was untouched — this was a geometry/rendering change,
+not a balance change. The base's decorative stone courtyard floor
+(`renderFortressCourtyardFloor`) keeps rendering unconditionally regardless
+of wall state, exactly as before — it was never part of the removed
+fortress collision geometry, just a cosmetic ground tile sized to the same
+footprint. Turret placement (`placeTurret`) already had an
+`overlapsAnyBuilding` check that "never actually rejected anything" per its
+own old comment (buildings all sit outside `TURRET_BUILD_RADIUS`); a new,
+separate `overlapsWallRect` check was added alongside it, since the wall's
+own half-extent (116) genuinely does overlap part of the turret ring (150)
+once built — this one does reject a real placement.
+
+**Art**: the earlier placeholder blockout is replaced by a real, properly
+licensed CC-BY-SA tile — a 32×32 tileable ashlar-stone crop from
+`assets/LPC/base-assets/tiles/castlewalls.png` (Daniel Armstrong/
+HughSpectrum's "Castle work," already vendored in this repo for provenance
+but not previously used for in-game art). See `sprites/lpc/NOTES.md` for
+the full attribution and exact crop coordinates. No corner-tower or
+gate-post art exists or is needed — towers are cut from the design
+entirely, and the gate renders as open space in the wall's HP/level overlay
+stroke (a literal gap in the drawn perimeter, following the exact shape
+`wallRectsForPlayers` physically occupies) rather than a tile.
+
+**Tests**: `spec/wall-ring-protection.test.ts` (the live regression test
+for the original zombie-through-wall bug) was rewritten rather than
+replaced — it still farms a wall through real combat, but now also proves
+the player side of the new behaviour: walking into the wall's solid east
+side is physically blocked, while walking through the south gate (the
+player's own spawn lines up with it) reaches the courtyard, all while
+re-confirming zombies still can't touch a protected player/base. A new
+focused unit-test block in `spec/map-collision.test.ts` covers the dynamic
+wall's four states directly (no wall yet, player blocked-but-gated, zombie
+blocked-on-every-side-including-the-gate, and the rects being empty while
+`wallLevel` is 0) without needing a live server. A new live test in
+`spec/gameplay-expansion.test.ts` confirms a turret can't be placed inside
+the built wall. `spec/map-collision.test.ts`/`spec/zombie-pathing.test.ts`'s
+existing town-building tests needed only a parameter-signature update
+(`wallUp: boolean` → `wallLevel: number`) — they were already written
+generically against `BUILDINGS[0]`, which has always resolved to a town
+building, not the (now-removed) fortress rects, so their actual assertions
+are unchanged. Full suite (32/32 across all 9 spec files) verified against
+an isolated scratch server/database (`PORT=8099`,
+`DATA_DIR=/tmp/wall-test-data`, both removed afterward); `pnpm typecheck`
+and `pnpm run build` both pass clean. The real `data/` was never touched.
+
+## Fullscreen, non-square canvas instead of a fixed centred square
+
+The canvas used to be a fixed, square, centred element with a visible
+border — fine on one known window size, but it left most of a typical
+browser window as dead background and never adapted to window shape.
+`resizeCanvas()` (`main.ts`) now sizes the canvas to `window.innerWidth`/
+`window.innerHeight` directly (floored at 320x240) on load and on every
+`resize` event, and `index.html`'s `body`/`#game` rules drop the old
+flex-centring and border in favour of `overflow: hidden` edge-to-edge.
+
+This had one real correctness consequence, not just a visual one:
+`Camera` (`camera.ts`) used to carry a single `viewSize`/`canvasSize` pair,
+which only made sense for a square canvas. It's now `viewWidth`/
+`viewHeight` and `canvasWidth`/`canvasHeight`, with `computeCamera`
+deriving the longer axis's view size from the canvas's own aspect ratio so
+`DEFAULT_VIEW_SIZE` keeps meaning "world units visible across the shorter
+axis" regardless of window shape — the zoom-wheel UX in `main.ts` is
+unchanged from the player's perspective. `render.ts`'s functions that used
+to take one `canvasSize` (`renderDayIntro`, `renderDamageVignette`, and
+every screen-space-text helper) now take `canvasWidth`/`canvasHeight`
+separately. `input.ts`'s mouse-to-world conversion used to divide out a
+single `cssToBacking` ratio (valid only when CSS and backing-store pixels
+scale uniformly, true only for a square/locked-aspect canvas); it now
+computes that ratio per axis, which is what actually matters once the
+canvas can be any non-square size.
+
+No gameplay logic changed here — this is rendering/input plumbing only.
+`pnpm typecheck` and the full `pnpm test` suite pass with these changes in
+place, but neither exercises rendering or mouse-to-world conversion
+directly; whether the crosshair still tracks the mouse accurately and the
+camera still follows correctly at a genuinely non-square window size has
+not been re-confirmed by hand this session and should be playtested before
+relying on it at the crit.
+
+## Character select, and writing down why player identity can't be spoofed
+
+Two related pieces of Crit 10 work: a visible character/name choice players
+make for themselves, and the written security property behind "the server
+tells two players apart" that the character-select feature's own validation
+now also exercises.
+
+**Character select.** A new `select_character` message (one of
+`ClientMessage`'s variants, `src/server/protocol.ts`) lets a connected
+player pick one of `CHARACTER_COUNT=4` character sheets and a free-text
+display name, shown as an overlay (`index.html`'s `#character-select`)
+exactly while that player's own `characterIndex` is `-1` — a brand-new
+identity, or an old one that disconnected before ever confirming. The
+server (`GameLoop.selectCharacter`) independently re-validates everything a
+client claims: `characterIndex` must be an integer in range, the trimmed
+name must be non-empty and at most `DISPLAY_NAME_MAX_LENGTH` (20)
+characters, and the chosen character must not already belong to another
+*currently connected* player (a disconnected identity's old pick is never
+counted — the slot really is free the instant someone leaves, not just
+visually). `characterIndex`/`displayName` are durable (`PlayerRecord`,
+`persistence.ts`'s `players` table, with a guarded `ALTER TABLE` migration
+for pre-existing databases), so a reconnect resumes the same
+character/name without re-picking — but, deliberately, `restart()` and
+`retryDay()` never touch either field, the same "identity preference, not
+run progress" reasoning `colorIndex` already had. Every other gameplay
+action (`shoot`, `interact`, `placeTurret`, `turretInteract`, `useMedkit`)
+now also rejects with `"select a character first"` until `characterIndex
+>= 0`, so a connected-but-unconfirmed player can observe the game but not
+act in it. `spec/character-select.test.ts` covers the slot-uniqueness
+race, immediate slot release on disconnect, reconnect-resumes-pick, name
+validation, and the "unconfirmed player is rejected from gameplay" cases
+against a live app; `spec/persistence-character.test.ts` covers the SQLite
+round-trip and migration directly.
+
+**Writing down why a client can't act as another player.** The brief asks
+the server, not just the client, to decide what each player may see and
+change, with the reasoning written down. Tracing every mutating `GameLoop`
+method (prompted by wanting to actually justify that claim rather than
+assume it) showed the property already held structurally: `ws-server.ts`
+binds a connection's `id` exactly once, from its `?playerId=` query param,
+and closes over it for every message that socket ever sends — no handler
+reads an `id`/`playerId`/`targetId` field out of a parsed message body.
+`docs/decisions/0002-player-identity-and-authorization.md` writes this up
+properly (status, alternatives, consequences, including the honest gap that
+this still isn't real authentication — stealing someone's exact id string
+would let you reconnect as them). `spec/player-isolation.test.ts` is the
+automated version of its central claim: a `select_character` or
+`use_medkit` message that forges another connected player's id in its body
+mutates only the sender's own record, and the named target is left
+unchanged, byte-for-byte, verified against a live app.
+
+**A real, unresolved gap found while re-checking the OLDER Fly-restart
+report.** `PendingRepair.md` previously stated a shutdown-timing bug was
+"fixed." Re-testing it this session (fresh isolated server, one WebSocket
+client left open, sending `SIGTERM` and measuring actual process exit time)
+found it is not: `server.close(() => process.exit(0))` in
+`src/server/index.ts` doesn't fire its callback until every open connection
+on that HTTP server closes, and nothing in `shutdown()` ever closes the
+WebSocket server or its open sockets first. The local reproduction took
+~14 seconds to actually exit with one open connection — well past Fly's
+default 5-second `kill_timeout`, which this repo's `fly.toml` doesn't
+override. `PendingRepair.md` now documents this honestly rather than
+repeating the old "fixed" claim; the actual fix (close the WS server/
+sockets before relying on `server.close()`'s callback) is still to-do.
+
 ## What was deliberately left out
 
 Multiple turrets, turret repair, four zombie types, player HP/downed/revive,
