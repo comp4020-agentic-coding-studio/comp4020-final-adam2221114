@@ -1,4 +1,5 @@
 import type { ClientMessage } from "./protocol.ts";
+import { screenToWorld, type Camera } from "./camera.ts";
 
 // Reads keyboard + mouse and sends what the server asked for (input/shoot).
 // Never moves anything locally and never decides a hit — position, HP, XP
@@ -7,7 +8,7 @@ import type { ClientMessage } from "./protocol.ts";
 // (aim line, crosshair, the oriented character); neither is a game decision.
 export class InputController {
   readonly #canvas: HTMLCanvasElement;
-  readonly #worldSize: number;
+  readonly #getCamera: () => Camera;
   readonly #send: (msg: ClientMessage) => void;
   readonly #getPlayerPos: () => { x: number; y: number };
   readonly #onShoot: (origin: { x: number; y: number }, aimAngle: number) => void;
@@ -16,13 +17,13 @@ export class InputController {
 
   constructor(opts: {
     canvas: HTMLCanvasElement;
-    worldSize: number;
+    getCamera: () => Camera;
     send: (msg: ClientMessage) => void;
     getPlayerPos: () => { x: number; y: number };
     onShoot?: (origin: { x: number; y: number }, aimAngle: number) => void;
   }) {
     this.#canvas = opts.canvas;
-    this.#worldSize = opts.worldSize;
+    this.#getCamera = opts.getCamera;
     this.#send = opts.send;
     this.#getPlayerPos = opts.getPlayerPos;
     this.#onShoot = opts.onShoot ?? (() => {});
@@ -31,6 +32,22 @@ export class InputController {
     window.addEventListener("keyup", (e) => this.#onKey(e.key, false));
     this.#canvas.addEventListener("mousemove", (e) => this.#onMouseMove(e));
     this.#canvas.addEventListener("click", () => this.#onClick());
+
+    // A key physically held when the window loses focus (alt-tab, clicking
+    // devtools, switching browser tabs) can have its matching keyup delivered
+    // to a DIFFERENT window — or never delivered at all — so without this the
+    // held direction gets stuck "on" forever (this was Bug 4: "character
+    // keeps moving up with no way to stop it" — reproduced by holding W,
+    // switching focus away, then back, then releasing W: the up movement
+    // continued straight through that keyup). Clearing all held state on
+    // blur, and again defensively when visibility changes (covers tab-switch
+    // cases some browsers fire without an accompanying window blur), means a
+    // stuck key can survive at most until the next focus loss, not the rest
+    // of the session.
+    window.addEventListener("blur", () => this.#clearHeldKeys());
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") this.#clearHeldKeys();
+    });
 
     // Held-key state and aim angle change continuously; sending on an
     // interval (rather than wiring every single keydown/mousemove to its own
@@ -67,6 +84,14 @@ export class InputController {
     return this.#mouseWorldPos;
   }
 
+  #clearHeldKeys(): void {
+    this.#keys.up = false;
+    this.#keys.down = false;
+    this.#keys.left = false;
+    this.#keys.right = false;
+    this.#keys.reviving = false;
+  }
+
   #onKey(key: string, down: boolean): void {
     switch (key.toLowerCase()) {
       case "w":
@@ -93,11 +118,14 @@ export class InputController {
 
   #onMouseMove(e: MouseEvent): void {
     const rect = this.#canvas.getBoundingClientRect();
-    const scale = this.#canvas.width / this.#worldSize;
-    this.#mouseWorldPos = {
-      x: (e.clientX - rect.left) / scale,
-      y: (e.clientY - rect.top) / scale,
-    };
+    // getBoundingClientRect() is in CSS pixels, which can differ from the
+    // canvas's own backing-store width/height if CSS ever scales it — divide
+    // out that ratio before converting through the camera, whose origin/
+    // scale are expressed in backing-store pixels (canvas.width/height).
+    const cssToBacking = this.#canvas.width / rect.width;
+    const canvasX = (e.clientX - rect.left) * cssToBacking;
+    const canvasY = (e.clientY - rect.top) * cssToBacking;
+    this.#mouseWorldPos = screenToWorld(this.#getCamera(), canvasX, canvasY);
   }
 
   #onClick(): void {

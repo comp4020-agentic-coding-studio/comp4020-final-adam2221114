@@ -5,6 +5,7 @@
 // (wall pulse radius, turret splash radius, melee/aggro ranges, boss
 // damage/speed, etc.) a reasonable default was chosen and is called out in
 // the comment next to it — see PROCESS.md for the full list of assumptions.
+import { flowDirectionAt, lineOfSightClear, resolveMove } from "./obstacles.ts";
 
 export interface Vec2 {
   x: number;
@@ -424,6 +425,15 @@ function clamp(v: number, min: number, max: number): number {
 // Continuous WASD movement: whatever's held moves the player this tick, at a
 // fixed speed, clamped to the map. No acceleration/friction. Callers only
 // invoke this for "alive" players — downed/dead players don't move.
+//
+// Crit 11 map-visual pass: the desired destination is resolved against
+// obstacles.ts's buildings with axis-separated collision (resolveMove) —
+// this is what gives sliding along a wall for free instead of a glancing
+// touch freezing movement entirely. Authoritative: the server is the only
+// place this actually happens; the client's prediction.ts mirrors the same
+// resolveMove purely for responsiveness, and gets corrected by this if it
+// ever disagrees (same reconciliation path every other prediction error
+// already takes).
 export function movePlayer(player: Player, input: InputState, dtMs: number): void {
   let dx = 0;
   let dy = 0;
@@ -435,10 +445,11 @@ export function movePlayer(player: Player, input: InputState, dtMs: number): voi
 
   const len = Math.hypot(dx, dy);
   const step = (PLAYER_SPEED * dtMs) / 1000;
-  player.pos = {
+  const desired: Vec2 = {
     x: clamp(player.pos.x + (dx / len) * step, 0, MAP_SIZE),
     y: clamp(player.pos.y + (dy / len) * step, 0, MAP_SIZE),
   };
+  player.pos = resolveMove(player.pos, desired);
 }
 
 function angleTo(from: Vec2, to: Vec2): number {
@@ -546,11 +557,36 @@ export function advanceZombie(z: Zombie, dtMs: number, players: readonly Player[
   }
   z.attacking = false;
   const step = (ZOMBIE_SPEED * cfg.speedMultiplier * dtMs) / 1000;
-  const ratio = Math.min(step / d, 1);
-  let nextPos: Vec2 = {
-    x: z.pos.x + (aimPos.x - z.pos.x) * ratio,
-    y: z.pos.y + (aimPos.y - z.pos.y) * ratio,
-  };
+
+  // Crit 11 map-visual pass: buildings are solid for GROUND zombies only —
+  // flying zombies already ignore the wall entirely ("may attack over
+  // walls") and ignore buildings the same way, for the same reason (nothing
+  // in the brief says a flier respects ground obstacles). When a ground
+  // zombie's direct line to aimPos is clear, behaviour here is byte-for-byte
+  // what it always was (a direct lerp). When it's blocked by a building,
+  // step along the precomputed flow field toward the base instead — an
+  // explicit approximation when the real target is a player rather than the
+  // base (CLAUDE.md: "a static, precomputed flow field toward the base", not
+  // a per-target route), acceptable since the brief only requires zombies
+  // reliably reach the base, not take an optimal path to a moving player.
+  const useFlowField = !cfg.ranged && !lineOfSightClear(z.pos, aimPos);
+  let nextPos: Vec2;
+  if (useFlowField) {
+    const dir = flowDirectionAt(z.pos);
+    nextPos = { x: z.pos.x + dir.x * step, y: z.pos.y + dir.y * step };
+  } else {
+    const ratio = Math.min(step / d, 1);
+    nextPos = {
+      x: z.pos.x + (aimPos.x - z.pos.x) * ratio,
+      y: z.pos.y + (aimPos.y - z.pos.y) * ratio,
+    };
+  }
+  // Final safety clamp: never let a ground zombie's resolved step actually
+  // end up inside a building, whichever path produced it (direct lerp can
+  // still clip a corner; the flow field is cell-coarse, not exact).
+  if (!cfg.ranged) {
+    nextPos = resolveMove(z.pos, nextPos);
+  }
   // Belt and braces: even with the fix above, a single large step could in
   // principle still carry a blocked zombie across the ring boundary in one
   // tick (it can't today at these speed values, but nothing should rely on

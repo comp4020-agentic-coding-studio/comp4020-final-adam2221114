@@ -5,22 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Zombie base defence</title>
     <style>
-      /* Dark grey / muted-red / military-green pixel-art palette (see
-         assets/ui-kenney/NOTES.md for the icon/panel sources). Panels use a
-         Kenney 9-slice texture via border-image; everything else is flat
-         colour, kept deliberately plain per CLAUDE.md's "clarity over
-         decoration" and "prefer simple Canvas geometry... " UI rules — this
-         redesign only replaces chrome/icons, not the interaction model. */
+      /* Warm stone/brick pixel-art palette, matched to the LPC world tiles
+         (see assets/ui-kenney/NOTES.md for the icon/panel sources). Panels
+         use a Kenney 9-slice texture via border-image; everything else is
+         flat colour, kept deliberately plain per CLAUDE.md's "clarity over
+         decoration" and "prefer simple Canvas geometry... " UI rules — only
+         the accent colour values below changed from the previous cooler
+         grey/military-green scheme; panel art and layout are untouched. */
       :root {
-        --bg: #121310;
-        --panel-dark: #23251f;
-        --text: #e7e2d3;
-        --text-dim: #9a9684;
+        --bg: #1a1510;
+        --panel-dark: #2b2219;
+        --text: #ede4d3;
+        --text-dim: #a89a85;
         --accent-green: #6f9a57;
-        --accent-red: #c0584a;
+        --accent-red: #b5543f;
         --accent-gold: #d4af37;
         --accent-yellow: #f0c929;
-        --border-light: #55503f;
+        --border-light: #6b5a42;
       }
       html,
       body {
@@ -37,7 +38,7 @@
       }
       #game {
         display: block;
-        border: 3px solid #4a5240;
+        border: 3px solid #5a4a36;
         image-rendering: pixelated;
         /* the canvas draws its own crosshair at the mouse position; the OS
            pointer would just be a redundant second one on top of it */
@@ -164,7 +165,7 @@
       }
       #conn.connecting,
       #conn.disconnected {
-        background: #3a241f;
+        background: #3a2420;
         border-color: var(--accent-red);
       }
 
@@ -198,11 +199,11 @@
         cursor: pointer;
       }
       #controls button:hover {
-        background: #2f3228;
+        background: #352a1f;
       }
       #controls button:active {
         transform: translateY(1px);
-        background: #1a1c16;
+        background: #1d1812;
       }
       #controls button[hidden] {
         display: none;
@@ -347,7 +348,7 @@
         cursor: pointer;
       }
       #intro-dismiss:hover {
-        background: #2f3228;
+        background: #352a1f;
       }
 
       /* X-menu: near the base or a turret, [1]/[2]/.../X/Esc are the only
@@ -424,7 +425,7 @@
         display: none;
       }
       .prompt-hint {
-        background: #14120e;
+        background: #16110c;
         border: 2px solid var(--border-light);
         color: var(--text);
         padding: 4px 10px;

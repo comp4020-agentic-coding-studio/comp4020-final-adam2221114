@@ -44,12 +44,18 @@ import {
   type ShotEffect,
   type ZombieProjectile,
 } from "./render.ts";
-import { isReady, ZOMBIE_SHEETS, type UiIconName } from "./sprites.ts";
+import { isReady, zombieWalkSheet, type SpritedZombieType, type UiIconName } from "./sprites.ts";
+import { overlapsAnyBuilding } from "./obstacles.ts";
+import { computeCamera, clampViewSize, screenToWorld, DEFAULT_VIEW_SIZE, type Camera } from "./camera.ts";
 
 // Must match src/server/game-state.ts's MAP_SIZE (see protocol.ts's comment
 // on why this is a duplicated constant, not a shared import).
 const WORLD_SIZE = 1000;
-const CANVAS_SIZE = 800;
+// The canvas now resizes to fill the available viewport (see
+// resizeCanvas() below) instead of staying a fixed 800x800 — canvasSize is
+// read fresh every frame from the live canvas element rather than this
+// constant, which only sets the very first size before layout runs.
+const INITIAL_CANVAS_SIZE = 800;
 
 // Crit 10: a browser-persistent identity, generated once and kept in
 // localStorage, so a reconnect (tab refresh, network drop) resumes the same
@@ -74,8 +80,9 @@ function getOrCreatePlayerId(): string {
   return id;
 }
 
-const canvas = document.querySelector<HTMLCanvasElement>("#game");
-if (!canvas) throw new Error("index.html is missing #game");
+const canvasEl = document.querySelector<HTMLCanvasElement>("#game");
+if (!canvasEl) throw new Error("index.html is missing #game");
+const canvas: HTMLCanvasElement = canvasEl;
 const hud = document.querySelector<HTMLDivElement>("#hud");
 if (!hud) throw new Error("index.html is missing #hud");
 const conn = document.querySelector<HTMLDivElement>("#conn");
@@ -111,11 +118,30 @@ if (!btnRetry) throw new Error("index.html is missing #btn-retry");
 const btnRestart = document.querySelector<HTMLButtonElement>("#btn-restart");
 if (!btnRestart) throw new Error("index.html is missing #btn-restart");
 
-canvas.width = CANVAS_SIZE;
-canvas.height = CANVAS_SIZE;
-const ctx = canvas.getContext("2d");
-if (!ctx) throw new Error("2d canvas context unavailable");
+canvas.width = INITIAL_CANVAS_SIZE;
+canvas.height = INITIAL_CANVAS_SIZE;
+const ctxOrNull = canvas.getContext("2d");
+if (!ctxOrNull) throw new Error("2d canvas context unavailable");
+const ctx: CanvasRenderingContext2D = ctxOrNull;
 ctx.imageSmoothingEnabled = false; // pixel-art sprites stay crisp when scaled up, not blurred
+
+// Responsive canvas: fills the available viewport instead of a fixed
+// 800x800 square, so the game area actually uses the browser window rather
+// than sitting in a small fixed box surrounded by unused space. Still
+// always square (world is square, camera.ts assumes a square viewport).
+// Changing canvas.width/height clears its contents, which is fine — the
+// very next animation frame redraws everything from currentState.
+const CANVAS_MARGIN = 24;
+function resizeCanvas(): void {
+  const size = Math.max(320, Math.min(window.innerWidth, window.innerHeight) - CANVAS_MARGIN);
+  if (canvas.width !== size || canvas.height !== size) {
+    canvas.width = size;
+    canvas.height = size;
+    ctx.imageSmoothingEnabled = false; // resizing resets context state, including this
+  }
+}
+resizeCanvas();
+window.addEventListener("resize", resizeCanvas);
 
 let previousState: StateMessage | undefined;
 let previousReceivedAt = 0;
@@ -211,9 +237,11 @@ const drawIntroPortrait = (type: ZombieType): void => {
     ctx2.restore();
     return;
   }
-  const sheets = ZOMBIE_SHEETS[type as "normal" | "giant" | "boss"];
-  const sheet = sheets?.idle;
-  if (sheet && isReady(sheet.image)) {
+  // No dedicated "idle" sheet in the LPC set (see sprites.ts) — frame 0 of
+  // the walk-down cycle doubles as a standing portrait pose, same "reuse
+  // what exists" choice render.ts's renderPlayer makes for players.
+  const sheet = zombieWalkSheet(type as SpritedZombieType, "down");
+  if (isReady(sheet.image)) {
     const size = 90;
     ctx2.drawImage(sheet.image, 0, 0, sheet.frameWidth, sheet.frameHeight, cx - size / 2, cy - size / 2, size, size);
   }
@@ -291,9 +319,43 @@ const sendUseMedkit = (): void => {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "use_medkit" }));
 };
 
+// Recomputed once per animation frame (the frame() loop below) from the
+// local player's current predicted/displayed position — input.ts's mouse
+// tracking and every render call this frame reads the SAME camera instance,
+// so aim/placement never desyncs from what's actually drawn even as the
+// player moves and the view pans to follow.
+let currentCamera: Camera = computeCamera(WORLD_SIZE / 2, WORLD_SIZE / 2, canvas.width);
+
+// --- Mouse-wheel zoom: client-only, purely a camera.viewSize change — never
+// touches any server-authoritative number (speed, ranges, build distances).
+// Two numbers rather than one: `zoomTarget` jumps immediately to wherever
+// the wheel points it (clamped), `zoomCurrent` eases toward that target a
+// little every frame (frame()'s own call below) so a fast scroll reads as a
+// smooth zoom instead of snapping. Module-level state, so each browser
+// tab/session has its own independent zoom level — there is nothing here
+// that could make one player's scroll affect another player's view. ---
+let zoomTarget = DEFAULT_VIEW_SIZE;
+let zoomCurrent = DEFAULT_VIEW_SIZE;
+const ZOOM_STEP_FACTOR = 1.15; // each wheel "tick" scales the view ~15%
+const ZOOM_EASE_PER_SEC = 10; // higher = snappier easing toward zoomTarget
+
+canvas.addEventListener(
+  "wheel",
+  (e) => {
+    // Without this, the wheel both zooms the camera AND scrolls the page
+    // behind/around the canvas (the canvas is a normal in-flow element, not
+    // a fixed fullscreen one) — preventDefault stops the page scroll while
+    // leaving the camera zoom as the wheel's only visible effect.
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1 / ZOOM_STEP_FACTOR : ZOOM_STEP_FACTOR; // deltaY<0 = scroll up = zoom in = smaller viewSize
+    zoomTarget = clampViewSize(zoomTarget * factor);
+  },
+  { passive: false },
+);
+
 const input = new InputController({
   canvas,
-  worldSize: WORLD_SIZE,
+  getCamera: () => currentCamera,
   send: (msg: ClientMessage) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
   },
@@ -368,7 +430,8 @@ const nearestTurretInRange = (state: StateMessage | undefined): string | undefin
 
 const isValidTurretSpot = (pos: { x: number; y: number }): boolean => {
   const d = distance(pos, BASE_POS);
-  return d >= BASE_ATTACK_RANGE && d <= TURRET_BUILD_RADIUS;
+  if (d < BASE_ATTACK_RANGE || d > TURRET_BUILD_RADIUS) return false;
+  return !overlapsAnyBuilding(pos);
 };
 
 // Display-only proximity check, same purpose as nearestTurretInRange/
@@ -819,38 +882,56 @@ const frame = (timestamp: number): void => {
       p.id === myPlayerId && p.status === "alive" ? { ...p, x: predictedPos.x, y: predictedPos.y } : p,
     );
 
-    render(ctx, CANVAS_SIZE, displayState, input.getAimAngle(), myPlayerId, zombieLungeUntil, playerFlashUntil);
-    renderDeathEffects(ctx, CANVAS_SIZE / WORLD_SIZE, deathEffects, timestamp);
-    renderDayProgress(ctx, CANVAS_SIZE, displayState.day, displayState.killedZombies, displayState.totalZombiesForDay, displayState.dayWaveComposition);
+    // The camera follows the LOCAL player's own displayed position (falling
+    // back to the map centre before a self row exists yet, e.g. the very
+    // first frame) — recomputed fresh every frame from the live canvas size,
+    // so a window resize takes effect immediately without a separate resize
+    // handler needing to touch the camera itself.
+    const selfDisplay = displayState.players.find((p) => p.id === myPlayerId);
+    const followPos = selfDisplay ?? predictedPos;
+
+    // Ease zoomCurrent toward zoomTarget (set instantly by the wheel
+    // handler above) a little more each frame — exponential decay toward
+    // the target, framerate-independent via dtMs, so a zoom reads as a
+    // smooth glide rather than snapping straight to the new level.
+    if (dtMs > 0) {
+      const t = 1 - Math.exp(-(ZOOM_EASE_PER_SEC * dtMs) / 1000);
+      zoomCurrent += (zoomTarget - zoomCurrent) * t;
+    }
+    currentCamera = computeCamera(followPos.x, followPos.y, canvas.width, zoomCurrent);
+
+    render(ctx, currentCamera, displayState, input.getAimAngle(), myPlayerId, zombieLungeUntil, playerFlashUntil);
+    renderDeathEffects(ctx, currentCamera, deathEffects, timestamp);
+    renderDayProgress(ctx, canvas.width, displayState.day, displayState.killedZombies, displayState.totalZombiesForDay, displayState.dayWaveComposition);
     if (displayState.dayIntroRemainingMs > 0) {
-      renderDayIntro(ctx, CANVAS_SIZE, displayState.day, displayState.dayIntroRemainingMs);
+      renderDayIntro(ctx, canvas.width, displayState.day, displayState.dayIntroRemainingMs);
     }
 
     for (let i = effects.length - 1; i >= 0; i--) {
       if (timestamp - effects[i].firedAt > TRACER_LIFETIME_MS) effects.splice(i, 1);
     }
-    renderShotEffects(ctx, CANVAS_SIZE, effects, timestamp);
+    renderShotEffects(ctx, currentCamera, effects, timestamp);
 
     for (let i = zombieProjectiles.length - 1; i >= 0; i--) {
       if (timestamp - zombieProjectiles[i].firedAt > PROJECTILE_TRAVEL_MS) zombieProjectiles.splice(i, 1);
     }
-    renderZombieProjectiles(ctx, CANVAS_SIZE, zombieProjectiles, timestamp);
+    renderZombieProjectiles(ctx, currentCamera, zombieProjectiles, timestamp);
 
     for (let i = impactEffects.length - 1; i >= 0; i--) {
       if (timestamp - impactEffects[i].startedAt > EXPLOSION_EFFECT_MS) impactEffects.splice(i, 1);
     }
-    renderImpactEffects(ctx, CANVAS_SIZE, impactEffects, timestamp);
+    renderImpactEffects(ctx, currentCamera, impactEffects, timestamp);
 
     for (let i = damageNumbers.length - 1; i >= 0; i--) {
       if (timestamp - damageNumbers[i].spawnedAt > DAMAGE_NUMBER_MS) damageNumbers.splice(i, 1);
     }
-    renderDamageNumbers(ctx, CANVAS_SIZE, damageNumbers, timestamp);
+    renderDamageNumbers(ctx, currentCamera, damageNumbers, timestamp);
 
-    renderDamageVignette(ctx, CANVAS_SIZE, selfFlashAt, timestamp);
+    renderDamageVignette(ctx, canvas.width, selfFlashAt, timestamp);
 
     const mouse = input.getMouseWorldPos();
-    if (mouse) renderCrosshair(ctx, CANVAS_SIZE, mouse);
-    if (placementMode && mouse) renderTurretPlacementPreview(ctx, CANVAS_SIZE, mouse, isValidTurretSpot(mouse));
+    if (mouse) renderCrosshair(ctx, currentCamera, mouse);
+    if (placementMode && mouse) renderTurretPlacementPreview(ctx, currentCamera, mouse, isValidTurretSpot(mouse));
 
     // The menu (and placement mode) auto-close if the player walks out of
     // range of whatever they opened it near.

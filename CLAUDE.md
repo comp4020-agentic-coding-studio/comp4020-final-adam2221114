@@ -25,7 +25,7 @@ Do not add the following unless I explicitly ask:
 - crafting
 - vehicles
 - skill trees
-- complex zombie pathfinding
+- any zombie pathfinding beyond a single static, precomputed flow field toward the base (no per-target dynamic search, no runtime recomputation — see Gameplay invariants' Map/obstacles entry)
 - many weapons or attachments
 - ammunition/calibre/durability systems
 - chat or voice
@@ -98,6 +98,27 @@ downed/dead/revive/medkits. The rules below describe the CURRENT system;
 see PROCESS.md's Crit 10 entry for what changed and why, and
 docs/decisions/ for the one documented concurrency-style decision that
 entry links (simultaneous turret build/upgrade/repair conflicts).
+
+Map/obstacles (added Crit 11, map-visual pass)
+Buildings (obstacles.ts's BUILDINGS, a fixed hand-placed rectangle list) are
+real, server-authoritative obstacles: players and GROUND zombies cannot walk
+through them. Decorative props (terrain.ts's trees/bushes/crates/benches/
+etc.) stay purely cosmetic exactly as before and never block movement.
+Flying zombies ignore buildings the same way they already ignore the wall.
+Player movement resolves against buildings with axis-separated collision
+(obstacles.ts's resolveMove), which gives sliding along a wall for free
+instead of a glancing touch stopping movement entirely.
+A ground zombie whose direct line to its current target is blocked by a
+building follows a single precomputed flow field toward the base instead
+(obstacles.ts's flowDirectionAt) — this is the ONLY pathfinding this project
+does: static, built once at startup from one BFS, never recomputed per
+zombie or per tick, and never an exact route to a live player (it flows
+toward the base only). Do not replace this with per-target dynamic search,
+A* against a moving target, or any runtime recomputation.
+The BUILDINGS layout must always leave every map cell able to reach the base
+— assertMapIsFullyConnected() enforces this at every startup (throws if a
+hand-edit to BUILDINGS ever seals off a region) and spec/map-connectivity.
+test.ts re-asserts the same thing in CI.
 
 Waves
 A day advances only after its complete zombie wave (every type, including

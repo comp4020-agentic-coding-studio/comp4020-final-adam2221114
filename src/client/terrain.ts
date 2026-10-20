@@ -1,27 +1,37 @@
 // Decorative terrain: fixed, deterministic positions scattered around the
 // map. Purely cosmetic — per the redesign brief, none of this is consulted
-// by movement, targeting, placement validation, or any other gameplay code;
-// render.ts only ever reads this to draw something on top of the ground
-// layer. Deterministic (a tiny seeded PRNG, not Math.random()) so the
-// layout is identical on every load rather than reshuffling on each refresh.
+// by movement, targeting, placement validation, or any other gameplay code
+// (buildings, NOT props, are what's solid — see obstacles.ts); render.ts
+// only ever reads this to draw something on top of the ground layer.
+// Deterministic (a tiny seeded PRNG, not Math.random()) so the layout is
+// identical on every load rather than reshuffling on each refresh.
 //
-// Map-redesign pass (see PROCESS.md): the battlefield is organised into
+// Crit 11 map-visual pass: the prop palette switched from the CraftPix set
+// (tree/bush/bench/dumpster/crate/barrel/fencePanel) to the LPC set actually
+// available (tree/bush/barrel/chest — see sprites/lpc/NOTES.md); the
+// clustering/zoning logic below is otherwise UNCHANGED from the original
+// map-redesign pass (see PROCESS.md's own entry on it) — it already reads
+// well and this pass is a re-skin of what each cluster is MADE of, not a
+// redesign of where clusters go. The battlefield is still organised into
 // three concentric zones around the base — a kept-clear inner ring (the
 // turret-build area, visually a fortified pad in render.ts), a mid "combat
-// zone" with clustered debris/barricades, and a sparser, more damaged outer
+// zone" with clustered debris/thickets, and a sparser, more damaged outer
 // "danger zone" the player never needs to visit but sees zombies come from.
 // Props are grouped into believable CLUSTERS (a few props placed near one
 // shared centre) instead of independently scattered points, specifically to
-// avoid the "random copy-paste scatter" look.
+// avoid the "random copy-paste scatter" look. Clusters are ALSO kept clear
+// of every building footprint (obstacles.ts's BUILDINGS), so decoration
+// never visually overlaps a solid structure.
 import { BASE_POS, WORLD_SIZE } from "./defense-config.ts";
+import { overlapsAnyBuilding } from "./obstacles.ts";
 
-export type PropType = "tree" | "bush" | "bench" | "dumpster" | "crate" | "barrel" | "fencePanel";
+export type PropType = "tree" | "bush" | "barrel" | "chest";
 
 export interface Prop {
   x: number;
   y: number;
   type: PropType;
-  rotation: number; // radians — mainly for fencePanel, so a barricade remnant doesn't all face the same way
+  rotation: number; // radians — kept for any future prop that benefits from varied facing; unused by the current LPC prop set
 }
 
 export type GroundMarkKind = "crack" | "scorch" | "blood" | "patch";
@@ -47,6 +57,65 @@ function seededRandom(seed: number): () => number {
   };
 }
 
+// --- Road network -----------------------------------------------------------
+//
+// A hand-authored network of CURVED paths, not a straight ruler-cross: one
+// stone-paved, multi-segment arm runs from the base out to each of the four
+// map edges, each curving a different way so the result reads as a real
+// town's streets rather than a programmatically-stamped intersection.
+// obstacles.ts's BUILDINGS sit in the four angular GAPS between these arms
+// (verified clear by construction — see its own comment), so "roads form a
+// sensible connected network" means a real, deliberate path a player can
+// trace end to end, not a coincidence of the prop scatter. Purely cosmetic
+// (same as every other terrain.ts export): render.ts reads this only to
+// choose which ground tile to paint (with a soft dither band at the edge,
+// not a hard cutoff — see render.ts's own comment); nothing about where a
+// zombie or player can walk depends on it (that's obstacles.ts's job).
+export const ROAD_HALF_WIDTH = 40;
+
+interface Vec2 {
+  x: number;
+  y: number;
+}
+
+// Each arm is a short polyline (base -> ... -> a map edge), deliberately
+// NOT mirror-symmetric with any other arm.
+const ROAD_ARMS: Vec2[][] = [
+  [{ x: 500, y: 500 }, { x: 430, y: 350 }, { x: 380, y: 150 }, { x: 420, y: 0 }], // north, bows west
+  [{ x: 500, y: 500 }, { x: 580, y: 650 }, { x: 630, y: 850 }, { x: 580, y: 1000 }], // south, bows east
+  [{ x: 500, y: 500 }, { x: 650, y: 430 }, { x: 850, y: 380 }, { x: 1000, y: 420 }], // east, bows north
+  [{ x: 500, y: 500 }, { x: 350, y: 570 }, { x: 150, y: 620 }, { x: 0, y: 580 }], // west, bows south
+];
+
+function distToSegment(p: Vec2, a: Vec2, b: Vec2): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 === 0 ? 0 : ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const px = a.x + t * dx;
+  const py = a.y + t * dy;
+  return Math.hypot(p.x - px, p.y - py);
+}
+
+// Distance from a point to the nearest point on the whole road network —
+// exported (not just a boolean) so render.ts can build a soft dither band
+// at the edge instead of a hard on/off cutoff.
+export function distanceToRoad(worldX: number, worldY: number): number {
+  let best = Infinity;
+  for (const arm of ROAD_ARMS) {
+    for (let i = 0; i < arm.length - 1; i++) {
+      const d = distToSegment({ x: worldX, y: worldY }, arm[i], arm[i + 1]);
+      if (d < best) best = d;
+    }
+  }
+  return best;
+}
+
+export function isOnRoad(worldX: number, worldY: number): boolean {
+  return distanceToRoad(worldX, worldY) <= ROAD_HALF_WIDTH;
+}
+
 // Kept clear of the base/wall/turret-build area (TURRET_BUILD_RADIUS is 150
 // — see defense-config.ts) so decoration never visually crowds the actual
 // play space, with real margin to spare.
@@ -60,16 +129,13 @@ interface ClusterTemplate {
   spread: number; // how far each prop can land from the cluster's own centre
 }
 
-// Believable groupings, not an arbitrary bag of props per point — a debris
-// pile is crates/barrels/a dumpster near each other, a barricade remnant is
-// a short broken run of fence panels, a thicket is trees-and-bushes, and so
-// on. Picked per cluster by weighted roll (clusterTemplates below), not a
-// flat random choice per individual prop.
-const DEBRIS_PILE: ClusterTemplate = { props: ["crate", "barrel", "crate", "dumpster"], spread: 28 };
-const SCRAP_HEAP: ClusterTemplate = { props: ["barrel", "barrel", "crate"], spread: 20 };
-const BARRICADE_REMNANT: ClusterTemplate = { props: ["fencePanel", "fencePanel", "crate"], spread: 32 };
+// Believable groupings, not an arbitrary bag of props per point — a supply
+// cache is barrels/chests near each other, a thicket is trees-and-bushes,
+// and so on. Picked per cluster by weighted roll (clusterTemplates below),
+// not a flat random choice per individual prop.
+const SUPPLY_CACHE: ClusterTemplate = { props: ["barrel", "chest", "barrel"], spread: 26 };
+const SCRAP_HEAP: ClusterTemplate = { props: ["barrel", "barrel"], spread: 18 };
 const THICKET: ClusterTemplate = { props: ["tree", "tree", "bush", "bush", "bush"], spread: 38 };
-const ROADSIDE_REST: ClusterTemplate = { props: ["bench", "barrel", "crate"], spread: 24 };
 const LONE_TREE: ClusterTemplate = { props: ["tree"], spread: 0 };
 
 function buildClusters(): Prop[] {
@@ -84,6 +150,8 @@ function buildClusters(): Prop[] {
       const y = cy + Math.sin(angle) * dist;
       if (Math.hypot(x - BASE_POS.x, y - BASE_POS.y) < PROPS_CLEAR_RADIUS) continue;
       if (x < 10 || x > WORLD_SIZE - 10 || y < 10 || y > WORLD_SIZE - 10) continue;
+      if (overlapsAnyBuilding({ x, y })) continue; // Crit 11: never let decoration sit inside a solid building
+      if (isOnRoad(x, y)) continue; // Crit 11: never let decoration sit on a road tile either
       props.push({ x, y, type, rotation: rand() * Math.PI * 2 });
     }
   };
@@ -91,7 +159,7 @@ function buildClusters(): Prop[] {
   // Mid combat zone: denser, more varied clustering — this is the main
   // fighting area, so clusters read as cover/obstruction history rather
   // than a decorative backdrop.
-  const midTemplates = [DEBRIS_PILE, SCRAP_HEAP, BARRICADE_REMNANT, THICKET, ROADSIDE_REST];
+  const midTemplates = [SUPPLY_CACHE, SCRAP_HEAP, THICKET];
   const midClusterCount = 16;
   let attempts = 0;
   let placed = 0;
@@ -108,10 +176,9 @@ function buildClusters(): Prop[] {
   }
 
   // Outer danger zone: sparser and more hostile-feeling — fewer clusters,
-  // weighted toward the abandoned/broken kind (barricades, scrap) rather
-  // than green thickets, with some lone trees breaking up the emptiness
-  // instead of further clusters.
-  const outerTemplates = [BARRICADE_REMNANT, SCRAP_HEAP, DEBRIS_PILE];
+  // weighted toward scrap/supply remnants rather than green thickets, with
+  // some lone trees breaking up the emptiness instead of further clusters.
+  const outerTemplates = [SCRAP_HEAP, SUPPLY_CACHE];
   const outerClusterCount = 9;
   attempts = 0;
   placed = 0;

@@ -58,6 +58,7 @@ import {
   type Zombie,
   type ZombieType,
 } from "./game-state.ts";
+import { assertMapIsFullyConnected, overlapsAnyBuilding } from "./obstacles.ts";
 
 // Why an action returns a result instead of just logging and no-op'ing: with
 // several sockets, the loser of a simultaneous race (build/upgrade/repair/
@@ -145,6 +146,12 @@ export class GameLoop {
   #turretIdCounter = 0;
 
   constructor(progress: PersistedState, db: Database.Database) {
+    // Crit 11 map-visual pass: a one-time startup check that the hand-placed
+    // BUILDINGS layout (obstacles.ts) never seals off a region a zombie
+    // could spawn in from ever reaching the base — fails loudly at boot
+    // instead of silently stranding zombies if a future edit gets this
+    // wrong. Cheap (one BFS over a ~1,600-cell grid), so unconditional.
+    assertMapIsFullyConnected();
     this.#progress = progress;
     this.#db = db;
     const stored = progress.get();
@@ -405,6 +412,15 @@ export class GameLoop {
     const d = distance(spot, BASE_POS);
     if (d < BASE_ATTACK_RANGE || d > TURRET_BUILD_RADIUS) {
       return reject(`(${x}, ${y}) is outside the allowed ring (${BASE_ATTACK_RANGE}-${TURRET_BUILD_RADIUS} from base)`);
+    }
+    // Crit 11 map-visual pass: a turret can't legally stand inside a solid
+    // building. In practice BUILDINGS all sit outside TURRET_BUILD_RADIUS
+    // (obstacles.ts's own comment), so this never actually rejects anything
+    // today — kept as an explicit, independently-checked invariant rather
+    // than an implicit one, same reasoning as every other "the server
+    // re-validates even what looks geometrically impossible" rule here.
+    if (overlapsAnyBuilding(spot)) {
+      return reject(`(${x}, ${y}) overlaps a building`);
     }
     for (const t of progress.turrets) {
       if (distance(spot, { x: t.x, y: t.y }) < TURRET_MIN_SEPARATION) {

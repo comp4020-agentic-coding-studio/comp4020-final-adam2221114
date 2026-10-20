@@ -1,18 +1,14 @@
-// Sprite atlas + asset loading for the CraftPix "Zombie Survival" pixel-art
-// pack (curated subset under src/client/sprites/, served by index.ts's
-// serveSprite — the full original pack stays untouched in assets/, see
-// PROCESS.md's visual-redesign entry). Pure data/loading here; render.ts
-// does the actual drawing.
+// Sprite atlas + asset loading for the Crit 11 LPC (Liberated Pixel Cup)
+// visual-migration pass — curated crops under src/client/sprites/lpc/
+// (served by index.ts's serveSprite — the full originals stay untouched
+// under assets/LPC/, see this directory's own NOTES.md for sourcing/
+// licensing). Pure data/loading here; render.ts does the actual drawing.
 //
-// The pack has no "giant"/"boss" shaped sprite either — both reuse
-// palette-swapped reskins of the same civilian-zombie character, told apart
-// from "normal" by render-time scale/tint only (a documented choice, not a
-// missing feature). Flying zombies used to do the same, but a reskinned
-// humanoid read as "the same zombie" rather than a distinct airborne threat
-// (see PROCESS.md's zombie-visual-identity entry) — flying is now drawn
-// procedurally in render.ts instead, the same reasoning this project already
-// applies to the player character and turrets ("no sprite in the pack is
-// shaped like this, so draw it instead of forcing a mismatched one in").
+// Unlike the CraftPix sheet it replaces (4 frames, no facing direction —
+// render.ts flipped a single sheet horizontally via ctx.scale), every LPC
+// character/zombie sheet here is genuinely 4-directional (its own up/left/
+// down/right rows), so DirectionalSheet below is keyed by Direction rather
+// than a single SpriteSheet.
 import type { ZombieType } from "./protocol.ts";
 
 export interface SpriteSheet {
@@ -21,6 +17,9 @@ export interface SpriteSheet {
   frameHeight: number;
   frameCount: number;
 }
+
+export type Direction = "up" | "down" | "left" | "right";
+export type DirectionalSheet = Record<Direction, SpriteSheet>;
 
 function loadImage(src: string): HTMLImageElement {
   const img = new Image();
@@ -35,76 +34,98 @@ export function isReady(img: HTMLImageElement): boolean {
   return img.complete && img.naturalWidth > 0;
 }
 
-type ZombieAnimState = "idle" | "walk" | "attack" | "dead";
-
-function zombieSheets(dir: string): Record<ZombieAnimState, SpriteSheet> {
-  return {
-    idle: { image: loadImage(`/sprites/zombies/${dir}/idle.png`), frameWidth: 32, frameHeight: 32, frameCount: 4 },
-    walk: { image: loadImage(`/sprites/zombies/${dir}/walk.png`), frameWidth: 32, frameHeight: 32, frameCount: 4 },
-    attack: { image: loadImage(`/sprites/zombies/${dir}/attack.png`), frameWidth: 32, frameHeight: 32, frameCount: 4 },
-    dead: { image: loadImage(`/sprites/zombies/${dir}/dead.png`), frameWidth: 32, frameHeight: 32, frameCount: 2 },
-  };
+// Picks a cardinal Direction from a continuous movement/facing vector —
+// whichever axis has the larger magnitude wins, ties default to the
+// previous direction (passed in) so a perfectly diagonal input doesn't
+// flicker between two directions every frame.
+export function directionFromVector(dx: number, dy: number, fallback: Direction): Direction {
+  if (dx === 0 && dy === 0) return fallback;
+  if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? "right" : "left";
+  return dy > 0 ? "down" : "up";
 }
 
-// normal<-Enimies_1 (light shirt), boss<-Enimies_3 (dark suit, drawn largest
-// + tinted), giant<-Enimies_4 (navy shirt, drawn oversized) — picked for
-// visual variety only, neither "means" its role by its art. Flying has no
-// entry here: render.ts draws it procedurally (see the file comment above),
-// so there's nothing to preload for it.
+function directionalWalkSheet(dir: string, prefix: string, frameCount: number): DirectionalSheet {
+  const sheet = (direction: Direction): SpriteSheet => ({
+    image: loadImage(`/sprites/lpc/${dir}/${prefix}-${direction}.png`),
+    frameWidth: 64,
+    frameHeight: 64,
+    frameCount,
+  });
+  return { up: sheet("up"), down: sheet("down"), left: sheet("left"), right: sheet("right") };
+}
+
+// --- Players: 4 visually distinct character sheets (not a palette-swap),
+// one per colorIndex slot — see render.ts's REMOTE_PLAYER_COLORS/
+// LOCAL_PLAYER_COLOR ordering, which this mirrors. ---
+export const PLAYER_SHEETS: readonly DirectionalSheet[] = [
+  directionalWalkSheet("players/soldier-grey", "soldier-grey-walk", 9),
+  directionalWalkSheet("players/soldier-gold", "soldier-gold-walk", 9),
+  directionalWalkSheet("players/sara-teal", "sara-teal-walk", 9),
+  directionalWalkSheet("players/princess-blue", "princess-blue-walk", 9),
+];
+
+// --- Zombies: normal/giant/boss all share this one sheet — the pack has no
+// sprite shaped like a "giant"/"boss" monster, so (same documented choice
+// the CraftPix sheet this replaces already made) those two are told apart
+// by render-time scale/tint only, not distinct art. ---
 export type SpritedZombieType = Exclude<ZombieType, "flying">;
-export const ZOMBIE_SHEETS: Record<SpritedZombieType, Record<ZombieAnimState, SpriteSheet>> = {
-  normal: zombieSheets("normal"),
-  giant: zombieSheets("giant"),
-  boss: zombieSheets("boss"),
-};
+const ZOMBIE_WALK: DirectionalSheet = directionalWalkSheet("zombies", "zombie-walk", 9);
+const ZOMBIE_ATTACK: DirectionalSheet = directionalWalkSheet("zombies", "zombie-attack", 6);
+export const ZOMBIE_DEAD: SpriteSheet = { image: loadImage("/sprites/lpc/zombies/zombie-dead.png"), frameWidth: 64, frameHeight: 64, frameCount: 6 };
 
-export const TILESET = loadImage("/sprites/tileset.png");
+export function zombieWalkSheet(_type: SpritedZombieType, dir: Direction): SpriteSheet {
+  return ZOMBIE_WALK[dir];
+}
+export function zombieAttackSheet(_type: SpritedZombieType, dir: Direction): SpriteSheet {
+  return ZOMBIE_ATTACK[dir];
+}
 
-// --- City_Tileset/PSD/Tile.png regions (16px grid). Located by rendering
-// the sheet through a labelled-grid overlay and visually confirming each
-// crop — see PROCESS.md's visual-redesign entry — not guessed from the
-// unscaled thumbnail alone. ---
-export const TILE_SIZE = 16;
-export const TILESET_REGIONS = {
-  pavement: [
-    { sx: 16, sy: 176 },
-    { sx: 32, sy: 176 },
-    { sx: 48, sy: 176 },
-  ],
-  pavementAlt: { sx: 64, sy: 240 },
-  // Map-redesign additions (same already-licensed sheet, previously-
-  // uncatalogued tiles — see PROCESS.md's map-redesign entry): stained/
-  // cracked variants for the mid combat zone, and a heavily-cracked dark
-  // variant for damaged patches further out. No new asset files.
-  pavementCracked: [
-    { sx: 16, sy: 240 },
-    { sx: 32, sy: 240 },
-    { sx: 16, sy: 256 },
-  ],
-  pavementDamaged: { sx: 80, sy: 256 },
-  tree: { sx: 256, sy: 64, sw: 32, sh: 48 },
-  bush: { sx: 64, sy: 160, sw: 64, sh: 64 },
-  fencePanel: { sx: 256, sy: 160, sw: 32, sh: 32 },
-  dumpster: { sx: 208, sy: 176, sw: 32, sh: 16 },
-  bench: { sx: 240, sy: 128, sw: 32, sh: 16 },
-  crate: { sx: 192, sy: 192, sw: 16, sh: 16 },
-  barrel: { sx: 208, sy: 192, sw: 16, sh: 16 },
-  buildingDoor: { sx: 192, sy: 96, sw: 32, sh: 32 },
-  vaultDoor: { sx: 144, sy: 96, sw: 32, sh: 32 },
-  roofBrick: { sx: 256, sy: 32, sw: 48, sh: 48 },
+// --- Flying zombie: a real sprite now exists (LPC's bat monster) — this
+// reverses the earlier documented choice in render.ts/PROCESS.md ("no CC0/
+// CC-BY-SA flying-creature sprite sheet matching this project's frame
+// conventions exists"), which was true when written but is now stale since
+// one does. Down-facing wingbeat only (3 frames); render.ts still flips it
+// horizontally by facing, same as every other zombie sheet. ---
+export const FLYING_SHEET: SpriteSheet = { image: loadImage("/sprites/lpc/flying/bat-flight.png"), frameWidth: 32, frameHeight: 32, frameCount: 3 };
+
+// --- Terrain fills (32x32, tileable) ---
+export const TERRAIN_TILE_SIZE = 32;
+export const GRASS_TILE = loadImage("/sprites/lpc/terrain/grass.png");
+export const GRASS_LIGHT_TILE = loadImage("/sprites/lpc/terrain/grass-light.png");
+export const ROAD_TILE = loadImage("/sprites/lpc/terrain/road.png");
+export const ROAD_LIGHT_TILE = loadImage("/sprites/lpc/terrain/road-light.png");
+
+// --- Buildings (32x32 fill tiles, tiled across each obstacle rectangle) ---
+export const BUILDING_BRICK_TILE = loadImage("/sprites/lpc/buildings/building-brick.png");
+export const BUILDING_STONE_TILE = loadImage("/sprites/lpc/buildings/building-stone.png");
+
+// --- Decorative props ---
+export const PROP_IMAGES = {
+  tree: loadImage("/sprites/lpc/props/tree.png"),
+  bush: loadImage("/sprites/lpc/props/bush.png"),
+  barrel: loadImage("/sprites/lpc/props/barrel.png"),
+  chest: loadImage("/sprites/lpc/props/chest.png"),
 } as const;
 
-// --- UI icons + panel chrome: src/client/sprites/ui/ ---
-//
-// Replaces the former CraftPix-derived ui.png atlas. CraftPix's free-tier
-// license explicitly forbids redistributing the art source files, which
-// conflicts with this course's public-repo workflow (flagged, unresolved —
-// see PROCESS.md's visual-redesign entry); these icons/panels instead come
-// from two Kenney.nl packs released CC0 (public domain, redistribution of
-// the original files explicitly permitted). Full sourcing, pack URLs, and
-// the exact tile coordinates each icon was cropped from are documented in
-// assets/ui-kenney/NOTES.md. Individual files rather than an atlas — no
-// pixel-coordinate bookkeeping needed for a handful of icons.
+// --- Base fortress (obstacles.ts's FORTRESS_WALLS/FORTRESS_TOWERS):
+// sprite-swappable by design — these files do NOT exist on disk yet, which
+// is intentional. isReady() (same helper every other tile in this file
+// already uses) returns false until real art is dropped in at these exact
+// paths, and render.ts's fortress-drawing functions already have the
+// established "real tile if ready, else a clearly-labelled placeholder"
+// branch every other asset in this project uses (see renderBuilding's own
+// tile ? ... : fillStyle pattern). No code change is needed to go from
+// placeholder to final art — only adding the PNG files here. See the
+// fortress art spec (delivered separately) for exact size/format per slot.
+export const FORTRESS_TILES = {
+  wallSegment: loadImage("/sprites/lpc/fortress/wall-segment.png"),
+  cornerTower: loadImage("/sprites/lpc/fortress/corner-tower.png"),
+  gatePost: loadImage("/sprites/lpc/fortress/gate-post.png"),
+  floorPad: loadImage("/sprites/lpc/fortress/floor-pad.png"),
+} as const;
+
+// --- UI icons + panel chrome: src/client/sprites/ui/ (Kenney CC0) ---
+// Unaffected by the Crit 11 LPC pass — see sprites/lpc/NOTES.md.
 export const UI_ICON_NAMES = ["heart", "medkit", "skull", "shield", "coin", "house", "trophy"] as const;
 export type UiIconName = (typeof UI_ICON_NAMES)[number];
 

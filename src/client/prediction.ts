@@ -4,11 +4,13 @@
 // since the local player's own input is the one thing this client knows
 // about instantly, without waiting on a round trip.
 //
-// Movement math (speed, diagonal normalization, map clamping) mirrors
-// src/server/game-state.ts's movePlayer()/PLAYER_SPEED/MAP_SIZE exactly —
-// duplicated for the same build-separation reason as protocol.ts (see its
-// comment). If the two drift apart, prediction stops matching the server
-// and reconciliation corrections stop being rare.
+// Movement math (speed, diagonal normalization, map clamping, and — Crit 11
+// — building collision) mirrors src/server/game-state.ts's movePlayer()/
+// PLAYER_SPEED/MAP_SIZE/resolveMove exactly — duplicated for the same
+// build-separation reason as protocol.ts (see its comment). If the two drift
+// apart, prediction stops matching the server and reconciliation corrections
+// stop being rare.
+import { resolveMove } from "./obstacles.ts";
 
 interface Vec2 {
   x: number;
@@ -70,10 +72,11 @@ export class LocalPlayerPrediction {
 
     const len = Math.hypot(dx, dy); // normalizes diagonal speed to match axis speed
     const step = (PLAYER_SPEED * dtMs) / 1000;
-    this.#pos = {
+    const desired: Vec2 = {
       x: clamp(this.#pos.x + (dx / len) * step, 0, WORLD_SIZE),
       y: clamp(this.#pos.y + (dy / len) * step, 0, WORLD_SIZE),
     };
+    this.#pos = resolveMove(this.#pos, desired);
   }
 
   // Called whenever a new authoritative player position arrives. #pos is
