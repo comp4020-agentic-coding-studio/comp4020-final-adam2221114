@@ -90,7 +90,7 @@ const server = createServer((req, res) => {
   res.end("not found");
 });
 
-attachWebSocketServer(server, gameLoop);
+const wsServer = attachWebSocketServer(server, gameLoop);
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`listening on :${port}`);
@@ -99,12 +99,31 @@ server.listen(port, "0.0.0.0", () => {
 // Fly stops machines by sending SIGTERM; a redeploy's rolling update does the
 // same to the outgoing machine. Flush whatever hasn't hit the periodic save
 // yet before the process actually exits.
+//
+// wsServer.closeAllConnections() MUST run before server.close(): an
+// upgraded WebSocket connection is detached from Node's normal HTTP
+// connection bookkeeping, so server.close()'s callback never fires while
+// one is still open (confirmed locally: 10+ seconds with a single open
+// connection, via a graceful close handshake that waits on the client).
+// Fly's default kill_timeout is 5 seconds before it escalates to a harder
+// stop, so without this the process can still be mid-shutdown — past the
+// point gameLoop.stop()/progress.flush()/db.close() already ran, but before
+// process.exit(0) ever gets called — when Fly's own forced stop cuts it
+// off. See PendingRepair.md for the investigation this fixes and
+// spec/shutdown.test.ts for the regression test.
+//
+// Guarded so a second SIGTERM/SIGINT while already shutting down (Fly can
+// send more than one) can't flush/close an already-closed db a second time.
+let shuttingDown = false;
 function shutdown(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`${signal}: flushing progress and exiting`);
   gameLoop.stop();
   progress.flush();
   progress.stop();
   db.close();
+  wsServer.closeAllConnections();
   server.close(() => process.exit(0));
 }
 

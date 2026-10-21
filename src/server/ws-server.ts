@@ -87,9 +87,27 @@ function parseClientMessage(data: unknown): ClientMessage | undefined {
   return undefined;
 }
 
-export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): void {
+// Returned so index.ts's shutdown() can force-close every open connection
+// BEFORE calling server.close() — see closeAllConnections's own comment for
+// why this is required, not optional.
+export interface WsServerHandle {
+  closeAllConnections(): void;
+}
+
+export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): WsServerHandle {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
   const sockets = new Map<WebSocket, string>();
+  // Set once shutdown begins (closeAllConnections below). Every open socket
+  // gets force-terminated at that point, which fires each one's own "close"
+  // handler below asynchronously, a moment later — this flag makes that
+  // handler a no-op instead of running gameLoop.removePlayer()/pause() for
+  // a "disconnect" that isn't a player leaving, it's the process exiting.
+  // Skipping that bookkeeping is safe: #players is an in-memory map that's
+  // discarded on process restart regardless, and every durable per-player
+  // field (hp/status/medkits/characterIndex/displayName) is already
+  // persisted synchronously by whichever action last changed it, not by
+  // this handler.
+  let shuttingDown = false;
 
   wss.on("connection", (socket, request) => {
     const id = extractPlayerId(request.url) ?? randomUUID();
@@ -160,6 +178,7 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
 
     socket.on("close", () => {
       sockets.delete(socket);
+      if (shuttingDown) return; // process is exiting, not an actual player leaving
       gameLoop.removePlayer(id);
       // Only pause once the LAST player has left — a single remaining
       // connection keeps the round running for whoever's still there.
@@ -174,10 +193,33 @@ export function attachWebSocketServer(httpServer: Server, gameLoop: GameLoop): v
     });
   });
 
-  setInterval(() => {
+  const broadcastTimer = setInterval(() => {
     const snapshot = JSON.stringify(gameLoop.getSnapshot());
     for (const socket of sockets.keys()) {
       if (socket.readyState === WebSocket.OPEN) socket.send(snapshot);
     }
   }, BROADCAST_INTERVAL_MS);
+
+  return {
+    // http.Server#close() (called by index.ts's shutdown()) does not invoke
+    // its callback until every connection on that server ends — but an
+    // upgraded WebSocket connection is detached from Node's normal HTTP
+    // connection tracking the moment it upgrades, so closeAllConnections()
+    // on the underlying http.Server never touches it either. A graceful
+    // per-socket close() (a close handshake, waiting for the client's own
+    // close frame) can take an unbounded amount of time if the client never
+    // answers — observed locally taking upwards of 10+ seconds with a
+    // single open connection — which is longer than Fly's default 5s
+    // kill_timeout before it escalates to a harder stop. terminate() ends
+    // the underlying TCP socket immediately, no handshake, which is
+    // appropriate here: the process is exiting either way, so there is
+    // nothing left to negotiate with the client about.
+    closeAllConnections(): void {
+      shuttingDown = true;
+      clearInterval(broadcastTimer);
+      for (const socket of sockets.keys()) socket.terminate();
+      sockets.clear();
+      wss.close();
+    },
+  };
 }

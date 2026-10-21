@@ -767,6 +767,126 @@ an isolated scratch server/database (`PORT=8099`,
 `DATA_DIR=/tmp/wall-test-data`, both removed afterward); `pnpm typecheck`
 and `pnpm run build` both pass clean. The real `data/` was never touched.
 
+## Fixing the Fly-restart shutdown bug, and its actual root cause
+
+`PendingRepair.md`'s prior entry (this session's earlier revisit, see above)
+found the "fixed" claim it inherited was wrong and identified a concrete
+mechanism: `src/server/index.ts`'s `shutdown()` calls
+`server.close(() => process.exit(0))`, but Node's `http.Server#close()`
+never invokes its callback while any connection — including an upgraded
+WebSocket connection, which detaches from the server's normal HTTP
+connection tracking — is still open, and nothing in `shutdown()` ever
+closed the WebSocket server or its sockets first.
+
+**Confirming the root cause before fixing it.** Rather than patch based on
+a plausible theory, this was reproduced in a minimal, dependency-free
+isolation (a bare `http.createServer()` + `ws.WebSocketServer`, one client,
+`SIGTERM`, timing `server.close()`'s callback) — confirming the hang is
+Node/`ws` behaviour, not something specific to this project's SQLite usage
+or game loop. The same isolated repro then validated the fix shape
+(`socket.terminate()` on every open connection, plus `wss.close()`, run
+before `server.close()`) before it touched any real project file.
+
+**The fix.** `attachWebSocketServer` (`ws-server.ts`) now returns a small
+`WsServerHandle` with `closeAllConnections()`: it force-terminates every
+currently-open socket (no graceful close handshake — appropriate since the
+process is exiting regardless and there's no one left to negotiate a clean
+close with), closes the `WebSocketServer` itself, and clears the periodic
+state-broadcast timer. `index.ts`'s `shutdown()` calls this AFTER
+`gameLoop.stop()`/`progress.flush()`/`db.close()` (so the state-saving
+calls run first, unaffected by however long socket teardown takes) and
+BEFORE `server.close()` (so `server.close()`'s callback can actually fire
+promptly once no connections remain). A `shuttingDown` guard was added to
+`shutdown()` itself (Fly can resend `SIGTERM`) and to each socket's own
+`close` handler in `ws-server.ts` (so a connection ending BECAUSE of
+`closeAllConnections()` doesn't run `gameLoop.removePlayer()`/`pause()` —
+unnecessary bookkeeping for a process exit, and one that would otherwise
+run after `db.close()` and throw).
+
+**Verification, in order:** (1) the isolated minimal repro, both
+demonstrating the ~10+ second hang and confirming the fix brings it to
+single-digit milliseconds; (2) a new `spec/shutdown.test.ts`, which spawns
+a real server subprocess, connects a live client, sends `SIGTERM` to the
+process group, and asserts exit within 2500ms (well inside Fly's 5000ms
+default `kill_timeout`) in both a fresh-boot and a mid-round scenario,
+re-opening the written SQLite file afterward to confirm the flushed state
+matches exactly what the client last observed; (3) that test was confirmed
+to actually catch the regression — reverting the fix and re-running it
+reproduces the original failure, not just a vacuously-passing assertion;
+(4) the same scenario repeated against the real `dist/` production build
+(not just `tsx`'s dev runtime), confirming ~0.2s exit and a correctly
+flushed `game.db`. Full suite (46/46), `pnpm typecheck`, and
+`pnpm run build` all pass with the fix in place.
+
+**What this does NOT verify**, stated in `PendingRepair.md` rather than
+implied by omission: an actual Fly machine restart or redeploy against the
+real deployed app. Every verification above reproduces the exact mechanism
+and confirms the fix addresses it at the process level, but this session
+did not deploy, per instruction not to deploy without explicit
+confirmation — the original report's own test (`baseHp` before/after a real
+restart) should still be re-run against a live deploy before this is
+treated as closed in production, not just fixed and tested locally.
+
+## Checking whether Fly's default log retention actually satisfies the brief
+
+Crit 10's spec requires server-side logs that "outlive the crit." Checked
+what's actually in place: `flyctl logs -a comp4020-final-adam2221114
+--no-tail` currently returns exactly 100 lines, spanning roughly the last
+machine boot-to-restart window — this project has no log-shipping
+configured, so it relies entirely on Fly's own built-in retention.
+
+**What Fly's own docs/support say**, checked this session rather than
+assumed: the `flyctl logs`/dashboard view only reliably shows a small
+recent buffer (the 100-line/~24h window observed above matches this), but
+Fly's HTTP Logs API (`GET /api/v1/apps/:app/logs`) can page back through
+roughly a 7-day retention window using an auth token and `next_token`
+pagination — the only way to reach anything Fly keeps beyond the live
+buffer, since neither `flyctl logs` nor a NATS subscription keeps history
+before the moment you connect.
+
+**Whether 7 days is "enough" depends on the gap between crits.** This
+project's crits run weekly; a 7-day Fly-side retention window is tight
+against that (a log from early in one crit week could roll off by the next
+one) but isn't necessarily insufficient for "survives past the single crit
+session" — it depends on exactly when the crit presenter needs to pull
+logs relative to when the behaviour being debugged happened. This is a
+judgment call on acceptable risk, not purely a technical one, so it's
+recorded here rather than decided unilaterally.
+
+**Options considered, not implemented (all are paid-service or
+infrastructure decisions outside what was asked for this session):**
+
+1. **Do nothing — accept Fly's ~7-day window.** Zero cost, zero extra
+   moving parts. Risk: a log needed more than ~7 days after it was written
+   is gone. Given crits are weekly, this is a real, nonzero risk, not a
+   theoretical one.
+2. **A self-hosted log file on the existing Fly volume**, e.g. appending
+   structured log lines to a file under `/data` alongside `game.db`, with
+   simple rotation. Zero additional cost (same 1GB volume already paid
+   for), no new external dependency or account — but it only survives as
+   long as the volume does (a volume deletion loses it, same durability
+   ceiling the SQLite data already has), and reading it requires SSH/ `fly
+   ssh console` rather than `flyctl logs`' convenience.
+3. **Fly's own Log Shipper** (`fly-log-shipper`, a prebuilt Vector-based
+   app) forwarding to a free-tier external sink — Grafana Cloud (50GB
+   logs/month free, 14-day retention) or Axiom (500GB/month free, 30-day
+   retention) are the two with genuinely free tiers that don't expire or
+   require a card, per Fly's and each vendor's own published pricing as of
+   this session. Running the shipper itself is a second always-on Fly
+   machine (this project's current `fly.toml` runs exactly one
+   `shared-cpu-1x`/256MB machine) — Fly's own compute pricing would apply
+   to that second machine, on top of whichever sink's free tier is chosen.
+   This is a real, nonzero cost (a second machine, however small) and a new
+   external account, so it was NOT configured without asking first, per
+   instruction.
+
+**No change was made to the deployed logging setup this session.** If 7
+days turns out to be insufficient for an actual crit's needs, option 2 (a
+log file on the existing volume) is the lowest-cost, no-new-account choice;
+option 3 is the one that keeps `flyctl`-style convenience but costs a
+second machine plus an external account. This is a decision for you to
+make, not one this session made unilaterally.
+
 ## Fullscreen, non-square canvas instead of a fixed centred square
 
 The canvas used to be a fixed, square, centred element with a visible
