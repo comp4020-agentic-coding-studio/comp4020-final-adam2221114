@@ -22,7 +22,9 @@ import {
   type SpritedZombieType,
   type UiIconName,
 } from "./sprites.ts";
+import { BOSS_ENTRANCE_MS, renderBossDeath, renderBossEntrance, renderBossZombie, renderGiantDeath, renderGiantZombie, type MonsterPose } from "./monsters.ts";
 import { DECORATIVE_PROPS, distanceToRoad, GROUND_MARKS, OUTER_ZONE_RADIUS, ROAD_HALF_WIDTH, type GroundMark, type Prop } from "./terrain.ts";
+import { renderFortressDecor } from "./fortress-decor.ts";
 import { BUILDINGS, TOWN_BUILDINGS, WALL_GATE_WIDTH, WALL_HALF_EXTENT, WALL_INTERIOR_HALF_EXTENT, wallRectsForPlayers, type Rect } from "./obstacles.ts";
 import type { StateMessage, TurretSnapshot, ZombieSnapshot, ZombieType } from "./protocol.ts";
 
@@ -37,17 +39,16 @@ const WALL_VISUALS: Record<number, { color: string; lineWidth: number; ability: 
   5: { color: "#ffd166", lineWidth: 7, ability: "spike" },
 };
 
-// Per-type render treatment. The LPC zombie pack (like the CraftPix one it
-// replaces) has no sprite shaped like a "giant"/"boss" monster — both reuse
-// scale/tint reskins of the same civilian-zombie character (see sprites.ts's
-// own comment) — so those two are told apart by scale/tint here, not by
-// distinct art. Flying now uses a real sprite (sprites.ts's FLYING_SHEET)
-// instead of the procedural silhouette this used to need.
+// Per-type render treatment. Giant/boss now have their own hand-built
+// procedural art (monsters.ts) instead of a scale/tint reskin of the normal-
+// zombie sprite — see that file's own comment for why no licensed sprite
+// replacement fits. `glow` stays as an ambient aura behind the monster
+// (unchanged); `tint` no longer applies to giant/boss (nothing to tint).
 const ZOMBIE_RENDER: Record<ZombieType, { scale: number; hover: boolean; glow?: string; tint?: string }> = {
   normal: { scale: 1.1, hover: false },
   flying: { scale: 1.0, hover: true, glow: "rgba(90, 220, 230, 0.35)" },
-  giant: { scale: 1.9, hover: false, glow: "rgba(140, 90, 40, 0.25)", tint: "rgba(255, 150, 40, 0.3)" },
-  boss: { scale: 2.6, hover: false, glow: "rgba(220, 40, 40, 0.4)", tint: "rgba(255, 30, 30, 0.35)" },
+  giant: { scale: 1.9, hover: false, glow: "rgba(140, 90, 40, 0.25)" },
+  boss: { scale: 2.6, hover: false, glow: "rgba(220, 40, 40, 0.4)" },
 };
 
 // A brief forward-lunge pulse plays exactly when a zombie's attack actually
@@ -173,6 +174,7 @@ function buildTerrainLayer(): HTMLCanvasElement {
   renderBuildingShadows(lctx);
   renderGroundMarks(lctx);
   renderFortressCourtyardFloor(lctx);
+  renderFortressDecor(lctx, BAKE_PX_PER_UNIT);
   return layer;
 }
 
@@ -300,7 +302,10 @@ function getTerrainLayer(): HTMLCanvasElement | undefined {
 
 // Native pixel sizes for each curated LPC prop crop (sprites/lpc/NOTES.md) —
 // used to preserve aspect ratio when drawing at a chosen world-unit width.
-const PROP_NATIVE_SIZE: Record<Prop["type"], { w: number; h: number }> = {
+// "wreck" is excluded — it's hand-drawn Canvas art (drawVehicleWreck below),
+// not a sprite crop, so it has no native pixel size to preserve.
+type SpritedPropType = Exclude<Prop["type"], "wreck">;
+const PROP_NATIVE_SIZE: Record<SpritedPropType, { w: number; h: number }> = {
   tree: { w: 96, h: 112 },
   bush: { w: 96, h: 112 },
   barrel: { w: 32, h: 64 },
@@ -310,12 +315,83 @@ const PROP_NATIVE_SIZE: Record<Prop["type"], { w: number; h: number }> = {
 // ratio) — chosen so a tree reads as a real landmark and a chest/barrel
 // reads as a small, human-scale object, same relative sizing the old
 // CraftPix crate/barrel/tree crops had.
-const PROP_DRAW_WIDTH: Record<Prop["type"], number> = {
+const PROP_DRAW_WIDTH: Record<SpritedPropType, number> = {
   tree: 46,
   bush: 40,
   barrel: 16,
   chest: 20,
 };
+
+// A burnt-out car wreck — hand-drawn Canvas art (no vehicle sprite exists in
+// any licensed pack vendored in this repo, and this sandbox has no outbound
+// network access to source one; see terrain.ts's own comment on PropType).
+// Drawn top-down: a scorched chassis, a caved-in roof gap, two dark wheel
+// hubs, and a thin smoke wisp — reads as "abandoned, burnt" rather than a
+// parked car. `rotation` (terrain.ts) points it along its own road segment.
+function drawVehicleWreck(ctx: CanvasRenderingContext2D, scale: number): void {
+  const len = 30 * scale;
+  const width = 14 * scale;
+  ctx.save();
+  // Contact shadow first, same down-right convention every other shadow in
+  // this project uses.
+  ctx.fillStyle = "rgba(10, 10, 8, 0.35)";
+  ctx.beginPath();
+  ctx.ellipse(2, 3, len / 2 + 2, width / 2 + 1, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Chassis — a scorched, uneven dark-rust body, not a clean rectangle.
+  ctx.fillStyle = "#3a332e";
+  ctx.beginPath();
+  ctx.moveTo(-len / 2, -width / 2 + 2);
+  ctx.lineTo(-len / 2 + 4, -width / 2);
+  ctx.lineTo(len / 2 - 6, -width / 2 + 1);
+  ctx.lineTo(len / 2, 0);
+  ctx.lineTo(len / 2 - 6, width / 2 - 1);
+  ctx.lineTo(-len / 2 + 4, width / 2);
+  ctx.lineTo(-len / 2, width / 2 - 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "#1c1814";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Rust/burn patches — a couple of warmer-toned blotches over the chassil.
+  ctx.fillStyle = "rgba(120, 60, 30, 0.45)";
+  ctx.beginPath();
+  ctx.ellipse(-len * 0.1, -width * 0.1, len * 0.22, width * 0.3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Caved-in roof gap — a darker void where the cabin roof used to be,
+  // the clearest "this burned out" silhouette cue at this scale.
+  ctx.fillStyle = "#15120f";
+  ctx.beginPath();
+  ctx.ellipse(len * 0.05, 0, len * 0.22, width * 0.32, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Wheel hubs, dark and flat (no suspension detail needed at this scale).
+  ctx.fillStyle = "#0e0c0a";
+  for (const wx of [-len * 0.3, len * 0.28]) {
+    ctx.beginPath();
+    ctx.ellipse(wx, -width / 2, width * 0.14, width * 0.1, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(wx, width / 2, width * 0.14, width * 0.1, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // A thin, static smoke wisp drifting up from the cabin — cheap (no
+  // particle system, just two translucent soft blobs) but enough to read as
+  // "still smouldering" rather than long-dead wreckage.
+  ctx.fillStyle = "rgba(120, 120, 118, 0.22)";
+  ctx.beginPath();
+  ctx.ellipse(len * 0.05, -width * 0.9, width * 0.35, width * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "rgba(140, 140, 138, 0.14)";
+  ctx.beginPath();
+  ctx.ellipse(len * 0.12, -width * 1.6, width * 0.5, width * 0.7, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
 
 // Only props within (roughly) the visible viewport are drawn — the full
 // prop list can include points far outside whatever window the camera
@@ -331,12 +407,22 @@ function renderProps(ctx: CanvasRenderingContext2D, camera: Camera): void {
   const bottom = camera.originY + camera.viewHeight + PROP_CULL_MARGIN;
   for (const prop of DECORATIVE_PROPS) {
     if (prop.x < left || prop.x > right || prop.y < top || prop.y > bottom) continue;
+    const screen = worldToScreen(camera, prop.x, prop.y);
+
+    if (prop.type === "wreck") {
+      ctx.save();
+      ctx.translate(screen.x, screen.y);
+      ctx.rotate(prop.rotation);
+      drawVehicleWreck(ctx, scale);
+      ctx.restore();
+      continue;
+    }
+
     const img = PROP_IMAGES[prop.type];
     if (!isReady(img)) continue;
     const native = PROP_NATIVE_SIZE[prop.type];
     const dw = PROP_DRAW_WIDTH[prop.type] * scale;
     const dh = dw * (native.h / native.w);
-    const screen = worldToScreen(camera, prop.x, prop.y);
     // Anchor at the sprite's own "base" (bottom-centre) rather than its
     // centre — a tree/bush/barrel/chest should visually stand ON its world
     // position, not float centred over it.
@@ -352,6 +438,19 @@ function renderProps(ctx: CanvasRenderingContext2D, camera: Camera): void {
 // SORTED entity (see render()'s drawables list) so a zombie/player passing
 // in front of or behind one is occluded correctly, not always-on-top or
 // always-behind. ---
+// Deterministic per-building "damage profile" (round 3 of the visual
+// overhaul, request #3: "destroyed structures, environmental storytelling" —
+// every town building previously used the exact same two-tone tile/roof
+// treatment, so a dozen of them in view read as one copy-pasted rectangle).
+// Hashed from the building's own fixed position (TOWN_BUILDINGS never
+// changes at runtime), so the same building always rolls the same damage —
+// not a per-frame random flicker. Purely decorative, drawn over the existing
+// tile fill; the rectangle's actual collision footprint (obstacles.ts) is
+// completely unaffected.
+function buildingDamageSeed(b: Rect): number {
+  return hashStr(`${b.x},${b.y},${b.w},${b.h}`);
+}
+
 function renderBuilding(ctx: CanvasRenderingContext2D, camera: Camera, b: Rect): void {
   const scale = cameraScale(camera);
   const screen = worldToScreen(camera, b.x, b.y);
@@ -361,6 +460,10 @@ function renderBuilding(ctx: CanvasRenderingContext2D, camera: Camera, b: Rect):
   const h = b.h * scale;
   const tile = isReady(BUILDING_STONE_TILE) ? BUILDING_STONE_TILE : undefined;
   const brick = isReady(BUILDING_BRICK_TILE) ? BUILDING_BRICK_TILE : undefined;
+  const seed = buildingDamageSeed(b);
+  const collapsedCorner = seed % 5 === 0; // ~1 in 5 buildings has visibly caved in
+  const scorched = seed % 3 === 1;
+  const boarded = seed % 2 === 0;
 
   ctx.save();
   ctx.imageSmoothingEnabled = false;
@@ -391,6 +494,65 @@ function renderBuilding(ctx: CanvasRenderingContext2D, camera: Camera, b: Rect):
   } else {
     ctx.fillStyle = "#6b3a34";
     ctx.fillRect(x, y, w, roofH);
+  }
+
+  // A soot/scorch wash on roughly a third of buildings — reads as fire
+  // damage from whatever happened before the player arrived.
+  if (scorched) {
+    const scorchGrad = ctx.createLinearGradient(x, y + h, x, y + h * 0.3);
+    scorchGrad.addColorStop(0, "rgba(15, 12, 10, 0.5)");
+    scorchGrad.addColorStop(1, "rgba(15, 12, 10, 0)");
+    ctx.fillStyle = scorchGrad;
+    ctx.fillRect(x, y + h * 0.3, w, h * 0.7);
+  }
+
+  // Boarded-up windows: a couple of plank rectangles with cross-bracing —
+  // the single clearest "abandoned, not just decorative" cue available
+  // without a dedicated sprite (no boarded-window crop exists in any
+  // licensed pack checked while planning this change).
+  if (boarded && w > 24 && h > 24) {
+    const plankW = Math.min(14, w * 0.3);
+    const plankH = Math.min(10, h * 0.22);
+    const px = x + w * 0.5 - plankW / 2;
+    const py = y + h * 0.55;
+    ctx.fillStyle = "#5c4a36";
+    ctx.fillRect(px, py, plankW, plankH);
+    ctx.strokeStyle = "rgba(20, 15, 10, 0.7)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + plankW, py + plankH);
+    ctx.moveTo(px + plankW, py);
+    ctx.lineTo(px, py + plankH);
+    ctx.stroke();
+  }
+
+  // A collapsed corner: part of the footprint drawn as a rubble pile instead
+  // of standing wall — the clearest "destroyed structure" read, since it
+  // changes the building's own silhouette rather than only its surface.
+  if (collapsedCorner && w > 20 && h > 20) {
+    const cw = w * 0.4;
+    const ch = h * 0.4;
+    const cx = x + w - cw * 0.6;
+    const cy = y + h - ch * 0.6;
+    ctx.fillStyle = "#6b6358";
+    ctx.beginPath();
+    ctx.moveTo(cx, cy + ch);
+    ctx.lineTo(cx + cw * 0.3, cy + ch * 0.3);
+    ctx.lineTo(cx + cw * 0.7, cy + ch * 0.55);
+    ctx.lineTo(cx + cw, cy + ch * 0.1);
+    ctx.lineTo(cx + cw, cy + ch);
+    ctx.closePath();
+    ctx.fill();
+    // Scattered rubble chunks at the base of the collapse.
+    for (let i = 0; i < 4; i++) {
+      const rx = cx + (i / 4) * cw + (pseudo(seed, i) - 0.5) * 6;
+      const ry = cy + ch + pseudo(seed, i + 5) * 5;
+      ctx.fillStyle = i % 2 === 0 ? "#8a8276" : "#5c564c";
+      ctx.beginPath();
+      ctx.arc(rx, ry, 3 + pseudo(seed, i + 10) * 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   ctx.strokeStyle = "rgba(20, 18, 22, 0.6)";
@@ -568,6 +730,15 @@ function renderZombie(ctx: CanvasRenderingContext2D, camera: Camera, z: ZombieSn
     ctx.scale(face.dir === "left" ? -1 : 1, 1);
     renderFlyingZombie(ctx, drawSize, z.attacking, lungeFrac, phase, now);
     ctx.restore();
+  } else if (z.type === "giant" || z.type === "boss") {
+    // Hand-built procedural monster (monsters.ts) — see that file's own
+    // comment for why no licensed sprite replaces the old scale/tint reskin.
+    const pose: MonsterPose = { dir: face.dir, walking: face.moving, attacking: z.attacking, lungeFrac, now, phase };
+    ctx.save();
+    ctx.translate(screen.x + lungeOffset, screen.y);
+    if (z.type === "giant") renderGiantZombie(ctx, drawSize, pose);
+    else renderBossZombie(ctx, drawSize, pose);
+    ctx.restore();
   } else {
     const spritedType = z.type as SpritedZombieType;
     const sheet = z.attacking ? zombieAttackSheet(spritedType, face.dir) : zombieWalkSheet(spritedType, face.dir);
@@ -579,16 +750,6 @@ function renderZombie(ctx: CanvasRenderingContext2D, camera: Camera, z: ZombieSn
       ctx.scale(lungeScale, lungeScale);
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(sheet.image, frameIdx * sheet.frameWidth, 0, sheet.frameWidth, sheet.frameHeight, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
-      if (cfg.tint) {
-        // Giant/boss are the same art as normal, told apart by scale (above)
-        // plus a colour wash here, applied only to the sprite's own drawn
-        // pixels (source-atop) so it tints the character, not a surrounding
-        // box.
-        ctx.globalCompositeOperation = "source-atop";
-        ctx.fillStyle = cfg.tint;
-        ctx.fillRect(-drawSize / 2, -drawSize / 2, drawSize, drawSize);
-        ctx.globalCompositeOperation = "source-over";
-      }
       ctx.restore();
     } else {
       // Sprite not loaded yet (or failed) — a flat-colour placeholder so the
@@ -717,6 +878,17 @@ export function renderDeathEffects(ctx: CanvasRenderingContext2D, camera: Camera
       continue;
     }
 
+    if (e.type === "giant" || e.type === "boss") {
+      // Procedural collapse matching the procedural monster itself
+      // (monsters.ts) — no sprite "dead" frame exists for either.
+      ctx.save();
+      ctx.translate(x, y);
+      if (e.type === "giant") renderGiantDeath(ctx, drawSize, age / DEATH_EFFECT_MS);
+      else renderBossDeath(ctx, drawSize, age / DEATH_EFFECT_MS);
+      ctx.restore();
+      continue;
+    }
+
     if (!isReady(ZOMBIE_DEAD.image)) continue;
     const frameIdx = age > DEATH_EFFECT_MS / 2 ? ZOMBIE_DEAD.frameCount - 1 : Math.min(ZOMBIE_DEAD.frameCount - 2, Math.floor((age / DEATH_EFFECT_MS) * (ZOMBIE_DEAD.frameCount - 1)));
     ctx.save();
@@ -724,6 +896,24 @@ export function renderDeathEffects(ctx: CanvasRenderingContext2D, camera: Camera
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(ZOMBIE_DEAD.image, frameIdx * ZOMBIE_DEAD.frameWidth, 0, ZOMBIE_DEAD.frameWidth, ZOMBIE_DEAD.frameHeight, x - drawSize / 2, y - drawSize / 2, drawSize, drawSize);
     ctx.restore();
+  }
+}
+
+// One dramatic entrance flash per boss id, drawn at its live position for as
+// long as it's still fresh — main.ts owns the id -> first-seen-at map
+// (bossEntranceAt), this only draws it. A boss that dies mid-flash simply
+// stops being in `zombies` and its entry is left harmless/unused in the map
+// (same "small enough it never needs pruning" reasoning zombieFacing/
+// playerFacing already rely on).
+export function renderBossEntranceEffects(ctx: CanvasRenderingContext2D, camera: Camera, zombies: readonly ZombieSnapshot[], entranceAt: ReadonlyMap<string, number>, now: number): void {
+  for (const z of zombies) {
+    if (z.type !== "boss") continue;
+    const startedAt = entranceAt.get(z.id);
+    if (startedAt === undefined) continue;
+    const age = now - startedAt;
+    if (age < 0 || age > BOSS_ENTRANCE_MS) continue;
+    const screen = worldToScreen(camera, z.x, z.y);
+    renderBossEntrance(ctx, screen.x, screen.y, age / BOSS_ENTRANCE_MS);
   }
 }
 
@@ -977,10 +1167,29 @@ export function render(
   }
 }
 
+// Base footprint, in world units — round 3 of the visual overhaul enlarges
+// this from 44 to 64 specifically because the user rejected the previous
+// size as "a tiny structure in the middle" of the fortress interior. BASE_POS
+// has no physical collision footprint on either client or server (it isn't
+// in obstacles.ts's BUILDINGS list, and nothing server-side resolves
+// movement against a base radius), so this is a purely visual change with
+// zero effect on collision, interaction range, or any other gameplay number
+// — BASE_INTERACT_RANGE/BASE_ATTACK_RANGE (defense-config.ts) are untouched.
+const BASE_FOOTPRINT = 64;
+
 function renderBase(ctx: CanvasRenderingContext2D, base: { x: number; y: number }, scale: number, hp: number, maxHp: number): void {
-  const size = 44 * scale;
+  const size = BASE_FOOTPRINT * scale;
+  ctx.save();
+
+  // A dark ground-contact shadow first, same down-right light convention
+  // every other shadow in this project uses — at this larger footprint a
+  // flat structure with no shadow read as "floating", not "built".
+  ctx.fillStyle = "rgba(10, 10, 8, 0.4)";
+  ctx.beginPath();
+  ctx.ellipse(base.x + size * 0.05, base.y + size * 0.48, size * 0.52, size * 0.18, 0, 0, Math.PI * 2);
+  ctx.fill();
+
   if (isReady(BUILDING_STONE_TILE)) {
-    ctx.save();
     ctx.imageSmoothingEnabled = false;
     const ts = TERRAIN_TILE_SIZE * scale;
     for (let ty = -size / 2; ty < size / 2; ty += ts) {
@@ -990,15 +1199,59 @@ function renderBase(ctx: CanvasRenderingContext2D, base: { x: number; y: number 
         ctx.drawImage(BUILDING_STONE_TILE, 0, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE, base.x + tx, base.y + ty, dw, dh);
       }
     }
+
+    // A darker reinforced-roof band across the top third, same "flat colour-
+    // block roof plane" convention renderBuilding already uses for town
+    // buildings — gives the structure a top face instead of reading as one
+    // flat wall texture head-on.
+    const roofH = size * 0.34;
+    ctx.fillStyle = "rgba(20, 20, 24, 0.55)";
+    ctx.fillRect(base.x - size / 2, base.y - size / 2, size, roofH);
+
+    // A roof-mounted radio antenna with a blinking tip — the single most
+    // "this is the important structure" silhouette cue available without a
+    // dedicated sprite, and it reads at a glance even zoomed far out.
+    const antennaX = base.x + size * 0.22;
+    const antennaTopY = base.y - size / 2 - size * 0.32;
+    ctx.strokeStyle = "#5a5a5e";
+    ctx.lineWidth = Math.max(1, scale * 0.6);
+    ctx.beginPath();
+    ctx.moveTo(antennaX, base.y - size / 2 + roofH * 0.3);
+    ctx.lineTo(antennaX, antennaTopY);
+    ctx.stroke();
+    const blink = 0.5 + 0.5 * Math.sin(performance.now() / 500);
+    ctx.fillStyle = `rgba(255, 70, 70, ${0.5 + 0.5 * blink})`;
+    ctx.beginPath();
+    ctx.arc(antennaX, antennaTopY, Math.max(1.5, scale * 0.9), 0, Math.PI * 2);
+    ctx.fill();
+
+    // Corner hazard-stripe trim instead of one flat gold outline — reads as
+    // "marked installation", the same visual language barrier/crate accents
+    // (fortress-decor.ts) already use, so the base ties into that palette
+    // rather than keeping its own one-off gold border.
     ctx.strokeStyle = "rgba(255, 210, 90, 0.7)";
     ctx.lineWidth = 2;
     ctx.strokeRect(base.x - size / 2, base.y - size / 2, size, size);
-    // A dark "door" accent — simple Canvas geometry, same reasoning as the
-    // turret's drawn body: no LPC crop is specifically shaped like this
-    // project's single-entry vault/bunker door.
+    ctx.fillStyle = "#c9a227";
+    const stripeLen = size * 0.16;
+    ctx.fillRect(base.x - size / 2, base.y - size / 2, stripeLen, 3);
+    ctx.fillRect(base.x + size / 2 - stripeLen, base.y + size / 2 - 3, stripeLen, 3);
+
+    // The vault/bunker door — unchanged shape, scaled to the new footprint.
+    // Sandbags now flank it directly (fortress-decor.ts's own hand-placed
+    // pieces sit further out at the corners; this one pair is base-specific
+    // set-dressing, drawn here so it's guaranteed centred on the door
+    // regardless of BASE_POS).
+    const doorW = size * 0.3;
+    const doorH = size * 0.4;
     ctx.fillStyle = "#1c1c20";
-    ctx.fillRect(base.x - size * 0.18, base.y - size * 0.1, size * 0.36, size * 0.45);
-    ctx.restore();
+    ctx.fillRect(base.x - doorW / 2, base.y + size / 2 - doorH - size * 0.04, doorW, doorH);
+    ctx.strokeStyle = "#0c0c0e";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(base.x - doorW / 2, base.y + size / 2 - doorH - size * 0.04, doorW, doorH);
+    // A thin warm light line under the door — "powered, occupied" cue.
+    ctx.fillStyle = "rgba(255, 200, 110, 0.8)";
+    ctx.fillRect(base.x - doorW / 2 + 2, base.y + size / 2 - size * 0.05, doorW - 4, 1.5);
   } else {
     // Stone tile not loaded yet — a flat rectangular placeholder (matches
     // the shape renderBase draws once the tile is ready) so the base never
@@ -1006,6 +1259,7 @@ function renderBase(ctx: CanvasRenderingContext2D, base: { x: number; y: number 
     ctx.fillStyle = "#4477cc";
     ctx.fillRect(base.x - size / 2, base.y - size / 2, size, size);
   }
+  ctx.restore();
 
   // In-world HP bar — same shape/position convention renderTurret already
   // uses above its own plate, now the base's own (the one entity that had
@@ -1014,7 +1268,7 @@ function renderBase(ctx: CanvasRenderingContext2D, base: { x: number; y: number 
   const barWidth = Math.max(24, size * 0.6);
   const barHeight = 4;
   const barX = base.x - barWidth / 2;
-  const barY = base.y - size / 2 - 10;
+  const barY = base.y - size / 2 - 14;
   const fraction = Math.max(0, Math.min(1, hp / maxHp));
   ctx.fillStyle = "#552222";
   ctx.fillRect(barX, barY, barWidth, barHeight);
@@ -1027,6 +1281,20 @@ function renderBase(ctx: CanvasRenderingContext2D, base: { x: number; y: number 
 // default facing every time it loses its target.
 const turretFacing = new Map<string, number>();
 
+// One accent colour per turret level — same "a visible colour/thickness
+// progression per level" convention WALL_VISUALS already establishes for the
+// wall, so a glance at either defence tells you its tier without reading the
+// HUD number. Distinct from WALL_VISUALS's own palette (turret runs warm
+// orange -> hot red -> gold so it never gets mistaken for the wall's own
+// level colour at a glance).
+const TURRET_LEVEL_ACCENT: Record<number, string> = {
+  1: "#cc6633",
+  2: "#e0893a",
+  3: "#e0b23a",
+  4: "#e0483a",
+  5: "#ffd166",
+};
+
 // Clear, flat-shaded 2D turret: a square base plate (reads as bolted to the
 // ground) with a round traversing body and a drawn gun barrel on top — no
 // LPC crop is shaped like a turret, so (CLAUDE.md: "prefer simple Canvas
@@ -1037,6 +1305,7 @@ function renderTurret(ctx: CanvasRenderingContext2D, camera: Camera, turret: Tur
   const scale = cameraScale(camera);
   const screen = worldToScreen(camera, turret.x, turret.y);
   const range = TURRET_LEVELS[turret.level]?.range ?? TURRET_LEVELS[1].range;
+  const accent = TURRET_LEVEL_ACCENT[turret.level] ?? TURRET_LEVEL_ACCENT[1];
 
   ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
   ctx.lineWidth = 1;
@@ -1087,22 +1356,51 @@ function renderTurret(ctx: CanvasRenderingContext2D, camera: Camera, turret: Tur
   ctx.rotate(angle);
   ctx.fillStyle = "#3a3d42";
   ctx.fillRect(0, -barrelWidth / 2, barrelLength, barrelWidth);
-  ctx.strokeStyle = "#cc6633";
+  ctx.strokeStyle = accent;
   ctx.lineWidth = 1;
   ctx.strokeRect(0, -barrelWidth / 2, barrelLength, barrelWidth);
   // Muzzle tip accent.
-  ctx.fillStyle = "#cc6633";
+  ctx.fillStyle = accent;
   ctx.fillRect(barrelLength - 3, -barrelWidth / 2, 3, barrelWidth);
+  // Level 2+ fires at multiple targets at once (TURRET_LEVELS'
+  // multiTargetCount) — a second/third thin barrel alongside the main one
+  // reads as "hits more than one thing" without needing separate per-target
+  // geometry, capped at 3 drawn barrels so level 4 (multiTargetCount 4)
+  // doesn't visually overcrowd a body this small.
+  const extraBarrels = Math.min(2, (TURRET_LEVELS[turret.level]?.multiTargetCount ?? 1) - 1);
+  for (let i = 1; i <= extraBarrels; i++) {
+    const side = i % 2 === 0 ? -1 : 1;
+    const off = side * (barrelWidth * 0.9) * Math.ceil(i / 2);
+    ctx.fillStyle = "#3a3d42";
+    ctx.fillRect(0, off - barrelWidth / 2, barrelLength * 0.75, barrelWidth * 0.7);
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(0, off - barrelWidth / 2, barrelLength * 0.75, barrelWidth * 0.7);
+  }
   ctx.restore();
 
-  // Turret body (the traversing round housing the barrel mounts to).
+  // Turret body (the traversing round housing the barrel mounts to). A
+  // level 5's splash damage (splashDamagePercent/splashRadius) is a
+  // different attack shape from every other level's multi-target hitscan —
+  // a thin outer ring around the body (not drawn for any other level) is
+  // the one static "this one explodes" tell, independent of the accent
+  // colour every level already gets.
   ctx.beginPath();
   ctx.arc(screen.x, screen.y, bodyRadius, 0, Math.PI * 2);
   ctx.fillStyle = "#8a8f98";
   ctx.fill();
-  ctx.strokeStyle = "#cc6633";
+  ctx.strokeStyle = accent;
   ctx.lineWidth = 1.5;
   ctx.stroke();
+  if ((TURRET_LEVELS[turret.level]?.splashRadius ?? 0) > 0) {
+    ctx.strokeStyle = accent;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(screen.x, screen.y, bodyRadius + 3, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
   ctx.fillStyle = "#1c1c1c";
   ctx.font = "bold 10px system-ui, sans-serif";
   ctx.textAlign = "center";
@@ -1129,6 +1427,77 @@ const PLAYER_FLASH_MS = 220;
 // footprint to a normal zombie's own draw size (32 * 1.1 * 0.9 ≈ 31.7), so
 // neither reads as oddly large/small next to the other.
 const PLAYER_DRAW_SIZE = 34;
+
+// A remote player's sprite facing (Direction: up/down/left/right) converted
+// to a representative angle for its cosmetic weapon model — only used for
+// non-local players, who have no broadcast continuous aim angle (see
+// drawPlayerWeapon's call site).
+function directionToAngle(dir: Direction): number {
+  switch (dir) {
+    case "up":
+      return -Math.PI / 2;
+    case "down":
+      return Math.PI / 2;
+    case "left":
+      return Math.PI;
+    case "right":
+      return 0;
+  }
+}
+
+// A compact survivor carbine, drawn in world-space pixels at the player's
+// own feet/hand level and rotated to follow aimAngle (visual overhaul
+// request #3: "survivor rifle/carbine style firearm... weapon orientation
+// follows aiming direction"). Proportioned relative to drawSize (the
+// player's own on-screen size) so it scales correctly with zoom and never
+// looks oversized/undersized next to the character. Purely a held prop —
+// no hitbox, no collision, no effect on PISTOL_RANGE/PISTOL_CONE_HALF_ANGLE,
+// which stay entirely server-side (game-state.ts).
+function drawPlayerWeapon(ctx: CanvasRenderingContext2D, screenX: number, screenY: number, drawSize: number, angle: number): void {
+  const len = drawSize * 0.72;
+  const bodyW = drawSize * 0.1;
+  ctx.save();
+  ctx.translate(screenX, screenY + drawSize * 0.08); // roughly hip/hand height, just below the sprite's own centre
+  ctx.rotate(angle);
+
+  // Barrel + receiver, drawn as one simple silhouette from grip to muzzle.
+  ctx.fillStyle = "#2b2b2e";
+  ctx.beginPath();
+  ctx.moveTo(-len * 0.18, -bodyW * 0.55);
+  ctx.lineTo(len * 0.62, -bodyW * 0.3);
+  ctx.lineTo(len * 0.62, bodyW * 0.3);
+  ctx.lineTo(-len * 0.18, bodyW * 0.55);
+  ctx.closePath();
+  ctx.fill();
+
+  // Barrel tip, slightly lighter so the muzzle end reads distinctly.
+  ctx.fillStyle = "#3f3f44";
+  ctx.fillRect(len * 0.5, -bodyW * 0.22, len * 0.16, bodyW * 0.44);
+
+  // Stock, angled back from the grip.
+  ctx.fillStyle = "#4a3a28";
+  ctx.beginPath();
+  ctx.moveTo(-len * 0.18, -bodyW * 0.4);
+  ctx.lineTo(-len * 0.42, -bodyW * 0.22);
+  ctx.lineTo(-len * 0.42, bodyW * 0.22);
+  ctx.lineTo(-len * 0.18, bodyW * 0.4);
+  ctx.closePath();
+  ctx.fill();
+
+  // Magazine, hanging down from the body just forward of the grip — the
+  // single most recognisable "this is a rifle, not a pistol" silhouette
+  // cue at this draw size.
+  ctx.fillStyle = "#1f1f22";
+  ctx.beginPath();
+  ctx.moveTo(-len * 0.02, bodyW * 0.3);
+  ctx.lineTo(len * 0.1, bodyW * 0.3);
+  ctx.lineTo(len * 0.06, bodyW * 1.1);
+  ctx.lineTo(-len * 0.06, bodyW * 1.1);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+}
 
 function renderPlayer(
   ctx: CanvasRenderingContext2D,
@@ -1198,6 +1567,21 @@ function renderPlayer(
     const phase = hashStr(p.id);
     const frameIdx = face.moving ? Math.floor(now / 130 + phase) % sheet.frameCount : 0;
     ctx.imageSmoothingEnabled = false;
+
+    // A soft team-colour ground glow BEHIND the sprite (round 3 of the
+    // visual overhaul, request "make the player easier to recognise without
+    // changing gameplay collision sizes or interaction ranges" — this draws
+    // UNDER the existing sprite at the existing drawSize, so hitbox/footprint
+    // perception is untouched; it only adds a readability cue against a
+    // busier, more decorated environment).
+    const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, drawSize * 0.62);
+    glow.addColorStop(0, `${color}55`);
+    glow.addColorStop(1, `${color}00`);
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, drawSize * 0.62, 0, Math.PI * 2);
+    ctx.fill();
+
     ctx.drawImage(sheet.image, frameIdx * sheet.frameWidth, 0, sheet.frameWidth, sheet.frameHeight, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
     if (flashFrac > 0) {
       // Red tint applied only to the sprite's own drawn pixels (source-
@@ -1231,14 +1615,27 @@ function renderPlayer(
   ctx.restore();
   ctx.globalAlpha = 1;
 
-  if (isSelf && p.status === "alive") {
-    const aimLength = 30;
-    ctx.strokeStyle = LOCAL_PLAYER_COLOR;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(screen.x, screen.y);
-    ctx.lineTo(screen.x + Math.cos(aimAngle) * aimLength, screen.y + Math.sin(aimAngle) * aimLength);
-    ctx.stroke();
+  // A proper held weapon, replacing the old bare aim-line stroke (visual
+  // overhaul request: "the player should use a proper gun-like weapon...
+  // weapon orientation follows aiming direction", and separately "the
+  // current yellow beam is not acceptable" — that beam was
+  // renderShotEffects' old fixed-length tracer line, removed entirely; see
+  // renderBullets below for what replaced it). No licensed firearm sprite
+  // exists in this project's vendored asset packs (LPC/Kenney — checked;
+  // neither includes a weapon sheet), so this is hand-drawn procedural
+  // Canvas art, same precedent as turrets/monsters.ts/fortress-decor.ts.
+  // Only drawn while alive — a downed/dead player already renders visually
+  // "fallen" above and shouldn't still be brandishing a weapon.
+  if (p.status === "alive") {
+    // The local player has a real continuous aim angle (input.ts tracks the
+    // mouse every frame); a remote player's is never broadcast
+    // (protocol.ts's PlayerSnapshot has no aimAngle field — only this
+    // client's OWN input does), so its weapon instead follows the same
+    // movement-derived facing direction its sprite already uses, converted
+    // to an angle. This is an approximation for a REMOTE player only — it
+    // just orients a cosmetic weapon model, never anything authoritative.
+    const weaponAngle = isSelf ? aimAngle : directionToAngle(face.dir);
+    drawPlayerWeapon(ctx, screen.x, screen.y, drawSize, weaponAngle);
   }
 
   if (p.status !== "dead") {
@@ -1327,13 +1724,32 @@ export function renderDayProgress(
   const centerX = canvasWidth / 2;
   const activeBadges = composition ? WAVE_BADGES.filter((b) => composition[b.key] > 0) : [];
   const panelHeight = 78 + (activeBadges.length > 0 ? 20 : 0);
+  const panelX = centerX - 130;
+  const panelW = 260;
 
-  // A translucent dark panel behind the whole strip — readable against any
-  // terrain tile or zombie crossing underneath it, not just whichever colour
-  // happens to be there this frame.
+  // Same "military instrument panel" language as the DOM HUD (index.html's
+  // #hud): a translucent dark body, a corner notch cut from two of its
+  // corners (Canvas has no clip-path shorthand, so this is drawn as an
+  // explicit polygon path), and a bright accent bar along the top edge —
+  // visually one system with the DOM panels rather than a plain rectangle
+  // that happens to sit above them.
   ctx.save();
-  ctx.fillStyle = "rgba(10, 10, 8, 0.55)";
-  ctx.fillRect(centerX - 130, 4, 260, panelHeight);
+  const notch = 10;
+  ctx.beginPath();
+  ctx.moveTo(panelX + notch, 4);
+  ctx.lineTo(panelX + panelW, 4);
+  ctx.lineTo(panelX + panelW, 4 + panelHeight - notch);
+  ctx.lineTo(panelX + panelW - notch, 4 + panelHeight);
+  ctx.lineTo(panelX, 4 + panelHeight);
+  ctx.lineTo(panelX, 4 + notch);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(20, 16, 11, 0.82)";
+  ctx.fill();
+  ctx.strokeStyle = "#6b5a42";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#d4af37";
+  ctx.fillRect(panelX + notch, 4, panelW - notch, 3);
   ctx.restore();
 
   ctx.textAlign = "center";
@@ -1350,11 +1766,16 @@ export function renderDayProgress(
   const barY = 44;
   const fraction = total > 0 ? killed / total : 0;
 
-  ctx.strokeStyle = "#888";
+  ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+  ctx.fillRect(barX, barY, barWidth, barHeight);
+  const fillGrad = ctx.createLinearGradient(barX, 0, barX + barWidth * fraction, 0);
+  fillGrad.addColorStop(0, "#3f7a3a");
+  fillGrad.addColorStop(1, "#6fc24a");
+  ctx.fillStyle = fillGrad;
+  ctx.fillRect(barX, barY, barWidth * fraction, barHeight);
+  ctx.strokeStyle = "#6b5a42";
   ctx.lineWidth = 2;
   ctx.strokeRect(barX, barY, barWidth, barHeight);
-  ctx.fillStyle = "#4caf50";
-  ctx.fillRect(barX, barY, barWidth * fraction, barHeight);
 
   ctx.fillStyle = "#fff";
   ctx.font = "14px system-ui, sans-serif";
@@ -1433,6 +1854,11 @@ export function renderCrosshair(ctx: CanvasRenderingContext2D, camera: Camera, m
   ctx.stroke();
 }
 
+// Turret tracers ONLY now (the player's own shot uses the real projectile
+// system below — Bullet/renderBullets — not this fixed-length line). Turret
+// fire isn't part of this visual-overhaul request, so its presentation is
+// deliberately left exactly as it already was rather than touched
+// incidentally.
 export interface ShotEffect {
   x: number;
   y: number;
@@ -1468,11 +1894,100 @@ export function renderShotEffects(
     ctx.lineTo(x2, y2);
     ctx.stroke();
 
-    ctx.fillStyle = `rgba(255, 220, 120, ${alpha})`;
+    renderMuzzleFlash(ctx, x1, y1, e.angle, alpha);
+  }
+}
+
+// The player's own shot (visual overhaul requests #2-4): a real projectile
+// that travels from the muzzle to an EXPLICIT endpoint over a short, fast
+// duration, instead of the old fixed-length yellow line drawn the instant
+// the trigger is pulled. `toX/toY` is computed by main.ts: either the
+// zombie a CLIENT-SIDE mirror of the server's own resolveShot logic
+// predicts will be hit (so the bullet visually arrives at that zombie), or
+// a point PISTOL_RANGE away along the aim angle if nothing was in range/
+// cone (so a miss clearly travels to the weapon's real max range and stops
+// there, rather than an infinite line). This mirror is for the VISUAL
+// endpoint only — main.ts's own comment on it is explicit that it never
+// decides damage; the server's authoritative "shoot" handling already ran
+// by the time this plays.
+export interface Bullet {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  firedAt: number;
+}
+
+export const BULLET_TRAVEL_MS = 90; // fast, but slow enough over PISTOL_RANGE to read as a visible travelling object, not an instant snap
+const BULLET_TRAIL_FRAC = 0.22; // fraction of the travelled distance the trail extends back from the bullet's current position
+
+export function renderBullets(ctx: CanvasRenderingContext2D, camera: Camera, bullets: readonly Bullet[], now: number): void {
+  for (const b of bullets) {
+    const age = now - b.firedAt;
+    if (age < 0 || age > BULLET_TRAVEL_MS) continue;
+    const t = age / BULLET_TRAVEL_MS;
+    const angle = Math.atan2(b.toY - b.fromY, b.toX - b.fromX);
+    const from = worldToScreen(camera, b.fromX, b.fromY);
+    const to = worldToScreen(camera, b.toX, b.toY);
+
+    if (age < 16) renderMuzzleFlash(ctx, from.x, from.y, angle, 1);
+
+    const x = from.x + (to.x - from.x) * t;
+    const y = from.y + (to.y - from.y) * t;
+    const tailT = Math.max(0, t - BULLET_TRAIL_FRAC);
+    const tailX = from.x + (to.x - from.x) * tailT;
+    const tailY = from.y + (to.y - from.y) * tailT;
+
+    // A short bright trail behind the bullet body — reads as "fast-moving
+    // projectile" without the old tracer's full-screen length.
+    const grad = ctx.createLinearGradient(tailX, tailY, x, y);
+    grad.addColorStop(0, "rgba(255, 230, 150, 0)");
+    grad.addColorStop(1, "rgba(255, 244, 200, 0.9)");
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(x1, y1, 2 + 6 * alpha, 0, Math.PI * 2);
+    ctx.moveTo(tailX, tailY);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+
+    // The bullet body itself — a small bright core, the actual "visible
+    // projectile" the request asked for (not just a line).
+    ctx.fillStyle = "#fff8dd";
+    ctx.beginPath();
+    ctx.arc(x, y, 2.2, 0, Math.PI * 2);
     ctx.fill();
   }
+}
+
+// A brief 4-point star-burst at the muzzle, oriented along the shot's own
+// angle — reads as a distinct "weapon just fired" flash rather than the
+// plain fading dot this used to be, for every turret tracer AND the
+// player's own muzzle flash (renderBullets, below, calls this directly for
+// the player's own weapon).
+function renderMuzzleFlash(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number, alpha: number): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = alpha;
+  const core = 3 + 5 * alpha;
+  const spike = core * 2.6;
+  ctx.fillStyle = "rgba(255, 245, 200, 0.95)";
+  ctx.beginPath();
+  ctx.moveTo(spike, 0);
+  ctx.lineTo(core * 0.3, core * 0.35);
+  ctx.lineTo(0, 0);
+  ctx.lineTo(core * 0.3, -core * 0.35);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "rgba(255, 210, 110, 0.85)";
+  ctx.beginPath();
+  ctx.moveTo(0, -core);
+  ctx.lineTo(core * 0.25, 0);
+  ctx.lineTo(0, core);
+  ctx.lineTo(-core * 0.25, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 }
 
 // --- Zombie attack feedback: impact bursts, a flying zombie's projectile,

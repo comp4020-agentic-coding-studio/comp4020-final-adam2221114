@@ -274,7 +274,39 @@ Keep Start / Pause / Resume / Retry Current Day / Restart behaviour clear —
 Retry Current Day only appears after a Game Over and is distinct from
 Restart (which resets to Day 1).
 Do not hide important game state behind decorative UI.
-When adding visual feedback, prefer simple Canvas geometry over introducing a new rendering framework.
+Prefer Canvas-based rendering (sprites, procedural drawing, particles) over introducing a new rendering framework or engine.
+Visual scope rules (added 2026-10-24, visual overhaul)
+High-quality visuals are now an explicit, authorised priority for this
+project, not an unrelated nice-to-have: detailed player/zombie/environment
+artwork, directional movement/attack/death animation, combat VFX (muzzle
+flashes, tracers, impacts, blood, explosions), dynamic lighting/shadows/
+particles, and a professional post-apocalyptic-survival HUD are all in
+scope, and "do not add features just because they seem impressive" above
+does not block this category of work.
+This is a scope change for VISUALS ONLY. It does not authorise changing
+gameplay mechanics, combat balancing/damage values, server-authoritative
+logic, persistence, networking, or any of the "do not add" list above —
+those rules still apply at full strength. A visual change must not become a
+second source of gameplay truth (see Architecture rules) and must not
+change what the server actually decides.
+Prefer real, properly licensed free assets (recorded with source, creator,
+licence, and attribution requirement) over new original artwork; prefer
+reusing/extending already-licensed assets already in the repo (the LPC
+sprites, the Kenney CC0 UI pack) over introducing a new source. Only build
+original Canvas/SVG-drawn artwork where no suitably licensed asset is
+available, and say so plainly rather than silently substituting a thin
+placeholder.
+Do not reintroduce the CraftPix free-tier assets the UI pack was already
+moved off (see README's "Visual style" section and PROCESS.md's
+UI-asset-swap entry) — that licence forbids redistributing source art files
+in this public repo.
+Keep the rendering/animation/VFX code organised by concern (sprites,
+animation state, particles/effects, HUD) rather than piling everything into
+render.ts, but do not migrate off Canvas or introduce a second rendering
+framework without first demonstrating a clear technical need.
+Performance: target ~60 FPS with multiple players and large zombie waves;
+cache loaded images/sprite data rather than reloading per frame; keep
+particle/lighting effects cheap enough not to regress frame rate.
 Game-state rules
 Use explicit game phases:
 - waiting

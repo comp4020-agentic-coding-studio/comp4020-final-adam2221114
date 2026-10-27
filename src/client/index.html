@@ -5,16 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Zombie base defence</title>
     <style>
-      /* Warm stone/brick pixel-art palette, matched to the LPC world tiles
-         (see assets/ui-kenney/NOTES.md for the icon/panel sources). Panels
-         use a Kenney 9-slice texture via border-image; everything else is
-         flat colour, kept deliberately plain per CLAUDE.md's "clarity over
-         decoration" and "prefer simple Canvas geometry... " UI rules — only
-         the accent colour values below changed from the previous cooler
-         grey/military-green scheme; panel art and layout are untouched. */
+      /* Dark post-apocalyptic military HUD (2026-10-24 visual overhaul,
+         round 2). The Kenney 9-slice panel texture (CC0, no network access
+         available to source a fancier one — see PROCESS.md) is a genuinely
+         plain flat-grey rectangle on its own, so it's now used only as a
+         background FILL under a styled frame this project draws itself:
+         an angled-corner clip, a bright top accent bar, and a label strip —
+         real visual structure built from CSS, not a new binary asset.
+         Palette unchanged (still the warm stone/brick scheme matched to the
+         LPC world tiles); what changed is panel treatment and layout. */
       :root {
         --bg: #1a1510;
         --panel-dark: #2b2219;
+        --panel-glass: rgba(20, 16, 11, 0.82);
         --text: #ede4d3;
         --text-dim: #a89a85;
         --accent-green: #6f9a57;
@@ -22,6 +25,7 @@
         --accent-gold: #d4af37;
         --accent-yellow: #f0c929;
         --border-light: #6b5a42;
+        --hud-corner: 10px;
       }
       html,
       body {
@@ -44,21 +48,59 @@
         cursor: none;
       }
 
-      /* --- Shared 9-slice panel chrome (Kenney "Pixel UI Pack", CC0) --- */
+      /* --- Panel chrome: a clipped-corner glass pane (gives every HUD
+         element the same angular "military display" silhouette instead of a
+         plain rectangle) over the Kenney 9-slice texture as a subtle
+         underlying fill, plus a bright accent bar along the top edge. The
+         clip-path corners are deliberately small and axis-aligned (not a
+         full diamond cut) so text/icons inside never collide with the cut. */
       #hud,
       #team-panel,
       #interact-menu,
       .phase-panel,
       #enemy-intro,
       #character-select {
-        border-style: solid;
-        border-width: 16px;
-        border-image-source: url(/sprites/ui/panels/panel-grey-dark.png);
-        border-image-slice: 16 fill;
-        border-image-width: 16px;
-        border-image-repeat: stretch;
+        position: relative;
+        border: 2px solid var(--border-light);
+        background:
+          linear-gradient(var(--panel-glass), var(--panel-glass)),
+          url(/sprites/ui/panels/panel-grey-dark.png);
+        background-size:
+          100% 100%,
+          16px 16px;
+        clip-path: polygon(
+          var(--hud-corner) 0,
+          100% 0,
+          100% calc(100% - var(--hud-corner)),
+          calc(100% - var(--hud-corner)) 100%,
+          0 100%,
+          0 var(--hud-corner)
+        );
         image-rendering: pixelated;
         color: var(--text);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+      }
+      /* The accent bar is a separate ::before (not border-top) so it isn't
+         cut by the parent's own clip-path corner. */
+      #hud::before,
+      #team-panel::before,
+      #interact-menu::before,
+      .phase-panel::before,
+      #enemy-intro::before,
+      #character-select::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: var(--hud-corner);
+        right: 0;
+        height: 3px;
+        background: var(--accent-gold);
+      }
+      .phase-panel.danger::before {
+        background: var(--accent-red);
+      }
+      .phase-panel.success::before {
+        background: var(--accent-green);
       }
       .ui-icon {
         display: inline-block;
@@ -80,14 +122,67 @@
         width: min(320px, calc(100vw - 16px));
       }
       #hud {
-        font-size: 14px;
-        line-height: 2;
-        padding: 6px 14px;
+        font-size: 13px;
+        padding: 0 0 6px;
         white-space: nowrap;
       }
+      /* Header strip: a solid band (not the translucent glass body below
+         it) so the HUD reads as "instrument panel with a label" rather than
+         a borderless list of numbers — the day counter is the single most
+         important readout, so it alone gets top billing. */
+      #hud-heading {
+        background: rgba(0, 0, 0, 0.35);
+        padding: 7px 14px 6px calc(14px + var(--hud-corner) * 0.4);
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        font-size: 15px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        border-bottom: 1px solid rgba(212, 175, 55, 0.3);
+        margin-bottom: 6px;
+      }
+      #hud-rows {
+        padding: 0 14px;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        row-gap: 3px;
+        column-gap: 10px;
+        align-items: center;
+      }
+      .hud-row-label {
+        color: var(--text-dim);
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .hud-row-value {
+        text-align: right;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      .hud-value-good {
+        color: var(--accent-green);
+      }
+      .hud-value-warn {
+        color: var(--accent-yellow);
+      }
+      .hud-value-critical {
+        color: var(--accent-red);
+      }
+      #hud .hud-note {
+        padding: 5px 14px 0;
+        color: var(--text-dim);
+        font-size: 11px;
+        white-space: normal;
+        line-height: 1.4;
+      }
       #hud .rejected {
+        padding: 5px 14px 0;
         color: var(--accent-red);
         font-weight: 700;
+        white-space: normal;
+        line-height: 1.4;
       }
 
       /* --- Meter bars: track + proportional fill, numbers always shown
@@ -159,18 +254,42 @@
         right: 8px;
         font-size: 12px;
         font-weight: 700;
-        padding: 4px 10px;
-        border: 2px solid var(--border-light);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 5px 12px 5px 10px;
+        border: 1px solid var(--border-light);
         color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(20, 16, 11, 0.85);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      }
+      /* A small status dot instead of relying on border colour alone — a
+         glanceable connection indicator consistent with the threshold-
+         coloured HUD values elsewhere (index.html's #hud-rows). */
+      #conn::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex: 0 0 auto;
       }
       #conn.connected {
-        background: #2c3a24;
         border-color: var(--accent-green);
+      }
+      #conn.connected::before {
+        background: var(--accent-green);
+        box-shadow: 0 0 5px var(--accent-green);
       }
       #conn.connecting,
       #conn.disconnected {
-        background: #3a2420;
         border-color: var(--accent-red);
+      }
+      #conn.connecting::before,
+      #conn.disconnected::before {
+        background: var(--accent-red);
+        box-shadow: 0 0 5px var(--accent-red);
       }
 
       footer {
@@ -196,14 +315,17 @@
         font-weight: 700;
         letter-spacing: 0.03em;
         text-transform: uppercase;
-        padding: 8px 16px;
-        border: 2px solid var(--border-light);
+        padding: 9px 18px;
+        border: 1px solid var(--border-light);
+        border-top: 2px solid var(--accent-gold);
         background: var(--panel-dark);
         color: var(--text);
         cursor: pointer;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
       }
       #controls button:hover {
         background: #352a1f;
+        border-top-color: var(--accent-yellow);
       }
       #controls button:active {
         transform: translateY(1px);
@@ -231,11 +353,15 @@
         width: min(320px, calc(100vw - 64px));
         box-sizing: border-box;
       }
+      /* Danger/success recolour the border + accent bar (::before above)
+         instead of swapping the underlying panel texture — the clip-path
+         frame is now the panel's main visual identity, so one consistent
+         shape just changes colour rather than switching art files. */
       .phase-panel.danger {
-        border-image-source: url(/sprites/ui/panels/panel-red-dark.png);
+        border-color: var(--accent-red);
       }
       .phase-panel.success {
-        border-image-source: url(/sprites/ui/panels/panel-green-dark.png);
+        border-color: var(--accent-green);
       }
       .phase-title {
         font-size: 28px;
@@ -538,13 +664,15 @@
         display: none;
       }
       .prompt-hint {
-        background: #16110c;
-        border: 2px solid var(--border-light);
+        background: rgba(20, 16, 11, 0.88);
+        border: 1px solid var(--accent-gold);
+        border-left-width: 3px;
         color: var(--text);
-        padding: 4px 10px;
+        padding: 5px 12px;
         font-size: 12px;
         font-weight: 700;
         letter-spacing: 0.02em;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
       }
     </style>
   </head>

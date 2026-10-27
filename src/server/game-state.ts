@@ -5,7 +5,7 @@
 // (wall pulse radius, turret splash radius, melee/aggro ranges, boss
 // damage/speed, etc.) a reasonable default was chosen and is called out in
 // the comment next to it — see PROCESS.md for the full list of assumptions.
-import { flowDirectionAt, isWithinWallInterior, lineOfSightClear, nearestRectDistance, resolveMove, wallRectsForPlayers, wallRectsForZombies } from "./obstacles.ts";
+import { flowDirectionAt, isWithinWallInterior, lineOfSightClear, nearestObstaclePoint, nearestRectDistance, resolveMove, wallRectsForPlayers, wallRectsForZombies, type Rect } from "./obstacles.ts";
 
 export interface Vec2 {
   x: number;
@@ -78,6 +78,15 @@ export interface Zombie {
   attacksLanded: number;
   lastHitKind: "player" | "turret" | "wall" | "base" | null;
   lastHitTargetId: string | null;
+  // Local obstacle-avoidance hysteresis (see advanceZombie's avoidanceStep
+  // comment): which side (+1/-1) a zombie committed to going around an
+  // obstacle on, kept so it doesn't re-decide every tick and flip-flop
+  // between two locally-equal options. Cleared the instant its normal
+  // step (flow-field or direct-lerp) makes real progress again, so this
+  // never outlives the one obstacle it was navigating around and never
+  // becomes a second source of position truth — it is a tie-breaker, not a
+  // route.
+  avoidSide: 1 | -1 | null;
 }
 
 export type PlayerStatus = "alive" | "downed" | "dead";
@@ -149,7 +158,15 @@ export const PLAYER_SPEED = 150; // units/second
 export const PLAYER_START_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 + 60 };
 
 export const PISTOL_DAMAGE = 30;
-export const PISTOL_RANGE = 600;
+// Was 600 — on a 1000x1000 map (MAP_SIZE) that reached almost the full
+// diagonal, which read in play as "no real range limit" (a player's shot
+// visually crossed the whole screen at default zoom, DEFAULT_VIEW_SIZE=420
+// in camera.ts). Reduced to a clearly finite firearm range: longer than
+// every turret except the top-level splash turret (TURRET_LEVELS' ranges
+// top out at 300), but well under a third of the map, so a target at the
+// far edge of the default camera view is genuinely out of range rather than
+// always hittable. Damage/cadence are unchanged — this is a range-only fix.
+export const PISTOL_RANGE = 320;
 export const PISTOL_CONE_HALF_ANGLE = 0.15; // radians, ~8.6 degrees either side of aimAngle
 
 export const XP_PER_KILL = 50;
@@ -421,6 +438,7 @@ export function spawnZombie(type: ZombieType, day: number, pos: Vec2): Zombie {
     attacksLanded: 0,
     lastHitKind: null,
     lastHitTargetId: null,
+    avoidSide: null,
   };
 }
 
@@ -522,6 +540,120 @@ export function pickTarget(zombiePos: Vec2, players: readonly Player[]): { pos: 
   return { pos: BASE_POS, isPlayer: false, playerId: null };
 }
 
+// Local obstacle-avoidance fallback for a real stuck bug found by
+// simulation (not a hypothetical): obstacles.ts's flow field stores ONE
+// direction per 25-unit grid cell, computed from that cell's centre, and is
+// never recomputed per zombie or per tick (CLAUDE.md's invariant — "a
+// static, precomputed flow field toward the base... no per-target dynamic
+// search, no runtime recomputation"). But obstacles.ts's own
+// COLLISION_MARGIN inflates every building's blocked region past its actual
+// edge, so a zombie's exact continuous position — even inside a cell whose
+// centre is nominally free — can sit close enough to a building that the
+// cell's one stored direction is blocked at that precise point. Since
+// neither the field nor the zombie's own position changes on its own, the
+// normal step (flow-field OR direct-lerp, whichever advanceZombie picked)
+// re-blocks on the IDENTICAL direction every tick forever: a genuine
+// permanent stuck state, confirmed by scanning the real map's grid cells
+// against the compiled collision code, not resolveMove's routine
+// wall-corner sliding and not mere cosmetic jitter.
+//
+// This does NOT touch or recompute the flow field (still a single cached
+// O(1) lookup built once at startup); it only runs on the rare tick where
+// the zombie's normal step made negligible progress. It steers TANGENT to
+// the real nearest obstacle surface (obstacles.ts's nearestObstaclePoint —
+// a stable geometric computation, the vector from that nearest boundary
+// point to the zombie, rotated 90 degrees) rather than picking a direction
+// by comparing how much progress a fan of candidate angles happens to make:
+// an earlier version of this fix did exactly that fan-comparison and
+// visibly oscillated in place, because which candidate "won" depended on
+// sub-pixel progress deltas that flip from tick to tick as the zombie's
+// position itself shifts by fractions of a unit — a geometric tangent off
+// the obstacle's own boundary has no such noise.
+//
+// preferredSide is what keeps the zombie committed to ONE side of the
+// obstacle: the tangent direction is perpendicular to the surface normal,
+// which is correct up to a sign (clockwise vs counterclockwise around the
+// obstacle) — without memory of which sign was already chosen, a zombie
+// whose desired direction sits exactly on the obstacle's axis has both
+// signs look equally good and flip-flops tick to tick. Once a sign is
+// picked, the caller (advanceZombie) keeps passing it back in on each
+// subsequent stuck tick until the zombie's normal step succeeds again, so
+// it commits to skirting ONE side of the one obstacle it's currently stuck
+// against — a tie-breaker held only as long as this specific detour lasts,
+// not a cached route, and irrelevant to any zombie that isn't currently
+// stuck.
+//
+// desiredDir (NOT aimPos's straight-line bearing) is which tangent gets
+// picked: a live repro found that choosing "whichever tangent unblocks
+// movement first" can pick a tangent pointing AWAY from the flow field's
+// own intended direction (useFlowField routes around this exact building to
+// the west, but the first-unblocked tangent sometimes pointed east) — the
+// flow field then pulls the zombie right back on the next tick it regains
+// LOS/alignment, producing a real infinite back-and-forth loop (confirmed
+// via simulation: a repeating position cycle hundreds of ticks long,
+// distinct from the earlier single-tick-flip oscillation already fixed
+// above). Scoring each tangent by alignment (dot product) with the tick's
+// actual intended direction keeps the detour walking the same general way
+// advanceZombie already wanted to go, so it cooperates with the flow field
+// instead of fighting it.
+function avoidanceStep(
+  pos: Vec2,
+  desiredDir: Vec2,
+  step: number,
+  wallRects: readonly Rect[],
+  preferredSide: 1 | -1 | null,
+): { pos: Vec2; side: 1 | -1 | null } {
+  const nearest = nearestObstaclePoint(pos, wallRects);
+  if (!nearest) {
+    // No obstacle actually found nearby (shouldn't happen — resolveMove
+    // only fails to make progress because SOME rect is blocking — but never
+    // leave a zombie with no fallback at all): just push along desiredDir.
+    const candidate = { x: pos.x + desiredDir.x * step, y: pos.y + desiredDir.y * step };
+    return { pos: resolveMove(pos, candidate, wallRects), side: preferredSide };
+  }
+  // Outward normal from the obstacle's nearest boundary point to the
+  // zombie (zero only if the zombie's point-position is exactly ON the
+  // boundary, vanishingly unlikely in practice; fall back to desiredDir in
+  // that case so the vector is never degenerate).
+  let nx = pos.x - nearest.point.x;
+  let ny = pos.y - nearest.point.y;
+  let nlen = Math.hypot(nx, ny);
+  if (nlen < 0.01) {
+    nx = desiredDir.x;
+    ny = desiredDir.y;
+    nlen = Math.hypot(nx, ny) || 1;
+  }
+  nx /= nlen;
+  ny /= nlen;
+  // Two tangent directions (rotate the normal +-90 degrees). Score each by
+  // how well it aligns with desiredDir (dot product), not by which one
+  // happens to unblock movement first — see this function's own comment on
+  // why that distinction matters. Ties (both directions equally aligned,
+  // the genuinely ambiguous case) go to preferredSide so an in-progress
+  // detour keeps its own sign instead of re-litigating every tick.
+  const candidates: { x: number; y: number; side: 1 | -1 }[] = [
+    { x: -ny, y: nx, side: 1 },
+    { x: ny, y: -nx, side: -1 },
+  ];
+  candidates.sort((a, b) => {
+    const scoreA = a.x * desiredDir.x + a.y * desiredDir.y + (a.side === preferredSide ? 0.001 : 0);
+    const scoreB = b.x * desiredDir.x + b.y * desiredDir.y + (b.side === preferredSide ? 0.001 : 0);
+    return scoreB - scoreA;
+  });
+  for (const t of candidates) {
+    const candidate = { x: pos.x + t.x * step, y: pos.y + t.y * step };
+    const resolved = resolveMove(pos, candidate, wallRects);
+    if (distance(pos, resolved) >= step * 0.5) {
+      return { pos: resolved, side: t.side };
+    }
+  }
+  // Both tangents stalled too (a tight corner/dead end) — nudge straight
+  // along the outward normal, away from the obstacle, so the zombie at
+  // least frees itself rather than sitting motionless.
+  const away = resolveMove(pos, { x: pos.x + nx * step, y: pos.y + ny * step }, wallRects);
+  return { pos: away, side: preferredSide };
+}
+
 // Moves one zombie a dtMs-sized step toward whatever it's currently hunting
 // (pickTarget), or flips it into "attacking" once in range. Ground zombies
 // (ranged: false) can never cross an intact wall to reach anything inside
@@ -586,12 +718,15 @@ export function advanceZombie(z: Zombie, dtMs: number, players: readonly Player[
   // every other obstacle already uses, same as how players round a corner.
   const useFlowField = !cfg.ranged && !lineOfSightClear(z.pos, aimPos);
   let nextPos: Vec2;
+  let desiredDir: Vec2; // this tick's intended unit direction — fed to avoidanceStep below, NOT just aimPos's bearing (see its own comment on why that distinction matters)
   if (useFlowField) {
     const dir = flowDirectionAt(z.pos);
+    desiredDir = dir;
     nextPos = { x: z.pos.x + dir.x * step, y: z.pos.y + dir.y * step };
   } else {
     const d = distance(z.pos, aimPos) || 1;
     const ratio = Math.min(step / d, 1);
+    desiredDir = { x: (aimPos.x - z.pos.x) / d, y: (aimPos.y - z.pos.y) / d };
     nextPos = {
       x: z.pos.x + (aimPos.x - z.pos.x) * ratio,
       y: z.pos.y + (aimPos.y - z.pos.y) * ratio,
@@ -602,7 +737,31 @@ export function advanceZombie(z: Zombie, dtMs: number, players: readonly Player[
   // (direct lerp can still clip a corner; the flow field is cell-coarse,
   // not exact).
   if (!cfg.ranged) {
-    nextPos = resolveMove(z.pos, nextPos, zombieWallRects);
+    const resolved = resolveMove(z.pos, nextPos, zombieWallRects);
+    const resolvedProgress = distance(z.pos, resolved);
+    // Once a detour starts (z.avoidSide set), stay in it until the NORMAL
+    // step gets ALMOST full progress (>= 95% of a clean step), not merely
+    // "a little better than fully stuck" (>= 10%). The looser threshold
+    // caused a real oscillation found by simulation: tangent-following
+    // nudges the zombie slightly off the obstacle, which is often just
+    // enough for the direct/flow-field step to partially succeed again
+    // (because it's now a hair further from the obstacle, not because the
+    // obstacle is actually cleared) — re-entering normal movement there
+    // immediately walks it straight back into the same obstacle next tick,
+    // which re-triggers avoidance, which nudges it right back — a stable
+    // loop with zero net progress. Requiring near-full progress before
+    // exiting means the zombie must actually clear the obstacle's
+    // COLLISION_MARGIN, not just flinch off it, before resuming its normal
+    // path.
+    const stillDetouring = z.avoidSide !== null && resolvedProgress < step * 0.95;
+    if (stillDetouring || resolvedProgress < step * 0.1) {
+      const avoided = avoidanceStep(z.pos, desiredDir, step, zombieWallRects, z.avoidSide);
+      nextPos = avoided.pos;
+      z.avoidSide = avoided.side;
+    } else {
+      nextPos = resolved;
+      z.avoidSide = null; // normal movement cleanly succeeded — the detour is over
+    }
   }
   z.pos = nextPos;
 }

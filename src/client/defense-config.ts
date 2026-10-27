@@ -18,6 +18,16 @@ export const TURRET_BUILD_RADIUS = 150;
 export const TURRET_MIN_SEPARATION = 40;
 export const MAX_TURRETS = 4;
 export const REVIVE_RANGE = 40;
+// Mirrors src/server/game-state.ts's PISTOL_RANGE/PISTOL_CONE_HALF_ANGLE
+// exactly (see that file's own comment on why 320, not the old 600) —
+// main.ts uses these only to guess, PURELY FOR THE VISUAL BULLET'S
+// endpoint, whether a shot looked like it would hit a zombie; the server's
+// own copy is what actually, authoritatively decides whether a shot hits.
+// A client/server disagreement here would only ever make the BULLET VISUAL
+// momentarily wrong (e.g. flying a hair past a zombie that the server
+// actually registered a hit on) — it can never change who takes damage.
+export const PISTOL_RANGE = 320;
+export const PISTOL_CONE_HALF_ANGLE = 0.15;
 
 export interface WallLevelConfig {
   maxHp: number;

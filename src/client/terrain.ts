@@ -25,7 +25,15 @@
 import { BASE_POS, WORLD_SIZE } from "./defense-config.ts";
 import { overlapsAnyBuilding } from "./obstacles.ts";
 
-export type PropType = "tree" | "bush" | "barrel" | "chest";
+// "wreck" added in round 3 of the visual overhaul (request #3: "abandoned
+// vehicles" — nothing in this project's licensed asset library, CraftPix or
+// LPC, contains a vehicle sprite, and this sandbox has no outbound network
+// access to source one, so it's hand-drawn procedural Canvas art, same
+// precedent as turrets/the base door/giant-boss zombies/fortress-decor.ts).
+// Deliberately placed ON/NEAR roads (see buildClusters below) rather than in
+// the same off-road clusters as barrels/chests — an abandoned car makes
+// sense blocking a street, not sitting in a field.
+export type PropType = "tree" | "bush" | "barrel" | "chest" | "wreck";
 
 export interface Prop {
   x: number;
@@ -204,6 +212,45 @@ function buildClusters(): Prop[] {
     const d = Math.hypot(x - BASE_POS.x, y - BASE_POS.y);
     if (d < OUTER_ZONE_RADIUS || x < 10 || x > WORLD_SIZE - 10 || y < 10 || y > WORLD_SIZE - 10) continue;
     placeCluster(LONE_TREE, x, y);
+    placed++;
+  }
+
+  // Abandoned vehicle wrecks, placed ALONG the road network (picking a
+  // random point on a random road arm's polyline, then offsetting across the
+  // road's own half-width) rather than in the off-road prop clusters above —
+  // request #3's "abandoned vehicles" reads as environmental storytelling
+  // only if they're sitting where a vehicle would actually have been: on the
+  // road, blocking it. Kept outside PROPS_CLEAR_RADIUS the same way every
+  // other prop is, so none ever crowd the fortress/turret-build area.
+  const wreckCount = 8;
+  attempts = 0;
+  placed = 0;
+  while (placed < wreckCount && attempts < wreckCount * 30) {
+    attempts++;
+    const arm = ROAD_ARMS[Math.floor(rand() * ROAD_ARMS.length)];
+    const segIdx = Math.floor(rand() * (arm.length - 1));
+    const a = arm[segIdx];
+    const b = arm[segIdx + 1];
+    const t = rand();
+    const px = a.x + (b.x - a.x) * t;
+    const py = a.y + (b.y - a.y) * t;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    // Perpendicular offset across the road, biased toward one shoulder
+    // rather than dead-centre (a wreck blocking HALF the road reads better
+    // than one sitting exactly on the centreline).
+    const perpX = -dy / len;
+    const perpY = dx / len;
+    const offset = (rand() < 0.5 ? -1 : 1) * (ROAD_HALF_WIDTH * 0.35 + rand() * ROAD_HALF_WIDTH * 0.3);
+    const x = px + perpX * offset;
+    const y = py + perpY * offset;
+    if (Math.hypot(x - BASE_POS.x, y - BASE_POS.y) < PROPS_CLEAR_RADIUS) continue;
+    if (x < 20 || x > WORLD_SIZE - 20 || y < 20 || y > WORLD_SIZE - 20) continue;
+    if (overlapsAnyBuilding({ x, y })) continue;
+    // Face roughly along the road direction, not a random angle — a wreck
+    // pointed perpendicular to its own road reads as a placement mistake.
+    props.push({ x, y, type: "wreck", rotation: Math.atan2(dy, dx) + (rand() < 0.5 ? 0 : Math.PI) });
     placed++;
   }
 

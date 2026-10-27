@@ -5,6 +5,8 @@ import {
   MAX_TURRETS,
   MEDKIT_COST,
   MEDKIT_MAX,
+  PISTOL_CONE_HALF_ANGLE,
+  PISTOL_RANGE,
   REVIVE_RANGE,
   resurrectCostForDay,
   TURRET_BUILD_RADIUS,
@@ -22,22 +24,26 @@ import { LocalPlayerPrediction } from "./prediction.ts";
 import {
   collectDeathEffects,
   render,
+  renderBullets,
   renderCrosshair,
   renderDamageNumbers,
   renderDamageVignette,
   renderDayIntro,
   renderDayProgress,
+  renderBossEntranceEffects,
   renderDeathEffects,
   renderFlyingZombie,
   renderImpactEffects,
   renderShotEffects,
   renderTurretPlacementPreview,
   renderZombieProjectiles,
+  BULLET_TRAVEL_MS,
   DAMAGE_NUMBER_MS,
   EXPLOSION_EFFECT_MS,
   PROJECTILE_TRAVEL_MS,
   TRACER_LIFETIME_MS,
   uiIcon,
+  type Bullet,
   type DamageNumber,
   type DeathEffect,
   type ImpactEffect,
@@ -178,7 +184,8 @@ let rejectionTimer: ReturnType<typeof setTimeout> | undefined;
 
 const prediction = new LocalPlayerPrediction();
 
-const effects: ShotEffect[] = [];
+const effects: ShotEffect[] = []; // turret tracers only now — see render.ts's own comment on ShotEffect
+const bullets: Bullet[] = []; // the player's own shots — see render.ts's Bullet/renderBullets
 const lastTurretShotsFired = new Map<string, number>();
 
 // --- Zombie attack feedback: all driven by diffing consecutive snapshots
@@ -192,6 +199,12 @@ const lastZombieAttacksLanded = new Map<string, number>();
 const zombieLungeUntil = new Map<string, number>(); // zombie id -> lunge started at (performance.now())
 const playerFlashUntil = new Map<string, number>(); // player id -> flash started at (performance.now())
 let selfFlashAt: number | undefined; // local-player screen vignette
+
+// Boss id -> the moment it was first seen in a state snapshot — drives a
+// brief one-shot entrance flash (render.ts's renderBossEntrance) exactly
+// once per boss, keyed by id (not type) so a second boss later in the run
+// gets its own entrance rather than only the very first boss ever doing so.
+const bossEntranceAt = new Map<string, number>();
 
 // --- "New enemy" intro popups ------------------------------------------------
 //
@@ -459,6 +472,38 @@ canvas.addEventListener(
   { passive: false },
 );
 
+// A VISUAL-ONLY mirror of game-state.ts's resolveShot, used purely to pick
+// where the player's own bullet should visibly travel to (a hit zombie's
+// position, so the bullet visibly lands on it; or PISTOL_RANGE along the
+// aim line if nothing qualifies, so a miss clearly travels the weapon's
+// real max range and stops, instead of flying forever). This NEVER decides
+// damage or kills anything — the server's own "shoot" message handling
+// already resolved the real hit before this client-side guess even runs;
+// if the two ever disagree (lag, a zombie that moved a frame later than
+// this client's last snapshot), the only consequence is the bullet's
+// cosmetic endpoint being a touch off, never a gameplay difference.
+function guessShotEndpoint(origin: { x: number; y: number }, aimAngle: number): { x: number; y: number } {
+  const zombies = currentState?.zombies ?? [];
+  let best: { x: number; y: number } | undefined;
+  let bestDist = Infinity;
+  for (const z of zombies) {
+    const dx = z.x - origin.x;
+    const dy = z.y - origin.y;
+    const d = Math.hypot(dx, dy);
+    if (d > PISTOL_RANGE) continue;
+    let diff = Math.atan2(dy, dx) - aimAngle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    if (Math.abs(diff) > PISTOL_CONE_HALF_ANGLE) continue;
+    if (d < bestDist) {
+      best = { x: z.x, y: z.y };
+      bestDist = d;
+    }
+  }
+  if (best) return best;
+  return { x: origin.x + Math.cos(aimAngle) * PISTOL_RANGE, y: origin.y + Math.sin(aimAngle) * PISTOL_RANGE };
+}
+
 const input = new InputController({
   canvas,
   getCamera: () => currentCamera,
@@ -467,7 +512,8 @@ const input = new InputController({
   },
   getPlayerPos: () => prediction.getDisplayPos(performance.now()),
   onShoot: (origin, aimAngle) => {
-    effects.push({ x: origin.x, y: origin.y, angle: aimAngle, firedAt: performance.now() });
+    const endpoint = guessShotEndpoint(origin, aimAngle);
+    bullets.push({ fromX: origin.x, fromY: origin.y, toX: endpoint.x, toY: endpoint.y, firedAt: performance.now() });
   },
 });
 
@@ -805,6 +851,15 @@ socket.addEventListener("message", (ev) => {
     }
   }
 
+  // A boss's entrance flash fires the first tick its id is ever seen —
+  // covers both a freshly-spawned boss and (harmlessly) one already present
+  // on the very first snapshot after connecting/reconnecting, same
+  // "can't tell the difference and it's harmless either way" reasoning
+  // checkForNewEnemies already uses for its own intro popups.
+  for (const z of currentState.zombies) {
+    if (z.type === "boss" && !bossEntranceAt.has(z.id)) bossEntranceAt.set(z.id, now0);
+  }
+
   // Zombie attack effects: driven by ZombieSnapshot.attacksLanded actually
   // increasing (a real landed hit this tick — see protocol.ts), never by
   // `attacking`/cooldown timing alone. lastHitKind/lastHitTargetId say
@@ -850,33 +905,56 @@ socket.addEventListener("message", (ev) => {
 
 // HP bars live in-world now (base/wall/player each have their own — see
 // render.ts's renderBase/the wall's dashed perimeter/renderPlayer), so this
-// panel keeps plain text only: numbers and status, no bar widgets.
+// panel is a labelled readout grid: icon+label on the left, value on the
+// right, coloured by threshold so a critical number (low base/player HP) is
+// visually distinct from a healthy one without having to read the digits.
+const fractionClass = (current: number, max: number): string => {
+  if (max <= 0) return "";
+  const f = current / max;
+  if (f > 0.5) return "hud-value-good";
+  if (f > 0.2) return "hud-value-warn";
+  return "hud-value-critical";
+};
+
+const hudRow = (label: string, value: string, valueClass = ""): string =>
+  `<div class="hud-row-label">${label}</div><div class="hud-row-value ${valueClass}">${value}</div>`;
+
 const updateHud = (state: StateMessage): void => {
   const self = findSelf(state);
 
-  const wallLine = state.wallLevel > 0 ? `${uiIcon("shield")} Wall Lv${state.wallLevel}` : `${uiIcon("shield")} Wall: none`;
-  const turretLine = `Turrets: ${state.turrets.length} / ${MAX_TURRETS}`;
+  const wallRow =
+    state.wallLevel > 0
+      ? hudRow(`${uiIcon("shield")} Wall`, `Lv${state.wallLevel} · ${state.wallHp}/${state.wallMaxHp}`, fractionClass(state.wallHp, state.wallMaxHp))
+      : hudRow(`${uiIcon("shield")} Wall`, "none", "hud-value-critical");
 
-  const statusLine = self
-    ? self.status === "alive"
-      ? `${uiIcon("heart")} ${self.hp}/${self.maxHp}${self.healing ? " (healing…)" : ""}${self.invulnerable ? " (invulnerable)" : ""}`
+  const statusRow = !self
+    ? hudRow("You", "—")
+    : self.status === "alive"
+      ? hudRow(
+          `${uiIcon("heart")} HP`,
+          `${self.hp}/${self.maxHp}${self.healing ? " ⟳" : ""}${self.invulnerable ? " ✦" : ""}`,
+          fractionClass(self.hp, self.maxHp),
+        )
       : self.status === "downed"
-        ? `${uiIcon("skull")} DOWNED — ${Math.ceil(self.downedRemainingMs / 1000)}s left (hold E near a teammate to revive, or wait)`
-        : `${uiIcon("skull")} DEAD — a teammate can resurrect you at the base`
-    : "—";
+        ? hudRow(`${uiIcon("skull")} Status`, `DOWNED ${Math.ceil(self.downedRemainingMs / 1000)}s`, "hud-value-critical")
+        : hudRow(`${uiIcon("skull")} Status`, "DEAD", "hud-value-critical");
 
   hud.innerHTML = [
-    `${uiIcon("house")} Day ${state.day}`,
-    `${uiIcon("heart")} Base: ${state.baseHp}/${state.baseMaxHp}`,
-    wallLine,
-    turretLine,
-    `${uiIcon("coin")} Shared XP: ${state.sharedXp}`,
-    `You: ${statusLine}`,
-    self ? `${uiIcon("medkit")} Medkits: ${self.medkits} / ${MEDKIT_MAX} (H to use)` : "",
-    ...(rejectionNotice ? [`<span class="rejected">${rejectionNotice}</span>`] : []),
+    `<div id="hud-heading">${uiIcon("house", 18)} DAY ${state.day}</div>`,
+    `<div id="hud-rows">`,
+    hudRow(`${uiIcon("heart")} Base`, `${state.baseHp}/${state.baseMaxHp}`, fractionClass(state.baseHp, state.baseMaxHp)),
+    wallRow,
+    hudRow("Turrets", `${state.turrets.length} / ${MAX_TURRETS}`),
+    hudRow(`${uiIcon("coin")} Shared XP`, `${state.sharedXp}`, "hud-value-good"),
+    statusRow,
+    self ? hudRow(`${uiIcon("medkit")} Medkits`, `${self.medkits} / ${MEDKIT_MAX} (H)`) : "",
+    `</div>`,
+    self?.status === "downed" ? `<div class="hud-note">Hold E near a teammate to revive, or wait it out.</div>` : "",
+    self?.status === "dead" ? `<div class="hud-note">A teammate can resurrect you at the base.</div>` : "",
+    rejectionNotice ? `<div class="rejected">${rejectionNotice}</div>` : "",
   ]
     .filter(Boolean)
-    .join("<br>");
+    .join("");
 };
 
 // Crit 10's gameplay-expansion requirement "their own HP/status... and any
@@ -1027,6 +1105,7 @@ const frame = (timestamp: number): void => {
     currentCamera = computeCamera(followPos.x, followPos.y, canvas.width, canvas.height, zoomCurrent);
 
     render(ctx, currentCamera, displayState, input.getAimAngle(), myPlayerId, zombieLungeUntil, playerFlashUntil);
+    renderBossEntranceEffects(ctx, currentCamera, displayState.zombies, bossEntranceAt, timestamp);
     renderDeathEffects(ctx, currentCamera, deathEffects, timestamp);
     renderDayProgress(ctx, canvas.width, displayState.day, displayState.killedZombies, displayState.totalZombiesForDay, displayState.dayWaveComposition);
     if (displayState.dayIntroRemainingMs > 0) {
@@ -1037,6 +1116,21 @@ const frame = (timestamp: number): void => {
       if (timestamp - effects[i].firedAt > TRACER_LIFETIME_MS) effects.splice(i, 1);
     }
     renderShotEffects(ctx, currentCamera, effects, timestamp);
+
+    // The player's own bullets: spawn a small impact effect the instant each
+    // one's travel finishes (hit spark on a zombie, or a dust/ground puff at
+    // max range if it missed) — a REAL visual arrival, not a guessed one,
+    // since guessShotEndpoint already decided this bullet's destination when
+    // it was fired.
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const bullet = bullets[i];
+      const age = timestamp - bullet.firedAt;
+      if (age > BULLET_TRAVEL_MS) {
+        impactEffects.push({ x: bullet.toX, y: bullet.toY, kind: "melee", startedAt: bullet.firedAt + BULLET_TRAVEL_MS });
+        bullets.splice(i, 1);
+      }
+    }
+    renderBullets(ctx, currentCamera, bullets, timestamp);
 
     for (let i = zombieProjectiles.length - 1; i >= 0; i--) {
       if (timestamp - zombieProjectiles[i].firedAt > PROJECTILE_TRAVEL_MS) zombieProjectiles.splice(i, 1);

@@ -57,6 +57,18 @@ subset was (`src/server/index.ts`'s `serveSprite`).
      Replaces the earlier magenta/yellow "WALL" construction-blockout
      placeholder (render.ts's `drawPlaceholderBlockout`) the purchasable
      Wall used before real art existed at this path.
+   - **Daniel Armstrong (HughSpectrum)** — `tiles/castlefloors.png` (same
+     "Castle work" credit entry as `castlewalls.png` above).
+     → `fortress/floor-pad.png` (a 32×32 tileable blue-grey flagstone crop,
+     original coords (192,192)-(224,224)). This file was referenced by
+     `sprites.ts`/`render.ts` from the start of the Crit 11 LPC pass but
+     never actually added — `renderFortressCourtyardFloor`'s `isReady()`
+     check was silently always false, so the fortress interior has been
+     rendering its "no art yet" fallback (a flat `#312d26` fill) the entire
+     time, not a deliberate design choice. Found and fixed during the
+     2026-10-24 visual-overhaul pass after the user reported the fortress
+     interior still looking like "a large, mostly empty, dark square" in a
+     live screenshot.
 
 3. **[LPC] Zombie** by Benjamin K. Smith, commissioned by castelonia, based
    on the LPC male base by Stephen Challener (Redshrike) and the animation

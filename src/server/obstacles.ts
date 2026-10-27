@@ -409,3 +409,35 @@ export function overlapsWallRect(pos: Vec2, wallRects: readonly Rect[]): boolean
   }
   return false;
 }
+
+// The closest point on the boundary of whichever (inflated) BUILDINGS/
+// extraRects rect is nearest to `pos`, and that rect's own identity (for
+// strict-equality grouping by the caller). Used by game-state.ts's
+// avoidanceStep to steer TANGENT to the real obstacle surface a stuck
+// zombie is pressed against, instead of re-deriving a direction from noisy
+// per-tick movement deltas — see that function's own comment for why.
+export function nearestObstaclePoint(pos: Vec2, extraRects: readonly Rect[] = NO_EXTRA_RECTS): { point: Vec2; rect: Rect } | null {
+  let best: { point: Vec2; rect: Rect } | null = null;
+  let bestDist = Infinity;
+  for (const r of BUILDINGS) {
+    const ir = inflated(r, COLLISION_MARGIN);
+    const px = Math.min(Math.max(pos.x, ir.x), ir.x + ir.w);
+    const py = Math.min(Math.max(pos.y, ir.y), ir.y + ir.h);
+    const d = Math.hypot(pos.x - px, pos.y - py);
+    if (d < bestDist) {
+      bestDist = d;
+      best = { point: { x: px, y: py }, rect: r };
+    }
+  }
+  for (const r of extraRects) {
+    const ir = inflated(r, COLLISION_MARGIN);
+    const px = Math.min(Math.max(pos.x, ir.x), ir.x + ir.w);
+    const py = Math.min(Math.max(pos.y, ir.y), ir.y + ir.h);
+    const d = Math.hypot(pos.x - px, pos.y - py);
+    if (d < bestDist) {
+      bestDist = d;
+      best = { point: { x: px, y: py }, rect: r };
+    }
+  }
+  return best;
+}
