@@ -1550,3 +1550,39 @@ server/`DATA_DIR`: screenshots across all 4 cardinal directions plus two
 diagonals show the rifle correctly oriented with both hands visibly on the
 grips; a two-browser-context multiplayer session confirmed a second
 player's weapon renders with the same model from another client's view.
+
+## Starting the 3D migration: preserving the 2D game on `main`, branching to `feature/3d-migration`
+
+Asked to begin converting the game from 2D Canvas to a genuine 3D
+presentation using Three.js — an explicit, deliberate override of
+CLAUDE.md's prior "prefer Canvas-based rendering... do not migrate off
+Canvas" rule, not an accidental contradiction of it.
+
+**Preservation came first.** Before any 3D work, the working tree on `main`
+had two layers of completed, verified-but-uncommitted work: the visual-
+overhaul rounds (CLAUDE.md scope change, giant/boss zombie art, turret
+visuals, fortress/environment/HUD redesign), the zombie-stuck-against-
+obstacles pathing bugfix with its regression suite, and an initial weapon/
+range overhaul — plus my own follow-up on top (integrated arms on the
+rifle, accurate muzzle origin, per-player recoil). Both layers were
+verified independently (`pnpm typecheck`, `pnpm run build`, the full 52-test
+suite, all passing) before committing, and `git status --ignored` confirmed
+nothing sensitive (secrets, `data/`, `dist/`, `node_modules/`) was ever
+staged. Committed as two commits on `main` (`fc7a2df` for the prior
+session's work, `29ece72` for my own weapon follow-up) — not a hunk-by-hunk
+split per PROCESS.md entry, a deliberate trade-off: several entries share
+heavily-edited files (`render.ts` alone is touched by four of them), and
+manually reconstructing each intermediate historical state risked a
+transcription slip for no real benefit over the two-layer split, which was
+achievable safely since I had the exact text of my own follow-up edits to
+revert and reapply.
+
+**`main` is now the preserved, playable 2D baseline** — nothing on it was
+touched by any 3D work, and it remains deployable exactly as before.
+`feature/3d-migration` branches from the same commit (`29ece72`) that `main`
+now points to, so the two start identical and diverge only from here.
+CLAUDE.md on the new branch gets a "3D migration rules" section explicitly
+overriding the Canvas-preference line for this branch only, while leaving
+every architecture/persistence/networking/scope/testing rule in force —
+see that section for the specifics. Neither branch has been pushed, merged,
+or deployed.
