@@ -32,6 +32,11 @@ export interface PlayerSnapshot {
   medkits: number;
   healing: boolean;
   invulnerable: boolean;
+  // Monotonic — increments once per "shoot" message actually handled. The
+  // client diffs this against the previous snapshot (same pattern as
+  // TurretSnapshot.shotsFired) to play a muzzle flash/recoil for every
+  // player's shots, not just the local player's own.
+  shotsFired: number;
 }
 
 export interface ZombieSnapshot {

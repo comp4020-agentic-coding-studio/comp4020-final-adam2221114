@@ -60,6 +60,14 @@ const LUNGE_DURATION_MS = 180;
 const REMOTE_PLAYER_COLORS = ["#ff6666", "#66b2ff", "#66ff99", "#ffcc66"];
 const LOCAL_PLAYER_COLOR = "#ffcc00";
 
+// Tactical sleeve/glove colours for the held-weapon-and-arms overlay
+// (drawPlayerWeapon) — neutral tactical gear across every character skin,
+// so the arms read as plausible gear regardless of which of the 4 outfits
+// (PLAYER_SHEETS) a player picked; only the head/body sprite and the small
+// team-colour pip actually vary per player.
+const WEAPON_ARM_SLEEVE_COLOR = "#454a3c";
+const WEAPON_ARM_GLOVE_COLOR = "#211f1a";
+
 function distanceBetween(a: { x: number; y: number }, b: { x: number; y: number }): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -930,7 +938,15 @@ type Drawable =
   | { kind: "building"; sortY: number; rect: Rect }
   | { kind: "wall-segment"; sortY: number; rect: Rect }
   | { kind: "zombie"; sortY: number; z: ZombieSnapshot; lungeStartedAt: number | undefined }
-  | { kind: "player"; sortY: number; p: StateMessage["players"][number]; isSelf: boolean; aimAngle: number; flashStartedAt: number | undefined };
+  | {
+      kind: "player";
+      sortY: number;
+      p: StateMessage["players"][number];
+      isSelf: boolean;
+      aimAngle: number;
+      flashStartedAt: number | undefined;
+      lastShotAt: number | undefined;
+    };
 
 // Plain shapes for the player (kept modular and swappable — see
 // PROCESS.md's visual-redesign entry on why: the CraftPix pack had no
@@ -947,6 +963,11 @@ export function render(
   // .hp) — never a client-side guess at whether/when a hit happened.
   zombieLunge: ReadonlyMap<string, number> = new Map(),
   playerFlash: ReadonlyMap<string, number> = new Map(),
+  // Local player id -> performance.now() the weapon last actually fired —
+  // purely cosmetic recoil timing (drawPlayerWeapon's recoilFrac), driven by
+  // main.ts's own onShoot callback (the local player) or shotsFired-style
+  // diffing (see main.ts) for a remote player firing; never a hit decision.
+  playerLastShotAt: ReadonlyMap<string, number> = new Map(),
 ): void {
   const canvasWidth = camera.canvasWidth;
   const canvasHeight = camera.canvasHeight;
@@ -1150,14 +1171,22 @@ export function render(
     drawables.push({ kind: "zombie", sortY: z.y, z, lungeStartedAt: zombieLunge.get(z.id) });
   }
   for (const p of state.players) {
-    drawables.push({ kind: "player", sortY: p.y, p, isSelf: p.id === myPlayerId, aimAngle, flashStartedAt: playerFlash.get(p.id) });
+    drawables.push({
+      kind: "player",
+      sortY: p.y,
+      p,
+      isSelf: p.id === myPlayerId,
+      aimAngle,
+      flashStartedAt: playerFlash.get(p.id),
+      lastShotAt: playerLastShotAt.get(p.id),
+    });
   }
   drawables.sort((a, b) => a.sortY - b.sortY);
   for (const d of drawables) {
     if (d.kind === "building") renderBuilding(ctx, camera, d.rect);
     else if (d.kind === "wall-segment") renderWallSegment(ctx, camera, d.rect);
     else if (d.kind === "zombie") renderZombie(ctx, camera, d.z, d.lungeStartedAt);
-    else renderPlayer(ctx, camera, d.p, d.isSelf, d.aimAngle, d.flashStartedAt);
+    else renderPlayer(ctx, camera, d.p, d.isSelf, d.aimAngle, d.flashStartedAt, d.lastShotAt);
   }
 
   for (const prog of state.reviveProgress) {
@@ -1428,6 +1457,30 @@ const PLAYER_FLASH_MS = 220;
 // neither reads as oddly large/small next to the other.
 const PLAYER_DRAW_SIZE = 34;
 
+// Weapon proportions, as fractions of PLAYER_DRAW_SIZE/drawSize — shared
+// between drawPlayerWeapon's actual drawing and weaponMuzzleOffset's
+// world-space muzzle math below, so the two can never silently drift apart
+// (the muzzle flash/bullet origin must land exactly where the drawn barrel
+// tip is).
+const WEAPON_LEN_FRAC = 0.82;
+const WEAPON_MUZZLE_FRAC = 0.84; // how far along the weapon's own length the muzzle tip sits
+const WEAPON_PIVOT_Y_FRAC = 0.08; // vertical offset of the hold pivot below the sprite's own centre (hip/hand height)
+// How long a just-fired recoil kick lasts — short enough to read as a snap,
+// not a sustained sway.
+const WEAPON_RECOIL_MS = 110;
+
+// The world-space point a shot visually originates from — the drawn
+// weapon's own muzzle tip, not the player's centre — so the muzzle flash/
+// bullet (main.ts's onShoot) lines up with the barrel exactly as drawn by
+// drawPlayerWeapon below, instead of appearing to fire from the torso.
+// Purely cosmetic: resolveShot's real origin (game-state.ts, server-side)
+// is and remains the player's actual position, untouched by this.
+export function weaponMuzzleOffset(angle: number): { x: number; y: number } {
+  const muzzleX = PLAYER_DRAW_SIZE * WEAPON_LEN_FRAC * WEAPON_MUZZLE_FRAC;
+  const pivotY = PLAYER_DRAW_SIZE * WEAPON_PIVOT_Y_FRAC;
+  return { x: Math.cos(angle) * muzzleX, y: pivotY + Math.sin(angle) * muzzleX };
+}
+
 // A remote player's sprite facing (Direction: up/down/left/right) converted
 // to a representative angle for its cosmetic weapon model — only used for
 // non-local players, who have no broadcast continuous aim angle (see
@@ -1445,55 +1498,158 @@ function directionToAngle(dir: Direction): number {
   }
 }
 
-// A compact survivor carbine, drawn in world-space pixels at the player's
-// own feet/hand level and rotated to follow aimAngle (visual overhaul
-// request #3: "survivor rifle/carbine style firearm... weapon orientation
-// follows aiming direction"). Proportioned relative to drawSize (the
-// player's own on-screen size) so it scales correctly with zoom and never
-// looks oversized/undersized next to the character. Purely a held prop —
-// no hitbox, no collision, no effect on PISTOL_RANGE/PISTOL_CONE_HALF_ANGLE,
-// which stay entirely server-side (game-state.ts).
-function drawPlayerWeapon(ctx: CanvasRenderingContext2D, screenX: number, screenY: number, drawSize: number, angle: number): void {
-  const len = drawSize * 0.72;
+// A recognisable survivor carbine — stock, receiver, pistol grip, magazine,
+// handguard, barrel and muzzle brake, all drawn as one silhouette — PLUS a
+// pair of procedural arms bridging the player's body to the weapon's own
+// grip/foregrip points, so it reads as held rather than floating in front
+// of the character (visual overhaul request #1/#2: "a much more
+// recognisable... firearm", "proper arm and weapon integration... hands
+// align with the gun, arms visually support the weapon"). The whole group
+// (arms + weapon) is one rigid unit rotated together to `angle`, so the
+// hands never visually separate from the gun at any aim direction, and a
+// recent shot kicks the whole unit back along its own axis for a brief
+// recoil (`recoilFrac`: 1 right at the muzzle flash, easing to 0 — see
+// WEAPON_RECOIL_MS). Proportioned off WEAPON_LEN_FRAC/WEAPON_MUZZLE_FRAC —
+// the SAME fractions weaponMuzzleOffset() uses for the bullet/muzzle-flash
+// origin above — so the visible barrel tip and the point shots actually
+// originate from can never drift apart. Purely a held prop: no hitbox, no
+// collision, no effect on PISTOL_RANGE/PISTOL_CONE_HALF_ANGLE, which stay
+// entirely server-side (game-state.ts).
+function drawPlayerWeapon(ctx: CanvasRenderingContext2D, screenX: number, screenY: number, drawSize: number, angle: number, recoilFrac: number): void {
+  const len = drawSize * WEAPON_LEN_FRAC;
   const bodyW = drawSize * 0.1;
+
+  // Key stations along the weapon's own long axis (local +x, pre-rotation),
+  // as fractions of `len` — named so the arm hand-points below can target
+  // the exact same coordinates the weapon art itself uses (grip/foregrip),
+  // guaranteeing the hands land ON the gun rather than near it.
+  const stockBackX = -len * 0.34;
+  const gripX = -len * 0.08; // trigger hand
+  const receiverFrontX = len * 0.22;
+  const foregripX = len * 0.42; // support hand
+  const barrelBaseX = len * 0.58;
+  const muzzleBaseX = len * WEAPON_MUZZLE_FRAC;
+
   ctx.save();
-  ctx.translate(screenX, screenY + drawSize * 0.08); // roughly hip/hand height, just below the sprite's own centre
+  ctx.translate(screenX, screenY + drawSize * WEAPON_PIVOT_Y_FRAC); // roughly hip/hand height, just below the sprite's own centre
   ctx.rotate(angle);
+  // Recoil: the whole weapon+arms unit kicks straight back along its own
+  // axis and tips up very slightly — eased with recoilFrac^2 so it snaps
+  // out fast and settles back smoothly rather than linearly.
+  const kick = recoilFrac * recoilFrac;
+  ctx.translate(-kick * drawSize * 0.1, 0);
+  ctx.rotate(-kick * 0.14);
 
-  // Barrel + receiver, drawn as one simple silhouette from grip to muzzle.
-  ctx.fillStyle = "#2b2b2e";
-  ctx.beginPath();
-  ctx.moveTo(-len * 0.18, -bodyW * 0.55);
-  ctx.lineTo(len * 0.62, -bodyW * 0.3);
-  ctx.lineTo(len * 0.62, bodyW * 0.3);
-  ctx.lineTo(-len * 0.18, bodyW * 0.55);
-  ctx.closePath();
-  ctx.fill();
-
-  // Barrel tip, slightly lighter so the muzzle end reads distinctly.
-  ctx.fillStyle = "#3f3f44";
-  ctx.fillRect(len * 0.5, -bodyW * 0.22, len * 0.16, bodyW * 0.44);
-
-  // Stock, angled back from the grip.
+  // --- Weapon body, back to front -------------------------------------
+  // Stock: angled back from the receiver into the shoulder.
   ctx.fillStyle = "#4a3a28";
   ctx.beginPath();
-  ctx.moveTo(-len * 0.18, -bodyW * 0.4);
-  ctx.lineTo(-len * 0.42, -bodyW * 0.22);
-  ctx.lineTo(-len * 0.42, bodyW * 0.22);
-  ctx.lineTo(-len * 0.18, bodyW * 0.4);
+  ctx.moveTo(stockBackX, -bodyW * 0.3);
+  ctx.lineTo(gripX, -bodyW * 0.42);
+  ctx.lineTo(gripX, bodyW * 0.22);
+  ctx.lineTo(stockBackX + bodyW * 0.3, bodyW * 0.5);
   ctx.closePath();
   ctx.fill();
 
-  // Magazine, hanging down from the body just forward of the grip — the
-  // single most recognisable "this is a rifle, not a pistol" silhouette
-  // cue at this draw size.
+  // Pistol grip: hangs down just behind the trigger, below the receiver.
+  ctx.fillStyle = "#2b2b2e";
+  ctx.beginPath();
+  ctx.moveTo(gripX - bodyW * 0.1, bodyW * 0.3);
+  ctx.lineTo(gripX + bodyW * 0.32, bodyW * 0.3);
+  ctx.lineTo(gripX + bodyW * 0.22, bodyW * 1.15);
+  ctx.lineTo(gripX - bodyW * 0.2, bodyW * 1.1);
+  ctx.closePath();
+  ctx.fill();
+
+  // Receiver/body: the main rectangular mass the rest hangs off.
+  ctx.fillStyle = "#34343a";
+  ctx.fillRect(gripX, -bodyW * 0.55, receiverFrontX - gripX, bodyW * 1.1);
+  ctx.strokeStyle = "#1c1c1f";
+  ctx.lineWidth = Math.max(1, bodyW * 0.12);
+  ctx.strokeRect(gripX, -bodyW * 0.55, receiverFrontX - gripX, bodyW * 1.1);
+
+  // A raised top rail — the single detail that most reads as "modern
+  // rifle" rather than a plain block at this draw size.
+  ctx.fillStyle = "#26262a";
+  ctx.fillRect(gripX + bodyW * 0.2, -bodyW * 0.75, receiverFrontX - gripX - bodyW * 0.3, bodyW * 0.3);
+
+  // Curved magazine, forward of the grip, swept slightly back — the single
+  // most recognisable "this is a rifle, not a pistol" silhouette cue at
+  // this draw size.
   ctx.fillStyle = "#1f1f22";
   ctx.beginPath();
-  ctx.moveTo(-len * 0.02, bodyW * 0.3);
-  ctx.lineTo(len * 0.1, bodyW * 0.3);
-  ctx.lineTo(len * 0.06, bodyW * 1.1);
-  ctx.lineTo(-len * 0.06, bodyW * 1.1);
+  ctx.moveTo(gripX + bodyW * 0.5, bodyW * 0.5);
+  ctx.lineTo(gripX + bodyW * 1.05, bodyW * 0.5);
+  ctx.quadraticCurveTo(gripX + bodyW * 1.2, bodyW * 1.3, gripX + bodyW * 0.95, bodyW * 1.75);
+  ctx.lineTo(gripX + bodyW * 0.55, bodyW * 1.6);
   ctx.closePath();
+  ctx.fill();
+
+  // Handguard: where the support hand actually grips, textured with a
+  // couple of thin vent lines so it doesn't read as plain barrel shroud.
+  ctx.fillStyle = "#3a3a3f";
+  ctx.fillRect(receiverFrontX, -bodyW * 0.38, barrelBaseX - receiverFrontX, bodyW * 0.76);
+  ctx.strokeStyle = "#232326";
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 3; i++) {
+    const x = receiverFrontX + ((barrelBaseX - receiverFrontX) * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(x, -bodyW * 0.3);
+    ctx.lineTo(x, bodyW * 0.3);
+    ctx.stroke();
+  }
+
+  // Barrel, tapering slightly toward the muzzle.
+  ctx.fillStyle = "#222225";
+  ctx.beginPath();
+  ctx.moveTo(barrelBaseX, -bodyW * 0.22);
+  ctx.lineTo(muzzleBaseX, -bodyW * 0.14);
+  ctx.lineTo(muzzleBaseX, bodyW * 0.14);
+  ctx.lineTo(barrelBaseX, bodyW * 0.22);
+  ctx.closePath();
+  ctx.fill();
+
+  // Muzzle brake — the actual tip, lighter so the business end reads
+  // distinctly and lines up with weaponMuzzleOffset()'s own math.
+  ctx.fillStyle = "#4a4a4f";
+  ctx.fillRect(muzzleBaseX, -bodyW * 0.18, len * 0.03, bodyW * 0.36);
+
+  // --- Arms: two short tube segments (shoulder -> elbow -> hand), drawn
+  // as rounded strokes so a convincing bend reads without full limb
+  // polygons. Hands land exactly on gripX (trigger hand) and foregripX
+  // (support hand) — the same coordinates the weapon body above uses — so
+  // the grip always visually connects, matching request #2's "hands align
+  // with the gun". Drawn AFTER the weapon body so both hands sit on top of
+  // it, as a real grip would. ---
+  const armW = Math.max(2, bodyW * 0.85);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  // Trigger-hand arm: shoulder near the body's own centre, elbow tucked
+  // down and back (the "shouldering the stock" bend), hand on the grip.
+  ctx.strokeStyle = WEAPON_ARM_SLEEVE_COLOR;
+  ctx.lineWidth = armW;
+  ctx.beginPath();
+  ctx.moveTo(stockBackX * 0.15, -bodyW * 0.9);
+  ctx.lineTo(gripX - bodyW * 0.3, bodyW * 0.9);
+  ctx.lineTo(gripX + bodyW * 0.06, bodyW * 0.55);
+  ctx.stroke();
+
+  // Support-hand arm: shoulder near the body's centre, elbow bent down,
+  // hand out on the foregrip/handguard.
+  ctx.beginPath();
+  ctx.moveTo(gripX * 0.2, -bodyW * 0.95);
+  ctx.lineTo(receiverFrontX + bodyW * 0.3, -bodyW * 1.0);
+  ctx.lineTo(foregripX, -bodyW * 0.05);
+  ctx.stroke();
+
+  // Gloved hands on top of both grip points.
+  ctx.fillStyle = WEAPON_ARM_GLOVE_COLOR;
+  ctx.beginPath();
+  ctx.arc(gripX + bodyW * 0.06, bodyW * 0.55, armW * 0.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(foregripX, -bodyW * 0.05, armW * 0.55, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.restore();
@@ -1506,6 +1662,7 @@ function renderPlayer(
   isSelf: boolean,
   aimAngle: number,
   flashStartedAt: number | undefined,
+  lastShotAt: number | undefined,
 ): void {
   const scale = cameraScale(camera);
   const screen = worldToScreen(camera, p.x, p.y);
@@ -1635,7 +1792,8 @@ function renderPlayer(
     // to an angle. This is an approximation for a REMOTE player only — it
     // just orients a cosmetic weapon model, never anything authoritative.
     const weaponAngle = isSelf ? aimAngle : directionToAngle(face.dir);
-    drawPlayerWeapon(ctx, screen.x, screen.y, drawSize, weaponAngle);
+    const recoilFrac = lastShotAt === undefined ? 0 : Math.max(0, 1 - (now - lastShotAt) / WEAPON_RECOIL_MS);
+    drawPlayerWeapon(ctx, screen.x, screen.y, drawSize, weaponAngle, recoilFrac);
   }
 
   if (p.status !== "dead") {

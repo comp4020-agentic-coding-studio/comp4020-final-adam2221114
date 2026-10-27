@@ -1505,3 +1505,48 @@ screenshots show the drawn rifle held and oriented toward the live aim
 point, a short bullet with a visible trail in flight (not a full-screen
 line), and the bullet cleanly gone by the next frame after its 90ms travel
 — no yellow beam present in any captured frame.
+
+## Weapon follow-up: a real rifle silhouette with integrated arms, and recoil for every player's shot
+
+The previous round's weapon still read as a flat dark bar with no visible
+connection to the character, and only the local player's shot produced any
+muzzle feedback. Asked to redesign it so it "looks like a real held weapon"
+with proper arm interaction, directional posing, and recoil for every
+player's shots, not just the local one.
+
+**`drawPlayerWeapon` (`render.ts`) rebuilt as a full carbine silhouette**
+(stock, pistol grip, receiver with a raised top rail, curved magazine,
+vented handguard, tapering barrel, muzzle brake) with a pair of procedural
+arm strokes drawn on top, landing exactly on the same `gripX`/`foregripX`
+coordinates the weapon body itself uses — gloved hands always sit on the
+grip and foregrip rather than floating near them. The whole arms+weapon
+group rotates as one rigid unit to the aim angle, so the hands never
+visually separate from the gun at any direction (verified left/right/up/
+down/diagonals via Playwright screenshots against a live server).
+
+**Muzzle-origin accuracy.** `weaponMuzzleOffset()` (`render.ts`) computes
+the bullet/muzzle-flash origin from the exact same `WEAPON_LEN_FRAC`/
+`WEAPON_MUZZLE_FRAC` proportions `drawPlayerWeapon` draws with, so the
+visible barrel tip and the point shots actually originate from can never
+drift apart; `main.ts`'s `onShoot` now offsets the bullet's `fromX/fromY` by
+this instead of firing from the player's centre.
+
+**Recoil for every player, not just the local one.** A new transient,
+non-persisted `Player.shotsFired` counter (`game-state.ts`) increments once
+per handled `"shoot"` message — the same `shotsFired`-diffing pattern
+`TurretSnapshot.shotsFired` already established — broadcast via
+`PlayerSnapshot.shotsFired` (both `protocol.ts` copies). `main.ts` diffs it
+per remote player each state broadcast to set `playerLastShotAt`, while the
+local player's own `onShoot` sets it immediately on click (zero added
+latency); `render.ts` turns the resulting `recoilFrac` (eased, `recoilFrac^2`)
+into a brief kick-back-and-tip along the weapon's own axis
+(`WEAPON_RECOIL_MS` = 110ms). No gameplay value changed — `shotsFired` is
+purely a presentation signal, same as the turret counter it mirrors.
+
+**Verification.** `pnpm typecheck`, a clean `pnpm run build`, and the full
+52-test suite all pass (three existing player-fixture tests updated for the
+new `shotsFired` field). Live-verified via Playwright against an isolated
+server/`DATA_DIR`: screenshots across all 4 cardinal directions plus two
+diagonals show the rifle correctly oriented with both hands visibly on the
+grips; a two-browser-context multiplayer session confirmed a second
+player's weapon renders with the same model from another client's view.

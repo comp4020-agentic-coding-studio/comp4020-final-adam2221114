@@ -110,6 +110,14 @@ export interface Player {
   invulnerableUntil: number; // clockMs; damage is ignored while clockMs < this
   medkits: number; // 0..MEDKIT_MAX, per-player inventory bought with shared XP
   healingSince: number | null; // clockMs a medkit use began, or null if not currently healing
+  // Monotonic — increments once per actual "shoot" message handled (hit or
+  // miss; this is a presentation signal, not a damage one), the same
+  // shotsFired-diffing pattern TurretSnapshot.shotsFired already uses so the
+  // client can play a muzzle flash / weapon recoil in sync with a real fire
+  // event for EVERY player, not just the local one (which already has its
+  // own immediate onShoot callback). Transient — never persisted, same as
+  // turret shotsFired.
+  shotsFired: number;
 }
 
 // Crit 9/10: up to 4 simultaneous players, matching README's "2-4 friends"

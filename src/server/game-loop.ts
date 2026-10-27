@@ -219,6 +219,7 @@ export class GameLoop {
       invulnerableUntil: -Infinity,
       medkits: record?.medkits ?? 0,
       healingSince: null,
+      shotsFired: 0,
     };
     this.#players.set(id, player);
     this.#inputs.set(id, { up: false, down: false, left: false, right: false, aimAngle: 0, reviving: false });
@@ -417,6 +418,7 @@ export class GameLoop {
     if (!player || !input) return;
     if (player.characterIndex < 0) return; // hasn't confirmed a character yet
     if (player.status !== "alive" || player.healingSince !== null) return; // can't shoot downed/dead, or mid-medkit
+    player.shotsFired++; // presentation-only counter — see Player.shotsFired's own comment
     const target = resolveShot(player.pos, input.aimAngle, this.#zombies);
     if (!target) return;
     target.hp -= PISTOL_DAMAGE;
@@ -766,6 +768,7 @@ export class GameLoop {
         medkits: p.medkits,
         healing: p.healingSince !== null,
         invulnerable: now < p.invulnerableUntil,
+        shotsFired: p.shotsFired,
       })),
       zombies: this.#zombies.map((z) => ({
         id: z.id,

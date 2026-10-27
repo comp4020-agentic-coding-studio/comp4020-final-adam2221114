@@ -21,6 +21,7 @@ function fakePlayer(x: number, y: number): Player {
     invulnerableUntil: 0,
     medkits: 0,
     healingSince: null,
+    shotsFired: 0,
   };
 }
 

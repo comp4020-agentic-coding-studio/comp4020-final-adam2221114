@@ -43,6 +43,7 @@ import {
   PROJECTILE_TRAVEL_MS,
   TRACER_LIFETIME_MS,
   uiIcon,
+  weaponMuzzleOffset,
   type Bullet,
   type DamageNumber,
   type DeathEffect,
@@ -187,6 +188,13 @@ const prediction = new LocalPlayerPrediction();
 const effects: ShotEffect[] = []; // turret tracers only now — see render.ts's own comment on ShotEffect
 const bullets: Bullet[] = []; // the player's own shots — see render.ts's Bullet/renderBullets
 const lastTurretShotsFired = new Map<string, number>();
+const lastPlayerShotsFired = new Map<string, number>();
+// Player id -> performance.now() their weapon last actually fired — drives
+// render.ts's cosmetic recoil kick (drawPlayerWeapon's recoilFrac) for every
+// player, set immediately for the local player (input.ts's onShoot, so it
+// feels instant on click) and from PlayerSnapshot.shotsFired diffing below
+// for every remote player (which has no local click event to hook).
+const playerLastShotAt = new Map<string, number>();
 
 // --- Zombie attack feedback: all driven by diffing consecutive snapshots
 // against real server fields (ZombieSnapshot.attacksLanded/lastHitKind,
@@ -513,7 +521,14 @@ const input = new InputController({
   getPlayerPos: () => prediction.getDisplayPos(performance.now()),
   onShoot: (origin, aimAngle) => {
     const endpoint = guessShotEndpoint(origin, aimAngle);
-    bullets.push({ fromX: origin.x, fromY: origin.y, toX: endpoint.x, toY: endpoint.y, firedAt: performance.now() });
+    // The bullet/muzzle-flash visually originates at the drawn weapon's own
+    // muzzle tip (weaponMuzzleOffset — render.ts's same fractions the
+    // weapon art itself uses), not the player's centre, so it lines up with
+    // the held rifle instead of appearing to fire from the torso.
+    const muzzle = weaponMuzzleOffset(aimAngle);
+    const firedAt = performance.now();
+    bullets.push({ fromX: origin.x + muzzle.x, fromY: origin.y + muzzle.y, toX: endpoint.x, toY: endpoint.y, firedAt });
+    if (myPlayerId) playerLastShotAt.set(myPlayerId, firedAt);
   },
 });
 
@@ -835,6 +850,17 @@ socket.addEventListener("message", (ev) => {
     lastTurretShotsFired.set(t.id, t.shotsFired);
   }
 
+  // Weapon recoil for every REMOTE player's real fired shot (the local
+  // player's own recoil is already set instantly by onShoot above, on
+  // click, for zero-latency feel — this covers teammates, whose shots this
+  // client only learns about via the next state broadcast).
+  for (const p of currentState.players) {
+    if (p.id === myPlayerId) continue;
+    const prevFired = lastPlayerShotsFired.get(p.id) ?? 0;
+    if (p.shotsFired > prevFired) playerLastShotAt.set(p.id, performance.now());
+    lastPlayerShotsFired.set(p.id, p.shotsFired);
+  }
+
   // Player damage feedback: driven purely by the real hp drop between two
   // authoritative snapshots (works for every damage source — zombie melee,
   // a flying zombie's "ranged" hit, a giant's death explosion — since
@@ -1104,7 +1130,7 @@ const frame = (timestamp: number): void => {
     }
     currentCamera = computeCamera(followPos.x, followPos.y, canvas.width, canvas.height, zoomCurrent);
 
-    render(ctx, currentCamera, displayState, input.getAimAngle(), myPlayerId, zombieLungeUntil, playerFlashUntil);
+    render(ctx, currentCamera, displayState, input.getAimAngle(), myPlayerId, zombieLungeUntil, playerFlashUntil, playerLastShotAt);
     renderBossEntranceEffects(ctx, currentCamera, displayState.zombies, bossEntranceAt, timestamp);
     renderDeathEffects(ctx, currentCamera, deathEffects, timestamp);
     renderDayProgress(ctx, canvas.width, displayState.day, displayState.killedZombies, displayState.totalZombiesForDay, displayState.dayWaveComposition);
