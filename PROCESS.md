@@ -1586,3 +1586,166 @@ overriding the Canvas-preference line for this branch only, while leaving
 every architecture/persistence/networking/scope/testing rule in force —
 see that section for the specifics. Neither branch has been pushed, merged,
 or deployed.
+
+## Architecture audit before writing any 3D code
+
+Read through the full client before touching anything, to find exactly
+what has to change versus what already generalises to 3D for free.
+
+**What's genuinely 2D-specific (must be replaced):** `render.ts` (2354
+lines of Canvas 2D drawing — sprites, procedural shapes, HUD overlays) and
+`camera.ts` (an orthographic world-to-screen-pixel projection with no
+concept of a third axis). These are the only two files whose actual
+*rendering* logic is 2D; everything else already operates on plain world
+x/y numbers with no Canvas dependency.
+
+**What generalises to 3D with no change in shape, only in how the numbers
+get drawn:** `prediction.ts` (local movement prediction is pure x/y
+arithmetic against `resolveMove`), `obstacles.ts`/`defense-config.ts`
+(buildings/wall/turret positions are plain `{x, y, w, h}` rects and radii —
+these become 3D box footprints on a ground plane, same numbers), `input.ts`
+(WASD state + a world-space aim point — only `screenToWorld`'s math need
+change, not its contract), `interpolate.ts` (snapshot interpolation is
+pure numeric lerp, no rendering), and `protocol.ts` (the WebSocket message
+shapes carry x/y floats and need no change at all). `main.ts` is the
+biggest file but is mostly orchestration (state diffing, HUD DOM updates,
+menu logic) around calls into `render.ts` — it needs its render call sites
+swapped for 3D equivalents, not a rewrite of its own logic.
+
+**Server-side: zero changes needed or planned.** `game-state.ts`,
+`game-loop.ts`, `obstacles.ts` (server copy), `persistence.ts`, and
+`ws-server.ts` operate entirely in the same 2D x/y world space the client
+always received — nothing about moving to a 3D client-side presentation
+requires the server to know about a third axis. Confirmed by reading every
+server file; this matches the brief's explicit "map existing server
+positions into 3D world coordinates... do not unnecessarily rewrite the
+server."
+
+**Coordinate mapping decided:** server/world x,y maps directly to Three.js
+scene x,z (the ground plane); Three.js y is used purely for rendering
+height (character height, zombie hover height, projectile arc, camera
+elevation) and carries no gameplay meaning, matching the brief's "keep
+gameplay movement primarily on a 2D ground plane."
+
+**Tooling decision: esbuild, not a bundler-free tsc emit.** The project's
+client build has never used a bundler (`tsconfig.client.json`'s own
+comment: "loaded by index.html as native ES modules — no bundler") because
+until now every client import was either a relative project file or a
+native DOM API — nothing from `node_modules`. Three.js breaks that
+assumption: a browser can't resolve the bare specifier `import * as THREE
+from "three"` without either a bundler or an import map pointing at a CDN.
+The brief explicitly asked to avoid a CDN runtime dependency and to use "a
+lightweight bundler such as Vite or esbuild." Chose esbuild over Vite: this
+project has no dev-server-with-HMR workflow to preserve (the existing `dev`
+script already does a full `build:client` + `tsx watch` on the server, not
+incremental browser reloading), and esbuild's API is a single `build()`
+call with no project-wide config surface to maintain — the smaller tool
+for what's actually needed here. `pnpm add three`/`pnpm add -D @types/three
+esbuild` all succeeded directly (this sandbox DOES have npm registry
+access, unlike the general web-fetch tool used in earlier visual-asset
+research, which doesn't reach arbitrary hosts) — no CDN fallback was
+needed. `scripts/build-client.ts` replaces `tsconfig.client.json`'s old
+`tsc` emit as the `build:client` script: esbuild bundles `main.ts` and
+everything it imports (including three's source straight out of
+`node_modules`) into one self-contained `dist/client/main.js` — esbuild
+does not type-check, so `pnpm typecheck` (plain `tsc --noEmit`) remains the
+sole place type errors are caught, unchanged. `src/server/index.ts`'s
+existing `serveClientScript` (serves any `*.js` under `dist/client`)
+needed no change — the bundle still lands at the same path. Verified:
+`pnpm typecheck`, `pnpm run build`, and the full 52-test suite all pass
+unchanged with the new build step; a Playwright screenshot against the
+rebuilt (but not yet 3D) client confirms the existing 2D game still runs
+pixel-identical through the new esbuild pipeline, zero console errors. The
+Dockerfile needed no change — it's single-stage and already runs the full
+`pnpm run build` (which now invokes esbuild via `tsx`, both already
+installed as devDependencies by the unmodified `pnpm install
+--frozen-lockfile` step) before `CMD`.
+
+## Phase 2: a minimal playable Three.js prototype, connected to the real server
+
+Built the smallest real 3D scene that proves the whole pipeline works, at a
+SEPARATE route (`/3d`, `src/client/three/`) rather than replacing `/` — the
+brief and CLAUDE.md's 3D migration rules both require `main`'s proven 2D
+game to keep working unmodified while the 3D version is built and proven
+out, so `index.ts` gained one new route/served bundle
+(`dist/client/three/main3d.js`) alongside the existing ones, nothing
+removed or rewritten.
+
+**What's genuinely new:** `src/client/three/scene.ts` (the Three.js scene
+itself: an orthographic three-quarter/isometric-style camera at a fixed
+55°-elevation/45°-azimuth offset from the follow target, a ground plane, a
+directional+ambient light, and a ground-plane raycast `screenToWorld` that
+returns the same `{x, y}` world-space shape camera.ts's 2D version does)
+and `src/client/three/main3d.ts` (the entry point wiring it to the real
+server). **What's reused as-is, unmodified in logic:** `protocol.ts` (same
+message shapes), `prediction.ts` (same client-side dead-reckoning/
+reconciliation), `defense-config.ts`/`WORLD_SIZE`, and — after one small,
+deliberate refactor — `input.ts`.
+
+**The one shared-code change: `InputController` stopped owning a
+`camera.ts` `Camera`.** It previously took `getCamera: () => Camera` and
+called `screenToWorld(camera, x, y)` internally, tightly coupling it to the
+2D orthographic projection shape. Changed its constructor to take
+`screenToWorld: (x, y) => {x, y}` directly instead — the 2D client now
+passes `(x, y) => screenToWorld(currentCamera, x, y)` (same behaviour,
+zero change), and the 3D prototype passes its own ground-plane raycast
+version. This is the only edit to a file the proven 2D game depends on;
+verified `pnpm typecheck`/`pnpm run build`/the full 52-test suite all still
+pass and a live Playwright screenshot of `/` confirms the 2D game is
+pixel-identical after this change.
+
+**Coordinate mapping proven correct, not just asserted.** Server/world x,y
+maps to Three.js scene x,z; scene y is pure render height. Verified live
+against the real server (not a mock): held `d` (move right) for 1000ms and
+confirmed the HUD's local-position readout moved from `(500.0, 560.0)` to
+`(652.5, 560.0)` — a ~150-unit step matching `PLAYER_SPEED` exactly; held
+`s` next and confirmed only y moved, to `(652.5, 712.5)`. The aim-angle
+raycast was checked the same way: moving the mouse to the four screen
+compass points (up/down/left/right of canvas centre) produced world aim
+angles of -135°/45°/135°/-45° respectively — the 90° rotation from screen
+axes to world axes is the EXPECTED result of a 45°-azimuth isometric
+camera looking at a non-rotated ground plane, not a bug (screen-right
+doesn't point along world +x when the camera is rotated 45° around the
+vertical axis). A full multiplayer tick was also confirmed working
+end-to-end: zombies spawned by the real `game-loop.ts` horde-batch logic
+rendered as separate placeholder boxes converging on the player/base at
+the same `AGGRO_RADIUS`/speed behaviour the 2D game already has (screenshot
+shows 8 zombie boxes positioned correctly around a yellow local-player
+box), and a `game_over` transition (this test player never called
+`selectCharacter`, so had no real defence) correctly reflected in the HUD —
+proof the exact same authoritative server loop drives both renderers with
+no special-casing for which client is connected.
+
+**Tooling: esbuild's multi-entry-point output.** `scripts/build-client.ts`
+now lists both `src/client/main.ts` and `src/client/three/main3d.ts` as
+entry points with `outdir` (not a single `outfile`) — esbuild preserves
+each entry's own subdirectory under `outdir`, so `main3d.ts` lands at
+`dist/client/three/main3d.js`, matched by `index.html`'s own script src and
+served by `serveClientScript`'s existing, unmodified "any `*.js` under
+`dist/client`" rule. `tsconfig.client.json` was deleted — it was
+`tsc`-emit-only config, made genuinely dead by the esbuild switch (the root
+`tsconfig.json`'s `include: [..., "src"]` already covers `src/client` for
+`pnpm typecheck`), and keeping a config no script referenced would only
+invite confusion later.
+
+**What's explicitly NOT done yet (not falsely presented as complete):** no
+real models (plain coloured boxes stand in for the player and zombie —
+labelled as such in the HUD's own text and in code comments, per CLAUDE.md's
+"do not describe placeholder geometry as finished"), no animation, no HUD
+button UI (Start is sent automatically on connect so the prototype is
+playable without one), no interpolation for remote entities (zombies/other
+players snap to each new snapshot rather than smoothing between them — the
+2D client's `interpolate.ts` was deliberately not wired in yet), and no
+shooting/combat visuals at all. These are Phase 3+ work.
+
+**Verification.** `pnpm typecheck`, `pnpm run build`, and the full 52-test
+suite all pass. Live-verified via Playwright with real WebGL (headless
+Chromium's software GL, confirmed `WebGL 2.0`/`WebKit WebGL` via a context
+probe before relying on any screenshot) against an isolated server/
+`DATA_DIR`: screenshots show a real rendered 3D scene (visible perspective/
+shading on the box meshes, a lit ground plane), confirmed movement via the
+position readout above, confirmed zombie spawning/convergence, and zero
+browser console errors throughout. The proven 2D game at `/` was
+separately re-verified working after every change in this phase (not just
+assumed from passing tests) — a live screenshot of `/` after the
+`InputController` refactor and again after the esbuild multi-entry change.

@@ -1,14 +1,20 @@
 import type { ClientMessage } from "./protocol.ts";
-import { screenToWorld, type Camera } from "./camera.ts";
 
 // Reads keyboard + mouse and sends what the server asked for (input/shoot).
 // Never moves anything locally and never decides a hit — position, HP, XP
 // all come back from the server's own state broadcast. getAimAngle() and
 // getMouseWorldPos() are exposed only so the renderer can draw local cues
 // (aim line, crosshair, the oriented character); neither is a game decision.
+//
+// screenToWorld is injected rather than this class owning a camera.ts
+// Camera itself (feature/3d-migration) — the 2D client passes camera.ts's
+// own screenToWorld bound to its 2D orthographic Camera, the 3D prototype
+// (src/client/three/scene.ts) passes its ground-plane raycast version —
+// same {x, y} world-space contract either way, so this class needs no
+// knowledge of which renderer is driving it.
 export class InputController {
   readonly #canvas: HTMLCanvasElement;
-  readonly #getCamera: () => Camera;
+  readonly #screenToWorld: (canvasX: number, canvasY: number) => { x: number; y: number };
   readonly #send: (msg: ClientMessage) => void;
   readonly #getPlayerPos: () => { x: number; y: number };
   readonly #onShoot: (origin: { x: number; y: number }, aimAngle: number) => void;
@@ -17,13 +23,13 @@ export class InputController {
 
   constructor(opts: {
     canvas: HTMLCanvasElement;
-    getCamera: () => Camera;
+    screenToWorld: (canvasX: number, canvasY: number) => { x: number; y: number };
     send: (msg: ClientMessage) => void;
     getPlayerPos: () => { x: number; y: number };
     onShoot?: (origin: { x: number; y: number }, aimAngle: number) => void;
   }) {
     this.#canvas = opts.canvas;
-    this.#getCamera = opts.getCamera;
+    this.#screenToWorld = opts.screenToWorld;
     this.#send = opts.send;
     this.#getPlayerPos = opts.getPlayerPos;
     this.#onShoot = opts.onShoot ?? (() => {});
@@ -129,7 +135,7 @@ export class InputController {
     const cssToBackingY = this.#canvas.height / rect.height;
     const canvasX = (e.clientX - rect.left) * cssToBackingX;
     const canvasY = (e.clientY - rect.top) * cssToBackingY;
-    this.#mouseWorldPos = screenToWorld(this.#getCamera(), canvasX, canvasY);
+    this.#mouseWorldPos = this.#screenToWorld(canvasX, canvasY);
   }
 
   #onClick(): void {

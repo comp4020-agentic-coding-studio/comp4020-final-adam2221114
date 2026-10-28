@@ -1,0 +1,1768 @@
+# Process history (archive)
+
+This file is a verbatim archive of `PROCESS.md`'s full working-tree content
+as of 2026-10-28, before it was condensed to fit the course's stated
+900–1100 word indicative length for a final project `PROCESS.md` (the
+submitted file is meant to be revised and expanded toward that target at
+each crit, not grown as an unbounded append-only log — see
+`topics/assessment`'s word-counts section on the course site). This repo's
+`PROCESS.md` had grown to roughly 17,000 words across many detailed rounds
+without that constraint being applied; rather than delete any of that
+history, it is preserved here in full, unedited, and the submitted
+`PROCESS.md` now cites specific entries in this file by section heading
+where the shorter account needs to point at the fuller one. Nothing in this
+archive has been rewritten, summarised, or corrected — it is the real
+record of what happened, in the words originally written at the time, kept
+for traceability rather than as the graded artefact itself.
+
+# Process overview
+
+A cooperative zombie base-defence game with the server as the sole source of truth and the client limited to rendering, input, prediction and interpolation. I used Claude Code as a pair-programmer: I defined the scope and constraints for each round, reviewed the result in the running game, corrected behaviour that did not match my intent, and had Claude implement and verify the resulting changes. Each round landed as its own commit so regressions could be traced back to one scoped change. This account focuses on corrections that changed the design rather than listing every feature.
+
+## Stack
+
+Node and TypeScript run on both sides, with a raw `ws` WebSocket connection instead of a higher-level realtime framework, `better-sqlite3` for persistence, and a hand-rolled Canvas2D renderer rather than a game engine or UI framework. The project started from the course placeholder container; the first step replaced it with a minimal Node HTTP server that still satisfied the starter contract at `/` and `/readme/` before any game logic existed, so later work built on something already known to deploy correctly ([`5b680de`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/5b680de)). The server owns authoritative gameplay values. The client mirrors only the small subset of configuration it needs for previews and display, while the server independently validates costs, ranges and placement rules.
+
+## Workflow
+
+Each round began with a narrow, explicit scope: a short numbered brief plus a list of what not to add. After implementation, I verified behaviour against a real running instance rather than relying on unit tests alone. The most useful habit was checking authoritative WebSocket state directly whenever a claim concerned server truth, using a headless browser when the claim concerned what a player actually saw, and querying SQLite directly to confirm persistence rather than trusting a restart that merely looked correct. This prevented several test mistakes from being mislabelled as product bugs and kept corrections focused on the actual problem.
+
+## Corrections that changed the design
+
+**Dev server never built the client.** `pnpm dev` only watched `src/server`, so a fresh checkout had no `dist/client` and `/main.js` returned 404 even though the HTML and route were correct. I changed the dev workflow so the client is built before the server watch starts ([`4fd7d41`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/4fd7d41)). This mattered because a marker will run the project from a cold state, so the development command needed to work without relying on stale build output.
+
+**CI's `/data` mount and `DATA_DIR` disagreed.** The workflow mounted a temporary `/data` directory for checks but did not set `DATA_DIR`, so the application would have fallen back to another path and silently ignored the mounted database location ([`7760964`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/7760964)). It had not failed yet, but it would have hidden persistence bugs later. Fixing the environment contract early made local, CI and Fly behaviour agree.
+
+**Snapshot interpolation alone did not feel right.** Interpolating between server snapshots made movement visually smoother, but the local player still waited for a round trip before movement appeared, so the controls felt delayed. I replaced that with client-side prediction for the local player and reconciliation against server snapshots ([`537e681`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/537e681)). The server still decides the real position; prediction only improves responsiveness before the next authoritative correction arrives.
+
+**Days advanced on a timer.** The first design allowed a day to end while zombies were still alive, which did not match the idea of defending against a wave. I changed progression so the next day begins only when the full zombie quota has spawned and been defeated ([`a9c79c6`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/a9c79c6)). This made the progression rule match the player's mental model of clearing a wave rather than simply surviving a clock.
+
+**The wall was cosmetic.** The original wall was only a drawn ring and did not stop zombies from reaching the base. That made the word "wall" misleading and gave the upgrade no meaningful defensive role. I changed it into real combat state with its own HP that physically blocks zombies and absorbs damage until destroyed ([`a9c79c6`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/a9c79c6)). A named defence mechanic should actually alter the game's survival logic before more systems are layered on top of it.
+
+**Wall-building was automatic.** Reaching 100 shared XP originally created a wall automatically, which removed any decision from the shared economy. I replaced that with an explicit `X` interaction near the base, where the player chooses how to spend XP and the server independently validates range, cost and current building state ([`3e680c9`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/3e680c9)). This turned shared XP from a passive threshold into a resource that supports deliberate defensive choices.
+
+**Turret placement was fixed.** The first turret worked, but it always appeared at one hardcoded position, so building it involved no placement decision. I changed it so the player chooses a location and the server validates that the requested position falls inside the allowed build area around the base ([`33c50c0`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/33c50c0)). The same server-authority rule that already governed combat and purchases therefore also applies to building placement.
+
+**"Turret damage has no effect" was not a logic bug.** During playtesting the turret looked ineffective, but before changing damage values I inspected authoritative zombie HP while the turret fired and confirmed the damage was already being applied correctly. The real problem was presentation: zombies had no visible health feedback, so slow damage looked like no damage at all ([`33c50c0`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/33c50c0)). The correction was to add zombie health bars rather than arbitrarily increasing turret damage. This reinforced a useful rule for the project: diagnose state first, then decide whether the problem is logic or feedback.
+
+## Crit 9: single-player to real multiplayer
+
+Crit 8's server tracked exactly one WebSocket connection and one player —
+deliberate for that week, but it meant the project wasn't actually
+cooperative yet, just a single-player slice with shared-economy code sitting
+unused. For Crit 9 I converted `GameLoop`'s single `Player`/`InputState`
+fields to a map keyed by an ephemeral per-connection id, had `ws-server.ts`
+track every open socket instead of replacing the last one, and broadcast the
+same snapshot (now carrying a `players[]` array) to all of them
+([`0dc526a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/0dc526a)).
+The client picks itself out of that array using a `welcome` message the
+server sends right after connecting, applies prediction only to itself, and
+interpolates everyone else exactly like it already did for zombies
+([`043c541`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/043c541)).
+The session caps at 4 players (README's own "2-4 friends" scope); a 5th
+connection gets a `full` message and is closed.
+
+**Simultaneous build/upgrade/placement races needed a decision, not just
+code.** Once several players can reach the same X-menu, two of them can both
+try to build the wall (or the turret) at once. The existing server-side
+checks already resolve this correctly — Node processes one message at a
+time, and `interact()`/`placeTurret()` already re-read current XP/build
+state at call time, so the loser's request naturally fails against
+already-updated state and shared XP is never double-spent. What Crit 8 never
+needed was telling the loser why nothing happened: a failed check used to
+just log and silently no-op, which is fine with one player and confusing
+with several. I changed those checks to return a reason
+([`0dc526a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/0dc526a)),
+and the server now relays it only to the socket whose request lost the race,
+as a `rejected` message the client shows briefly near the HUD. The full reasoning, including
+the alternatives I considered (client-side locking, a visible request
+queue) and what this costs, is recorded as an ADR at
+[`docs/decisions/0001-simultaneous-build-conflicts.md`](docs/decisions/0001-simultaneous-build-conflicts.md).
+
+I did not add a `players` table to SQLite for this. Per `CLAUDE.md`'s own
+persistence rules, a connection id and a live position are exactly the kind
+of per-frame, per-socket transient state that's explicitly excluded from
+durable storage, and there's still no per-player durable value to store —
+XP stays one shared pool, there are no accounts. A stale comment in
+`persistence.ts` had guessed a players table would be needed here; I
+corrected it instead of adding a table nothing actually required.
+
+That conclusion didn't survive the next round of requirements — see below:
+once players have their own HP and a downed/dead status that must survive a
+reconnect, there genuinely is a per-player durable value, and a `players`
+table became the right call after all. Recorded here rather than edited away
+so the reasoning that was correct for Crit 9's actual requirements stays
+visible, not just the part that changed.
+
+## Gameplay expansion: zombie types, 28-day waves, player HP, multi-turret, medkits
+
+A large, explicitly-specified round: four zombie types (normal/flying/giant/
+boss) replacing the single type and linear day formula; zombies now damage
+and down/kill players, not just the wall/base; downed players can be field-
+revived (hold E) or, once dead, paid-resurrected at the base; up to four
+independently-built/upgraded/repaired turrets replacing the single turret;
+a 5-level wall whose level 2 ability changed shape (a periodic AOE pulse,
+not an on-hit reflect); medkits; a day-start countdown with daily healing;
+Game Over's "Retry Current Day" snapshot/restore; and browser-persistent
+player identity so a reconnect resumes the same HP/status/medkits instead of
+joining as someone new.
+
+**The brief left real decisions open on purpose, and I made them rather than
+guessing silently** — each is called out in a code comment at its point of
+use, not just here:
+
+- **Turret "pierce"/"multi-target" has no projectile to pierce along.** This
+  project's architecture deliberately has no bullet/line entity (`CLAUDE.md`:
+  hitscan only). "Attacks 2 targets" and "pierce up to N" are both
+  implemented the same way — one shot simultaneously hits the N nearest
+  zombies in a turret's range — rather than inventing a line-raycast system
+  the rest of the codebase has no equivalent for.
+- **Turrets needed to be attackable for "repair" to mean anything.** The
+  brief specifies turret HP and repair cost but never says what damages a
+  turret. I made ground zombies that end up within melee range of a live
+  turret fight it instead of their real target (`game-loop.ts`'s
+  `#applyZombieHit`) — the only way the repair system has a purpose. Flying
+  zombies ignore turrets the same way they ignore the wall.
+- **Boss damage/attack-interval/speed aren't in the brief** ("basic melee
+  attacks initially... keep extensible") — only each boss's HP is specified.
+  I picked one flat melee profile reused across all four bosses
+  (`ZOMBIE_TYPES.boss` in `game-state.ts`) rather than inventing four
+  different kits.
+- **The day-start retry snapshot is in-memory only, not SQLite.** A process
+  restart mid-day already loses live zombie/spawn-queue state under this
+  project's existing persistence rules (nothing new here — Crit 8's
+  single-type version had the same limitation, documented in
+  `PendingRepair.md`'s history). `retryDay()` falls back to the last
+  *persisted* state if a restart happened since the day began, rather than
+  failing outright — a degraded case I'd rather document than silently
+  pretend doesn't exist.
+- **Several numeric ranges weren't specified**: melee contact distance,
+  flying attack range, revive range, turret minimum separation, wall pulse
+  radius, turret splash radius. Each has a one-line comment at its
+  declaration in `game-state.ts` explaining the choice; none of them are
+  balance-critical enough to need a design conversation on their own, but
+  they're not hidden either.
+
+One pre-existing invariant this round genuinely breaks: `CLAUDE.md` used to
+state "normal zombie HP is 90, so three pistol hits kill one." Normal zombie
+HP is now 100 by explicit specification, and pistol damage wasn't asked to
+change — `CLAUDE.md`'s Gameplay invariants section has been rewritten to
+match the current numbers rather than silently leaving the old, now-false
+claim in place.
+
+## Visual redesign: CraftPix pixel-art assets
+
+Replaced the plain black/grid Canvas placeholder with the CraftPix "Zombie
+Survival" freebie pack: a tiled ground layer and scattered decoration (city
+tileset), animated per-type zombies (four reskinned enemy sets), a real base
+sprite, a textured wall ring, and HUD icons. The player stays a drawn Canvas
+shape by explicit instruction — the pack has no player-character sprite, and
+a mismatched placeholder sprite would be worse than a clean drawn one.
+
+**A real licensing question, not resolved, deliberately proceeding anyway.**
+CraftPix's free-tier license permits using the assets in a deployed game but
+explicitly says *"You can NOT resell the art source files... or a slightly
+modified version of the art,"* drawing the line at *"an app that uses the art
+as part of the play of the game is fine [...] an app that allows the user to
+save or export [...] the artwork itself is not fine."* This course's normal
+workflow makes assessment repos public on GitHub, which puts the raw PNG
+files (committed under `src/client/sprites/`) in a public, clonable,
+downloadable location — arguably exactly what that clause is written against,
+though the clause doesn't contemplate "public source repo" specifically. I
+flagged this before touching any code; the call to proceed anyway is mine to
+honour, not mine to make — recorded here so it isn't silently forgotten. If
+this matters for submission, it's worth a direct question to the course
+convenor or CraftPix support before the repo goes public.
+
+**Zombie type -> sprite set is an arbitrary, documented mapping, not a
+semantic one.** All four `Enimies_N` sets in the pack are palette-swapped
+reskins of the same civilian-zombie character — none is shaped like a
+flyer, a giant, or a boss. normal/flying/giant/boss are told apart at
+render time by scale, a hover motion + glow (flying), and a larger size +
+glow (giant/boss) — see `render.ts`'s `ZOMBIE_RENDER` table — not by
+different art. This was a deliberate choice over inventing a shape the pack
+doesn't have.
+
+**Tileset region coordinates were read off a rendered, labelled grid
+overlay, not guessed from the thumbnail.** `City_Tileset/PSD/Tile.png` has
+no accompanying per-tile metadata beyond a generic `Tile.tsx` (16px grid,
+374 tiles, no names). I rendered the sheet through a scaled, grid-lined,
+coordinate-labelled HTML page via a headless browser, read off exact pixel
+regions for the ground tiles, trees, bushes, fence panels, doors and small
+props, and visually re-verified each crop before using it — several initial
+guesses (pavement, bench, both doors) were off by one or more tiles and
+were corrected this way rather than shipped unchecked.
+
+**Found and fixed in passing: a pre-existing file was collaterally deleted
+by the asset re-import, breaking the course's own baseline check.**
+`assets/readme-template.html` — unrelated to CraftPix, committed since
+`5b680de`, read by `render-readme.ts` to serve `/readme/` — was missing from
+disk (`git status` showed it as deleted) after the CraftPix pack was copied
+into `assets/`, almost certainly because the import replaced the whole
+folder rather than adding to it. This crashed the server on the first
+request to `/readme/` and failed `spec/invariants.test.ts`'s "publishes
+README.md at /readme/" check — one of the two fixed invariants this project
+treats as never-break. Restored with `git restore` (the file was tracked,
+untouched otherwise); every other `assets/` change is exactly the CraftPix
+import, left alone.
+
+**Performance**: the ground layer is built once into an offscreen canvas
+and blitted whole each frame, not re-tiled per frame (~1,600 draws once
+instead of per frame) — the map's world size and tile layout never change,
+so there's nothing to invalidate the cache for except a canvas resize.
+Decorative props are a fixed list (a small seeded PRNG, not `Math.random()`,
+so the scatter is identical every load) kept clear of the base/wall/turret
+build area, and are drawn but never consulted by any gameplay code —
+movement, targeting, and placement validation are exactly as before.
+
+## UI asset licensing fix + redesign: Kenney CC0 icons/panels replace the CraftPix HUD atlas
+
+The visual-redesign entry above flagged, but deliberately left unresolved,
+that CraftPix's free-tier license forbids redistributing art source files
+— in tension with this course's public-repo workflow. Re-examined
+specifically for the HUD/menu layer (not the terrain/zombie/base sprites,
+which are a separate, larger asset and out of scope here): rather than
+accept that risk or ask for an exception, `src/client/sprites/ui.png` (a
+cropped region of the CraftPix pack) and its source `assets/UI/` have been
+removed outright and replaced with icons/panel chrome from two Kenney.nl
+packs released CC0 (1-Bit Pack, Pixel UI Pack) — public domain,
+redistribution of the original files explicitly permitted, no attribution
+required. Full sourcing — pack URLs, author, license text, and the exact
+tile coordinates each icon was cropped from — is in
+`assets/ui-kenney/NOTES.md`.
+
+**Individual icon files, not a second atlas.** The CraftPix icons were a
+single `ui.png` sprite sheet addressed by pixel-coordinate regions
+(`UI_REGIONS` in `sprites.ts`). The Kenney icons are shipped as one PNG per
+icon (`src/client/sprites/ui/icons/*.png`) instead — nothing to get a pixel
+coordinate wrong on, and `uiIconUrl()`/`uiIcon()` replace the old
+coordinate-based `uiIconStyle()` helper. Locating which Kenney 1-Bit Pack
+tile is "heart" vs "skull" vs "shield" still used the same grid-overlay
+methodology as the CraftPix tileset above (a scripted, scaled, grid-lined
+render of the sheet, tiles identified visually and cross-checked against a
+zoomed crop before use) — only a one-time cost to find the seven tiles
+actually used, not an ongoing per-render coordinate dependency.
+
+**Darkened panel variants are a derivative, which CC0 explicitly allows
+(unlike the CraftPix clause this whole change exists to get away from).**
+Kenney's "Ancient grey" 9-slice panel is a mid-tone slate, too light for
+the brief's "dark grey panels" and for the HUD text's contrast against it.
+A CSS `filter: brightness()` on the live panel element was tried first and
+rejected — it also darkens the icons/text drawn on top of the panel, not
+just the panel texture. Instead, `assets/ui-kenney/darken.js` (a one-off
+script, not part of the build) produces `panel-grey-dark.png`/
+`panel-red-dark.png`/`panel-green-dark.png` by a uniform per-pixel RGB
+multiply, shipped alongside the untouched originals.
+
+**Redesigned, not just reskinned**, within what the existing architecture
+already tracks (no new gameplay mechanics, no new persisted fields): the
+HUD now shows HP/wall/XP as icon + meter bar + numbers rather than numbers
+alone; a new team-status panel surfaces each connected player's HP, colour,
+downed/dead state, and live revive-progress countdown (`state.players` /
+`state.reviveProgress` were already sent every tick — this only renders
+them, it was previously just a team-wide alive/downed/dead count); the
+base/turret X-menu shows each option's icon and cost and visually dims/
+reddens it when `sharedXp` is below that cost (still sends the action to
+the server either way — the server's existing reject-with-reason flow is
+the real validation, this is only a hint); and a small contextual prompt
+("[X] Base Menu", "[Hold E] Revive", "[H] Use Medkit") surfaces existing
+keybinds when in range instead of requiring the player to remember them.
+The waiting/paused phase banners gained a static controls legend (serving
+as this project's "main menu"/"pause-help" screens, since the architecture
+has no separate menu screens beyond the existing game phases) and
+Game Over/Victory got distinct red/green panel treatments. None of this
+touches combat, spawning, XP calculation, persistence, or any server-side
+validation — everything rendered was already in `StateMessage`.
+
+**A real, pre-existing gap, not introduced here**: the canvas is a fixed
+800×800 element (`CANVAS_SIZE` in `main.ts`); below that viewport width the
+page already needed horizontal scroll before this change. This redesign
+makes the HUD/menu chrome itself responsively stack and cap its own width
+(`#hud`/`#team-panel` flex-stack instead of independently-guessed fixed
+offsets — the two overlapped at narrow widths before this fix, caught by
+screenshotting at 480px), but does not change the canvas's own fixed-size
+behaviour, which would mean reworking the coordinate math `render.ts` and
+`input.ts` both depend on — out of scope for a UI-asset redesign.
+
+## Bug fix: a ground zombie could permanently walk through an intact, undamaged wall
+
+Reported symptom: a player would sometimes lose HP "for no apparent reason,"
+with no obvious attacker on screen.
+
+**Diagnosis, not assumption.** Read through every code path that can reduce
+player HP (`#damagePlayer`'s one call site — zombie melee, the base-menu
+actions, giant explosions on death — and the targeting/movement that decides
+when a zombie is even allowed to hit a player) without finding a conclusive
+cause by inspection alone. Reproduced empirically instead: a scripted
+WebSocket client (an isolated server + scratch SQLite DB, never the real
+`data/`) held a player exactly at the base, farmed real XP by shooting
+zombies, built a wall, and logged full context — self HP, wall HP/level,
+and every zombie's id/type/position/distance/`attacking` flag — on every HP
+change. That reproduced it directly: the player lost HP in 10-point hits
+while `wallLevel` stayed 1 and `wallHp` stayed at 50 (the wall's max,
+completely undamaged) the whole time, with a normal zombie sitting at
+distance ~28 from the player, `attacking: true`.
+
+**Root cause** (`advanceZombie()`, `src/server/game-state.ts`): a ground
+zombie's wall-ring-blocking override only applied while the zombie's own
+current position was outside `WALL_RING_RADIUS`. That flag was recomputed
+fresh every tick from the zombie's just-moved position — so the very first
+tick an approaching zombie's ordinary ~2-unit movement step happened to
+land its distance-to-base at or under the ring radius (not a deliberate
+breach, just normal approach), it was judged "no longer outside," the
+override stopped applying, and every tick after that it chased the real
+player directly at melee range (its actual attack-range stop condition)
+instead of the wall — walking straight through a fully intact wall for the
+rest of its life. This fires essentially every time a wall exists and a
+ground zombie's hunted target is a player standing within the ring
+(`BASE_INTERACT_RANGE` is 80, well past the 60-unit ring, so standing there
+to use the base menu is normal play), which matches "sometimes" rather than
+"always" — it depends on a zombie actually closing to the ring while a
+player is inside it.
+
+**Fix**: whether a ground zombie is blocked by an intact wall now depends
+only on whether its real target is behind the wall (`targetInsideRing`),
+never on the zombie's own current position — removing the exact condition
+that let an ordinary approach step permanently disable the block. Also
+added a hard clamp on the computed movement step so a blocked zombie's new
+position can never end up closer to the base than the ring, as defence in
+depth against the same class of one-tick-overshoot bug (not reachable today
+at current zombie speeds, but shouldn't be relied on implicitly). Turret
+targeting/firing, player movement, invulnerability, and every other damage
+source were read through and are unaffected — this is a single, scoped fix
+in zombie pathing/targeting, not a balance change (no HP, damage, or
+cooldown numbers were touched).
+
+**Regression test**: `spec/wall-ring-protection.test.ts` plays a short real
+game against the live app (same pattern as `gameplay-expansion.test.ts`) —
+farms a wall through actual combat, then holds a player inside the ring and
+asserts HP never drops while `wallHp > 0`, with a sanity check that the wall
+actually took damage (so the test can't pass vacuously). Verified both ways:
+reverting the fix locally reproduces the exact failure this test is for
+("player hp dropped 100 -> 90 while wallHp was 50 ... wall still intact");
+with the fix, the same scenario runs the wall down to 0 through legitimate
+combat before anything touches the player. Like the existing
+`turret_interact` test, it restarts the shared app to a known baseline on
+entry and exit, since every file in `spec/` runs sequentially against one
+live instance (`vitest.config.ts`'s `fileParallelism: false`).
+
+## Zombie visual identity, attack effects, and damage feedback
+
+Follow-up to the wall-ring bug fix above: the player's report of "losing HP
+for no apparent reason" had a second, real cause alongside the wall bypass —
+once that was fixed, legitimate hits still had almost no visual feedback.
+Flying zombies reused a palette-swapped copy of the same civilian-zombie
+sprite every ground zombie uses, zombie attacks had no impact effect when
+they actually connected, a flying zombie's "ranged" attack had no visible
+projectile at all, and a player taking damage had no flash, no floating
+number, nothing beyond the HP bar quietly ticking down. All four zombie
+types (`normal`, `flying`, `giant`, `boss`) were inspected individually —
+their stats, attack range/cooldown, and existing animation state are exactly
+as `game-state.ts`'s `ZOMBIE_TYPES` already specified; nothing here changes
+a damage, HP, range, or cooldown number.
+
+**Flying zombies are now drawn procedurally, not sprited.** Checked Kenney,
+OpenGameArt, and itch.io for a CC0, redistributable, animated flying-enemy
+sprite sheet matching this project's 32x32 frame convention — the closest
+real candidate (`Bat (32x32)` by MoikMellah, OpenGameArt, CC0) is GIF/XCF-
+only with no attack frame and a generic-bat rather than undead silhouette;
+everything else with matching frames explicitly forbids redistribution (the
+same restriction this project is already avoiding elsewhere). Rather than
+force a mismatched or legally-murky asset in, `render.ts`'s
+`renderFlyingZombie` draws a bat/wraith silhouette instead — wings, a dark
+body, glowing eyes that brighten mid-attack — the same call this project
+already made for the player character and turrets ("no sprite in the pack
+is shaped like this, so draw it"). `ZOMBIE_SHEETS` (`sprites.ts`) no longer
+loads a flying sprite sheet at all; `renderDeathEffects` draws a matching
+procedural wing-fold collapse instead of a "dead" sprite frame for it.
+
+**The protocol gained the minimum needed to synchronise effects with real
+combat, not a client-side guess.** `ZombieSnapshot` (both `protocol.ts`
+copies) adds `attacksLanded` (monotonic, incremented only in
+`GameLoop#applyZombieHit` when a hit actually lands — the same pattern
+`TurretSnapshot.shotsFired` already uses) and `lastHitKind`/
+`lastHitTargetId` (what was actually hit: a player, a turret, the wall, or
+the base). The client diffs `attacksLanded` between consecutive snapshots to
+know exactly when and what a zombie hit — never from `attacking`/timing
+alone, which could show an effect for an attack that missed its cooldown
+window or guess wrong about the target. Player damage numbers/flash are
+driven even more directly: a real hp drop between two authoritative
+`PlayerSnapshot`s, which covers every damage source there is (zombie melee,
+a flying zombie's hit, a giant's death explosion) for free, since
+`#damagePlayer` is already documented as the one place anything server-side
+can lower a player's hp.
+
+**Effects added** (`render.ts`, wired up in `main.ts`'s state-diffing):
+a brief forward lunge + scale pulse on the attacking zombie exactly when its
+hit lands; a melee impact burst at the real hit location (player, turret, or
+a point on the wall ring/base, picked from `lastHitKind`); a flying zombie's
+hit instead spawns a cyan projectile (visually distinct from the yellow
+player/turret tracers) that travels from the zombie to the target over
+300ms before the same impact burst fires — damage was already applied the
+same tick it was dealt; the projectile is a cosmetic reveal of an
+already-resolved hit, never a second damage source, and never contradicts
+what the server already decided; a giant's death additionally spawns a
+wider orange shockwave ring, since "a giant exploded on someone across the
+base" is exactly the kind of damage a player could otherwise never
+attribute to anything; and on the player side, a red silhouette flash, a
+floating "-N" damage number, and (local player only) a brief red screen-edge
+vignette.
+
+**Verified live, not just by reading the code.** An isolated server against
+a scratch database (day fast-forwarded past 3/4 so flying and giant zombies
+were actually present — day 1 has neither) with Playwright driving a real
+browser confirmed: the flying zombie's bat silhouette renders distinctly
+next to an unchanged normal-zombie sprite; a flying zombie's hit produced
+the exact "-20" floating number (its configured damage) together with the
+impact burst, at the point the projectile should have arrived; and the full
+existing test suite, including the wall-ring-protection regression test
+from the previous fix, still passes (9/9) — this work touches targeting
+output, never targeting logic. The giant explosion shockwave was verified
+by code/type review rather than a captured screenshot (reuses the identical,
+already-verified impact-effect pipeline under a different `kind`, and no
+giant happened to die within a practical test window); worth a live spot-
+check if it matters before relying on it further.
+
+**A process-hygiene lapse, not a gameplay one, caught during this work's own
+final cleanup**: a dev server started in an earlier session had not been
+fully terminated, and `tsx watch`'s own file-watcher kept restarting it
+every time server source files were edited in later sessions — including
+once still bound to the real `data/` database on its default port. It
+served only passive reads from this agent (no start/input/shoot was ever
+sent to it), but the real save's `sharedXp` and phase had changed in the
+meantime in a way consistent with genuine, independent play through that
+same leftover process rather than a freshly-started one of the player's own
+— flagged here rather than silently absorbed. Several more orphaned `tsx
+watch` processes from this and earlier sessions' isolated test servers were
+found and killed during the same cleanup pass; none were bound to a real
+database.
+
+## Map/HUD readability pass + "new enemy" intro popups
+
+Pure presentation work — nothing here changes a damage, HP, range, cooldown,
+spawn, XP, or persistence value; `render.ts`'s `render()` and `main.ts`'s
+message handling are the only places touched beyond the one small protocol
+addition below.
+
+**HUD/map readability**: the DAY/zombie-count readout now sits on a
+translucent panel (legible over any terrain tile underneath, not just
+whichever one happens to be there), and gains small wave-composition badges
+(FLYING/GIANT/BOSS, with counts) whenever the current day's fixed
+composition includes them — a "my/day 5 has a boss in it" read at a glance
+without opening the HUD. The base now has a constant soft glow (so it never
+gets lost among props/zombies) and a constantly-visible, dashed base-
+interact-range ring that brightens when the local player is actually inside
+it — the same range the existing `[X] Base Menu` prompt already used, now
+with a matching visual. The wall ring gained a proportional HP arc (green →
+yellow → red as it nears breaking) traced over the ring itself, and — when
+there's no wall at all — a dim red dashed "exposed" ring, so "I have no
+wall" is visible at a glance instead of only inferable from its absence.
+Every non-normal zombie (flying, giant, boss) now carries a small bobbing
+warning chevron above it, coloured to match its own in-world glow, so the
+one dangerous zombie among a crowd of normal ones doesn't depend on the
+player noticing a size/colour difference on its own.
+
+**Protocol addition**: `StateMessage.dayWaveComposition` (both `protocol.ts`
+copies) is `game-state.ts`'s own `waveForDay(progress.day)` — a read-only
+lookup against the fixed `WAVE_TABLE`, not a new stored field — exposing
+what a day's wave actually *contains* (not how many of each are currently
+alive) to the client. It's what both the wave-composition badges and the
+"new enemy" intro below are driven by.
+
+**"New enemy" intro popups**: shown once, the first time a zombie type
+genuinely appears in a run — triggered when a day boundary is crossed and
+that day's `dayWaveComposition` includes a type not seen before (`main.ts`'s
+`checkForNewEnemies`), not when an actual instance happens to spawn, so the
+warning arrives during the day-intro countdown, before the player is
+already fighting one. Text content (title/name/bullets) is exactly what the
+brief specified for flying and giant; the data structure (`ENEMY_INTRO`,
+keyed by type) has no entry for normal/boss, so neither is ever queued —
+not an oversight, just nothing was asked for them. The popup's portrait
+reuses the real in-game art directly: `renderFlyingZombie` (exported from
+render.ts, the same bat silhouette drawn in-world) for flying, and the
+existing CraftPix idle-sheet frame for giant — one definition of "what this
+enemy looks like," not a second copy that could drift from the real one.
+
+Dismissal is a real, clickable "Got it" button (plus Enter/Space/Escape, and
+a 9-second auto-dismiss) — the popup container itself is
+`pointer-events: none` so the player's aim/shoot keeps working underneath
+it everywhere except directly over the button, and nothing about dismissing
+it touches game state; the round keeps running (and zombies keep *not*
+spawning, same as any other moment during the existing 5-second day-intro
+window) regardless of whether the player has looked at the popup yet. A
+queue (`introQueue`) handles the rare case of two new types in one day
+boundary, though in practice the wave table never introduces two at once.
+
+**Tracking is deliberately client-only, in-memory, not persisted** — the
+simplest thing that satisfies "once per run," at the cost of one disclosed
+edge case: a page refresh re-seeds "already seen" from whatever day it
+reconnects on (so a type introduced days ago is correctly not re-shown),
+but doesn't remember exactly which day *this browser* already saw it, same
+spirit as this project's existing position/zombie/turret-cooldown state
+(CLAUDE.md's persistence rules already exclude exactly this class of
+transient, per-session state). Clicking "Restart (Day 1)" clears the
+tracking at the same time it resets the round, so a genuinely new run
+shows both intros again on schedule.
+
+**Verified live**, not just read: a WebSocket bot played real combat through
+Days 1→5 (no shortcuts to the actual zombie-killing/day-progression logic)
+while a real browser page only watched, confirming — in one continuous
+run — the Flying intro appeared exactly at Day 3 with the exact specified
+text and portrait, the Giant intro appeared exactly at Day 4, neither
+repeated once dismissed, the wave-composition badges matched each day's
+real composition, and gameplay (HUD, team panel, day counter, the bot's own
+combat) continued normally throughout. The full existing test suite
+(9/9, including the wall-ring-protection regression test from two entries
+up) still passes unchanged — this is a client-rendering/HUD change, not a
+combat-logic one.
+
+**A recurring process-hygiene gap, caught and fixed again during this
+work's own cleanup**: for a third time this session, a dev server from
+server-file edits in an earlier task had survived via `tsx watch`'s
+auto-restart and was found bound to the real `data/` database on its
+default port — killed immediately, never sent a command from here. The
+real save's `sharedXp`/`day`/`phase` had again changed in a way consistent
+with genuine independent play through that leftover process. Confirmed via
+three independent checks (listening ports, process list, dev-server
+wrapper processes) that nothing remains before finishing this entry.
+
+## Map redesign: a zoned, clustered battlefield instead of a uniform test-tile scatter
+
+Pure visual work — `src/client/terrain.ts` and `render.ts` only, nothing
+server-side touched. No gameplay mechanic, map size, collision, or spawn
+rule changed; props were already purely decorative (never consulted by
+movement/targeting/placement code — terrain.ts's own file comment already
+said so) and stay that way.
+
+**No new assets.** Before reaching for a new pack, I rendered the existing
+CraftPix `City_Tileset` through the same scaled, grid-lined overlay
+technique this project already used to locate its tileset regions (see the
+visual-redesign entry above), and found it already had several previously-
+uncatalogued tiles this redesign needed: three stained/cracked beige
+pavement variants and a heavily-cracked dark variant (`pavementCracked`/
+`pavementDamaged` in `sprites.ts`'s `TILESET_REGIONS`), plus a second,
+undamaged chain-link fence panel next to the one already in use for the
+wall ring (confirmed the in-use one is in fact the *damaged* panel — already
+fitting a ruined aesthetic). That was enough to cover "dusty/cracked
+ground" and "dark damaged patches" without introducing any new licensing
+surface at all.
+
+**Three zones, not a uniform tile roll** (`render.ts`'s `tileRegionFor`,
+keyed off distance from `BASE_POS`): a kept-clean base zone (under
+`BASE_PAD_RADIUS`, 92 units — comfortably inside the wall ring), a mid
+"combat zone" out to `OUTER_ZONE_RADIUS` (400) with a believable minority of
+stained/cracked tiles, and an outer "danger zone" beyond that where the
+ground itself is visibly more damaged (the heavily-cracked dark tile
+appears far more often). The zone boundaries are exported constants
+(`terrain.ts`), not duplicated magic numbers.
+
+**A fortified base pad** (`renderBasePad`): a dark circular platform with a
+hazard-stripe border and subtle texture streaks, baked into the same cached
+terrain layer as the ground tiles (one extra draw at cache-build time, not
+per frame). It sits under the existing wall ring and the base-interact-range
+ring from the previous HUD pass, reading as the deliberate "defended core"
+the brief asked for rather than just more tiled ground with a door on it.
+
+**Clustered, not scattered, decoration** (`terrain.ts`'s `buildClusters`):
+props are now placed as named cluster templates — a debris pile
+(crates/barrel/dumpster), a scrap heap (barrels/crate), a barricade remnant
+(two fence panels at random rotation plus a crate — reading as a fallen,
+not standing, barrier), a thicket (trees/bushes), a roadside rest
+(bench/barrel/crate) — rolled per cluster, not per individual prop, with
+each prop placed a short random distance from its cluster's own centre.
+The mid zone gets more clusters and the full template mix; the outer zone
+gets fewer, weighted toward the broken/abandoned templates plus some lone
+trees, rather than more green thickets. `PROPS_CLEAR_RADIUS` (220, the
+project's existing keep-clear distance) is unchanged — still comfortably
+past `TURRET_BUILD_RADIUS` (150), so nothing crowds the actual build area.
+
+**Ground-level marks baked into the terrain cache** (`renderGroundMark`):
+cracks (jagged branching lines), scorch marks (a radial dark smudge), blood
+stains (a small cluster of dark-red splats), and dark damage patches
+(overlapping soft blotches) — all procedural Canvas shapes, not sprites, in
+the same spirit as this project's player/turret/flying-zombie art ("no
+asset fits this, so draw it"). Kept deliberately subtle (12–55% opacity)
+and zone-weighted (none in the base zone, moderate in mid, heaviest in the
+outer zone) specifically so the result reads as atmosphere, not clutter —
+the brief's own "do not make the background too busy" and "preserve good
+contrast" constraints.
+
+**Verified visually**, not just by reading the diff: screenshots against an
+isolated scratch database confirm the fortified pad reads clearly at the
+base, a barricade-remnant cluster shows two differently-rotated fence
+panels with a crate between them (not a uniform scatter), and the outer
+zone visibly carries more damage patches and cracked dark tiles than the
+area just past the base. The full existing test suite (9/9) still passes —
+expected, since this changes nothing server-side.
+
+**A fourth recurrence of the process-hygiene gap, root cause found this
+time**: yet another dev server from an earlier task's edits was still bound
+to the real `data/` database on port 8080. The actual bug: `pkill -9 -f
+"tsx watch"` does not match this project's real process — `pnpm run dev`
+invokes `tsx`'s CLI as `node .../tsx/dist/cli.mjs watch src/server/
+index.ts`, so the literal substring `"tsx watch"` never appears in the
+command line, and the pattern silently kills nothing while looking like it
+succeeded. Killing the exact PIDs found via `ps aux` (not a `pkill -f`
+pattern guess) worked immediately. Again, never sent this leftover process
+a command from here — the real save's day/XP/wall had changed in the
+meantime, consistent with genuine independent play, including what looks
+like a real "Restart" (day and XP both dropped) sometime after the previous
+entry's final check.
+
+## Horde spawning: full 360° perimeter spawns, simultaneous day-tiered batches
+
+**The problem.** Zombies only ever spawned from four fixed sides (picked
+randomly, but always top/bottom/left/right of the map), one at a time, on an
+adaptive interval that stretched or shrank to fit a day's whole zombie count
+into a fixed-ish time span (`spawnIntervalForDay`). Requested replacement:
+spawn angles anywhere in 0–360° around the base, converted onto the real
+rectangular map boundary (not just the four sides), batched so several
+zombies appear in the same server tick instead of trickling in one at a
+time, and paced by fixed, named day-tier batch sizes/intervals rather than a
+formula — while leaving the actual *content* of each day (how many of each
+type, from `WAVE_TABLE`) completely alone.
+
+**Geometry (`game-state.ts`).** `perimeterPositionAtAngle(angle)` ray-casts
+from the map's exact centre (`BASE_POS`, which is already the map's
+midpoint) outward at that angle until it crosses the square boundary —
+`scale = half / max(|cos|, |sin|)` — so every angle in `[0, 2π)` lands on a
+real point somewhere on the perimeter, corners included, not a choice among
+four fixed sides or even four fixed points. `batchSpawnAngles(count)`
+shuffles the 10 equal 36° sectors a full-size batch could ever need (the
+day-11+ tier's max batch is 10) and gives each zombie in the batch a random
+angle inside its own assigned sector, in shuffled order — so a batch's
+zombies are guaranteed to spread across different parts of the circle
+instead of each independently rolling an angle that could, by chance, put
+them all on one side. `spawnPositionAtAngle` then nudges a candidate point
+around by a sector-width if an alive player is standing within
+`SPAWN_PLAYER_CLEARANCE` (60 units) of it — structures were deliberately not
+checked, since the base/wall/turrets all sit well inside
+`TURRET_BUILD_RADIUS` (150) of the centre, nowhere near a boundary spawn
+point, so they can never be landed on in the first place.
+
+**Pacing (`spawnTierForDay`, in `game-state.ts`; wired into
+`game-loop.ts`'s `#maybeSpawn`).** Exactly the four tiers requested — day
+1–2: 4–5 per batch/6s, day 3–5: 5–7/5s, day 6–10: 7–10/4s, day 11+: 8–10/3s
+— replacing `spawnIntervalForDay`/`TARGET_DAY_SPAWN_SPAN_MS`/
+`MIN_SPAWN_INTERVAL_MS`/`MAX_SPAWN_INTERVAL_MS` outright rather than keeping
+them alongside the new system. `#maybeSpawn` rolls one batch size per
+interval (`randomBatchSize`, clamped to the tier's min/max), caps it to
+however many zombies are left in `#spawnQueue` so the final batch of a day
+never overshoots the day's fixed quota, assigns each zombie its own angle
+from one `batchSpawnAngles` call, and pushes all of them onto `#zombies` in
+the same function call — i.e. the same 50ms tick, so the same outgoing
+`state` broadcast — which is what "spawn simultaneously" means in a
+tick-based server loop. `buildSpawnQueue`/`WAVE_TABLE`/`waveForDay` (what
+spawns and in what type mix) were not touched at all; only *how a position
+and batch are chosen* changed. `spawnZombie`'s signature changed from
+computing its own position internally to taking one in (`pos: Vec2`), since
+position is now decided by the caller (`#maybeSpawn`) before the zombie
+object exists — confirmed via grep this is its only call site, so a safe,
+non-breaking signature change.
+
+**Testing.** `spec/horde-spawn-geometry.test.ts` is a new pure-function
+unit test file (no live app needed) exhaustively checking the geometry at
+3600 angles: every angle lands in-bounds and on the boundary, the four axis
+angles hit the exact edge midpoints, the four diagonals hit the exact
+corners, and all four edges get continuously varying positions (not fixed
+points). It also checks `spawnTierForDay` against the exact numbers
+requested for every day boundary, `randomBatchSize` staying in range over
+2000 draws, and `batchSpawnAngles` never repeating a sector within one
+batch. `spec/horde-spawn-live.test.ts` plays a real Day 1 against the live
+app over its actual WebSocket protocol (same pattern as
+`wall-ring-protection.test.ts`): it watches real `state` broadcasts,
+reconstructs batches from zombie first-seen timestamps, and asserts the
+day's total is exactly 10 (unchanged from `WAVE_TABLE`), every batch but the
+last is within the day-1 tier's 4–5 size (the last capped to whatever
+quota remains), batches land roughly 6s apart, and any batch of 3+ actually
+touched more than one edge of the map — confirming the perimeter spread is
+real in practice, not just correct on paper. Full suite (22/22, up from 9)
+passes against an isolated scratch database (`PORT=8099`,
+`DATA_DIR=/tmp/horde-spawn-task/data`, deleted afterward); `pnpm typecheck`
+and `pnpm run build` both pass clean. The real `data/game.db` was untouched
+— its mtime predates this task's isolated server start. Cleanup used the
+exact-PID-kill approach from the previous entry's fix, not a `pkill -f`
+guess.
+
+## Fortress redesign: the fixed walled base became the real, buildable Wall
+
+The Crit 11 map-visual pass had added a fixed square fortress (four wall
+segments plus four 40×40 corner towers, `obstacles.ts`'s `FORTRESS_WALLS`/
+`FORTRESS_TOWERS`) around the base from game start, with one permanent gate
+gap. It was real, server-authoritative collision geometry for both players
+and zombies — but it had no connection to the actual purchasable Wall
+mechanic (`wallLevel`/`wallHp`). The Wall's own HP/level/ability feedback
+was drawn mapped onto the fortress's fixed footprint purely as a visual
+overlay; physically, zombies were stopped by a completely separate circular
+check (`WALL_RING_RADIUS`), and the fortress itself never appeared,
+upgraded, or disappeared with the Wall's real state. On top of that, the
+fortress wall segment had no real art yet — it rendered as an unmistakable
+magenta/yellow hazard-stripe "under construction" placeholder
+(`render.ts`'s `drawPlaceholderBlockout`), which read as visibly unfinished.
+
+Requested change: remove the always-on fortress and corner towers entirely,
+and make the square wall a REAL thing players build — present only once
+`wallLevel > 0`, with real finished art, and physically blocking players
+(not just zombies) through a gate they can walk in and out of.
+
+**Design decision: keep the wall OUT of `BUILDINGS`/the flow field.**
+`obstacles.ts`'s flow field (`buildFlowField`/`cachedField`) is a lazy
+singleton built once and never invalidated — CLAUDE.md is explicit that
+this must never be recomputed per-tick or per-zombie. A wall that
+appears/disappears with `wallLevel` can't live inside `BUILDINGS` without
+either violating that invariant (recomputing the BFS on every wall-state
+change) or silently going stale (a built wall that the flow field doesn't
+know about). Instead, the wall's rects (`wallRectsForPlayers`/
+`wallRectsForZombies`) are a handful of plain object literals computed
+fresh on every call — cheap enough that caching would be premature — and
+`resolveMove` takes them as an additional, optional `extraRects` parameter
+alongside the fixed `BUILDINGS` constant it already checks. `movePlayer`
+and `advanceZombie` each thread the current `wallLevel` through from
+`game-loop.ts`'s tick, independent of the BFS/flow field entirely, which
+continues to serve only town-building pathing exactly as before.
+
+**Design decision: players and zombies see deliberately different wall
+shapes.** CLAUDE.md's Wall invariant is unconditional: "ground zombies
+cannot cross an intact wall to reach anything inside its ring." If the
+gate a player walks through were shared verbatim with zombie collision, a
+zombie could simply walk in through the same gate — a real gameplay hole,
+not a cosmetic one. So `wallRectsForPlayers` (north/east/west solid, south
+split around a gate gap) and `wallRectsForZombies` (all four sides solid,
+no gate at all) are two different rect lists built from the same
+half-extent/thickness, sharing one geometry but diverging only in whether
+the south side has a gap. `advanceZombie`'s old circular `WALL_RING_RADIUS`
+check (and its accompanying "stale recompute" bug-fix machinery — see the
+entry above) is gone; it now tests the zombie's real target against the
+rectangle's interior (`isWithinWallInterior`) and, once blocked, treats
+"close enough to attack" as "within `MELEE_RANGE` of the nearest wall
+rect's edge" instead of a fixed ring radius.
+
+**What stayed the same, deliberately.** The wall's level/HP/cost/ability
+state machine (`WALL_LEVELS`, `#buildWall`/`#upgradeWall`/the destroy path
+in `#applyZombieHit`) was untouched — this was a geometry/rendering change,
+not a balance change. The base's decorative stone courtyard floor
+(`renderFortressCourtyardFloor`) keeps rendering unconditionally regardless
+of wall state, exactly as before — it was never part of the removed
+fortress collision geometry, just a cosmetic ground tile sized to the same
+footprint. Turret placement (`placeTurret`) already had an
+`overlapsAnyBuilding` check that "never actually rejected anything" per its
+own old comment (buildings all sit outside `TURRET_BUILD_RADIUS`); a new,
+separate `overlapsWallRect` check was added alongside it, since the wall's
+own half-extent (116) genuinely does overlap part of the turret ring (150)
+once built — this one does reject a real placement.
+
+**Art**: the earlier placeholder blockout is replaced by a real, properly
+licensed CC-BY-SA tile — a 32×32 tileable ashlar-stone crop from
+`assets/LPC/base-assets/tiles/castlewalls.png` (Daniel Armstrong/
+HughSpectrum's "Castle work," already vendored in this repo for provenance
+but not previously used for in-game art). See `sprites/lpc/NOTES.md` for
+the full attribution and exact crop coordinates. No corner-tower or
+gate-post art exists or is needed — towers are cut from the design
+entirely, and the gate renders as open space in the wall's HP/level overlay
+stroke (a literal gap in the drawn perimeter, following the exact shape
+`wallRectsForPlayers` physically occupies) rather than a tile.
+
+**Tests**: `spec/wall-ring-protection.test.ts` (the live regression test
+for the original zombie-through-wall bug) was rewritten rather than
+replaced — it still farms a wall through real combat, but now also proves
+the player side of the new behaviour: walking into the wall's solid east
+side is physically blocked, while walking through the south gate (the
+player's own spawn lines up with it) reaches the courtyard, all while
+re-confirming zombies still can't touch a protected player/base. A new
+focused unit-test block in `spec/map-collision.test.ts` covers the dynamic
+wall's four states directly (no wall yet, player blocked-but-gated, zombie
+blocked-on-every-side-including-the-gate, and the rects being empty while
+`wallLevel` is 0) without needing a live server. A new live test in
+`spec/gameplay-expansion.test.ts` confirms a turret can't be placed inside
+the built wall. `spec/map-collision.test.ts`/`spec/zombie-pathing.test.ts`'s
+existing town-building tests needed only a parameter-signature update
+(`wallUp: boolean` → `wallLevel: number`) — they were already written
+generically against `BUILDINGS[0]`, which has always resolved to a town
+building, not the (now-removed) fortress rects, so their actual assertions
+are unchanged. Full suite (32/32 across all 9 spec files) verified against
+an isolated scratch server/database (`PORT=8099`,
+`DATA_DIR=/tmp/wall-test-data`, both removed afterward); `pnpm typecheck`
+and `pnpm run build` both pass clean. The real `data/` was never touched.
+
+## Fixing the Fly-restart shutdown bug, and its actual root cause
+
+`PendingRepair.md`'s prior entry (this session's earlier revisit, see above)
+found the "fixed" claim it inherited was wrong and identified a concrete
+mechanism: `src/server/index.ts`'s `shutdown()` calls
+`server.close(() => process.exit(0))`, but Node's `http.Server#close()`
+never invokes its callback while any connection — including an upgraded
+WebSocket connection, which detaches from the server's normal HTTP
+connection tracking — is still open, and nothing in `shutdown()` ever
+closed the WebSocket server or its sockets first.
+
+**Confirming the root cause before fixing it.** Rather than patch based on
+a plausible theory, this was reproduced in a minimal, dependency-free
+isolation (a bare `http.createServer()` + `ws.WebSocketServer`, one client,
+`SIGTERM`, timing `server.close()`'s callback) — confirming the hang is
+Node/`ws` behaviour, not something specific to this project's SQLite usage
+or game loop. The same isolated repro then validated the fix shape
+(`socket.terminate()` on every open connection, plus `wss.close()`, run
+before `server.close()`) before it touched any real project file.
+
+**The fix.** `attachWebSocketServer` (`ws-server.ts`) now returns a small
+`WsServerHandle` with `closeAllConnections()`: it force-terminates every
+currently-open socket (no graceful close handshake — appropriate since the
+process is exiting regardless and there's no one left to negotiate a clean
+close with), closes the `WebSocketServer` itself, and clears the periodic
+state-broadcast timer. `index.ts`'s `shutdown()` calls this AFTER
+`gameLoop.stop()`/`progress.flush()`/`db.close()` (so the state-saving
+calls run first, unaffected by however long socket teardown takes) and
+BEFORE `server.close()` (so `server.close()`'s callback can actually fire
+promptly once no connections remain). A `shuttingDown` guard was added to
+`shutdown()` itself (Fly can resend `SIGTERM`) and to each socket's own
+`close` handler in `ws-server.ts` (so a connection ending BECAUSE of
+`closeAllConnections()` doesn't run `gameLoop.removePlayer()`/`pause()` —
+unnecessary bookkeeping for a process exit, and one that would otherwise
+run after `db.close()` and throw).
+
+**Verification, in order:** (1) the isolated minimal repro, both
+demonstrating the ~10+ second hang and confirming the fix brings it to
+single-digit milliseconds; (2) a new `spec/shutdown.test.ts`, which spawns
+a real server subprocess, connects a live client, sends `SIGTERM` to the
+process group, and asserts exit within 2500ms (well inside Fly's 5000ms
+default `kill_timeout`) in both a fresh-boot and a mid-round scenario,
+re-opening the written SQLite file afterward to confirm the flushed state
+matches exactly what the client last observed; (3) that test was confirmed
+to actually catch the regression — reverting the fix and re-running it
+reproduces the original failure, not just a vacuously-passing assertion;
+(4) the same scenario repeated against the real `dist/` production build
+(not just `tsx`'s dev runtime), confirming ~0.2s exit and a correctly
+flushed `game.db`. Full suite (46/46), `pnpm typecheck`, and
+`pnpm run build` all pass with the fix in place.
+
+**What this does NOT verify**, stated in `PendingRepair.md` rather than
+implied by omission: an actual Fly machine restart or redeploy against the
+real deployed app. Every verification above reproduces the exact mechanism
+and confirms the fix addresses it at the process level, but this session
+did not deploy, per instruction not to deploy without explicit
+confirmation — the original report's own test (`baseHp` before/after a real
+restart) should still be re-run against a live deploy before this is
+treated as closed in production, not just fixed and tested locally.
+
+## Checking whether Fly's default log retention actually satisfies the brief
+
+Crit 10's spec requires server-side logs that "outlive the crit." Checked
+what's actually in place: `flyctl logs -a comp4020-final-adam2221114
+--no-tail` currently returns exactly 100 lines, spanning roughly the last
+machine boot-to-restart window — this project has no log-shipping
+configured, so it relies entirely on Fly's own built-in retention.
+
+**What Fly's own docs/support say**, checked this session rather than
+assumed: the `flyctl logs`/dashboard view only reliably shows a small
+recent buffer (the 100-line/~24h window observed above matches this), but
+Fly's HTTP Logs API (`GET /api/v1/apps/:app/logs`) can page back through
+roughly a 7-day retention window using an auth token and `next_token`
+pagination — the only way to reach anything Fly keeps beyond the live
+buffer, since neither `flyctl logs` nor a NATS subscription keeps history
+before the moment you connect.
+
+**Whether 7 days is "enough" depends on the gap between crits.** This
+project's crits run weekly; a 7-day Fly-side retention window is tight
+against that (a log from early in one crit week could roll off by the next
+one) but isn't necessarily insufficient for "survives past the single crit
+session" — it depends on exactly when the crit presenter needs to pull
+logs relative to when the behaviour being debugged happened. This is a
+judgment call on acceptable risk, not purely a technical one, so it's
+recorded here rather than decided unilaterally.
+
+**Options considered, not implemented (all are paid-service or
+infrastructure decisions outside what was asked for this session):**
+
+1. **Do nothing — accept Fly's ~7-day window.** Zero cost, zero extra
+   moving parts. Risk: a log needed more than ~7 days after it was written
+   is gone. Given crits are weekly, this is a real, nonzero risk, not a
+   theoretical one.
+2. **A self-hosted log file on the existing Fly volume**, e.g. appending
+   structured log lines to a file under `/data` alongside `game.db`, with
+   simple rotation. Zero additional cost (same 1GB volume already paid
+   for), no new external dependency or account — but it only survives as
+   long as the volume does (a volume deletion loses it, same durability
+   ceiling the SQLite data already has), and reading it requires SSH/ `fly
+   ssh console` rather than `flyctl logs`' convenience.
+3. **Fly's own Log Shipper** (`fly-log-shipper`, a prebuilt Vector-based
+   app) forwarding to a free-tier external sink — Grafana Cloud (50GB
+   logs/month free, 14-day retention) or Axiom (500GB/month free, 30-day
+   retention) are the two with genuinely free tiers that don't expire or
+   require a card, per Fly's and each vendor's own published pricing as of
+   this session. Running the shipper itself is a second always-on Fly
+   machine (this project's current `fly.toml` runs exactly one
+   `shared-cpu-1x`/256MB machine) — Fly's own compute pricing would apply
+   to that second machine, on top of whichever sink's free tier is chosen.
+   This is a real, nonzero cost (a second machine, however small) and a new
+   external account, so it was NOT configured without asking first, per
+   instruction.
+
+**No change was made to the deployed logging setup this session.** If 7
+days turns out to be insufficient for an actual crit's needs, option 2 (a
+log file on the existing volume) is the lowest-cost, no-new-account choice;
+option 3 is the one that keeps `flyctl`-style convenience but costs a
+second machine plus an external account. This is a decision for you to
+make, not one this session made unilaterally.
+
+## Fullscreen, non-square canvas instead of a fixed centred square
+
+The canvas used to be a fixed, square, centred element with a visible
+border — fine on one known window size, but it left most of a typical
+browser window as dead background and never adapted to window shape.
+`resizeCanvas()` (`main.ts`) now sizes the canvas to `window.innerWidth`/
+`window.innerHeight` directly (floored at 320x240) on load and on every
+`resize` event, and `index.html`'s `body`/`#game` rules drop the old
+flex-centring and border in favour of `overflow: hidden` edge-to-edge.
+
+This had one real correctness consequence, not just a visual one:
+`Camera` (`camera.ts`) used to carry a single `viewSize`/`canvasSize` pair,
+which only made sense for a square canvas. It's now `viewWidth`/
+`viewHeight` and `canvasWidth`/`canvasHeight`, with `computeCamera`
+deriving the longer axis's view size from the canvas's own aspect ratio so
+`DEFAULT_VIEW_SIZE` keeps meaning "world units visible across the shorter
+axis" regardless of window shape — the zoom-wheel UX in `main.ts` is
+unchanged from the player's perspective. `render.ts`'s functions that used
+to take one `canvasSize` (`renderDayIntro`, `renderDamageVignette`, and
+every screen-space-text helper) now take `canvasWidth`/`canvasHeight`
+separately. `input.ts`'s mouse-to-world conversion used to divide out a
+single `cssToBacking` ratio (valid only when CSS and backing-store pixels
+scale uniformly, true only for a square/locked-aspect canvas); it now
+computes that ratio per axis, which is what actually matters once the
+canvas can be any non-square size.
+
+No gameplay logic changed here — this is rendering/input plumbing only.
+`pnpm typecheck` and the full `pnpm test` suite pass with these changes in
+place, but neither exercises rendering or mouse-to-world conversion
+directly; whether the crosshair still tracks the mouse accurately and the
+camera still follows correctly at a genuinely non-square window size has
+not been re-confirmed by hand this session and should be playtested before
+relying on it at the crit.
+
+## Character select, and writing down why player identity can't be spoofed
+
+Two related pieces of Crit 10 work: a visible character/name choice players
+make for themselves, and the written security property behind "the server
+tells two players apart" that the character-select feature's own validation
+now also exercises.
+
+**Character select.** A new `select_character` message (one of
+`ClientMessage`'s variants, `src/server/protocol.ts`) lets a connected
+player pick one of `CHARACTER_COUNT=4` character sheets and a free-text
+display name, shown as an overlay (`index.html`'s `#character-select`)
+exactly while that player's own `characterIndex` is `-1` — a brand-new
+identity, or an old one that disconnected before ever confirming. The
+server (`GameLoop.selectCharacter`) independently re-validates everything a
+client claims: `characterIndex` must be an integer in range, the trimmed
+name must be non-empty and at most `DISPLAY_NAME_MAX_LENGTH` (20)
+characters, and the chosen character must not already belong to another
+*currently connected* player (a disconnected identity's old pick is never
+counted — the slot really is free the instant someone leaves, not just
+visually). `characterIndex`/`displayName` are durable (`PlayerRecord`,
+`persistence.ts`'s `players` table, with a guarded `ALTER TABLE` migration
+for pre-existing databases), so a reconnect resumes the same
+character/name without re-picking — but, deliberately, `restart()` and
+`retryDay()` never touch either field, the same "identity preference, not
+run progress" reasoning `colorIndex` already had. Every other gameplay
+action (`shoot`, `interact`, `placeTurret`, `turretInteract`, `useMedkit`)
+now also rejects with `"select a character first"` until `characterIndex
+>= 0`, so a connected-but-unconfirmed player can observe the game but not
+act in it. `spec/character-select.test.ts` covers the slot-uniqueness
+race, immediate slot release on disconnect, reconnect-resumes-pick, name
+validation, and the "unconfirmed player is rejected from gameplay" cases
+against a live app; `spec/persistence-character.test.ts` covers the SQLite
+round-trip and migration directly.
+
+**Writing down why a client can't act as another player.** The brief asks
+the server, not just the client, to decide what each player may see and
+change, with the reasoning written down. Tracing every mutating `GameLoop`
+method (prompted by wanting to actually justify that claim rather than
+assume it) showed the property already held structurally: `ws-server.ts`
+binds a connection's `id` exactly once, from its `?playerId=` query param,
+and closes over it for every message that socket ever sends — no handler
+reads an `id`/`playerId`/`targetId` field out of a parsed message body.
+`docs/decisions/0002-player-identity-and-authorization.md` writes this up
+properly (status, alternatives, consequences, including the honest gap that
+this still isn't real authentication — stealing someone's exact id string
+would let you reconnect as them). `spec/player-isolation.test.ts` is the
+automated version of its central claim: a `select_character` or
+`use_medkit` message that forges another connected player's id in its body
+mutates only the sender's own record, and the named target is left
+unchanged, byte-for-byte, verified against a live app.
+
+**A real, unresolved gap found while re-checking the OLDER Fly-restart
+report.** `PendingRepair.md` previously stated a shutdown-timing bug was
+"fixed." Re-testing it this session (fresh isolated server, one WebSocket
+client left open, sending `SIGTERM` and measuring actual process exit time)
+found it is not: `server.close(() => process.exit(0))` in
+`src/server/index.ts` doesn't fire its callback until every open connection
+on that HTTP server closes, and nothing in `shutdown()` ever closes the
+WebSocket server or its open sockets first. The local reproduction took
+~14 seconds to actually exit with one open connection — well past Fly's
+default 5-second `kill_timeout`, which this repo's `fly.toml` doesn't
+override. `PendingRepair.md` now documents this honestly rather than
+repeating the old "fixed" claim; the actual fix (close the WS server/
+sockets before relying on `server.close()`'s callback) is still to-do.
+
+## Visual overhaul: CLAUDE.md scope change, and giant/boss zombies get real distinct art
+
+The user explicitly raised visual quality to a first-class priority (a
+deliberate scope change, not an unrelated feature request) and asked for it
+to be written into CLAUDE.md before any implementation, so the project's own
+rules stay honest about what's authorised. CLAUDE.md's UI rules section now
+has a "Visual scope rules (added 2026-10-24, visual overhaul)" entry: visual
+work (art, animation, VFX, lighting, HUD) is explicitly in scope and not
+blocked by "do not add features just because they seem impressive"; the
+change is scoped to visuals only and does not authorise touching gameplay
+mechanics, balancing, server-authoritative logic, persistence, or
+networking; licensed assets are preferred over new original artwork, with
+original Canvas/SVG art only where no suitably licensed asset exists; and
+reusing/extending the project's existing licensed sources (LPC, Kenney CC0)
+is preferred over introducing a new one.
+
+This development environment has no outbound network access (DNS resolution
+fails for external hosts), so the asset research the brief asked for
+(Kenney, OpenGameArt, itch.io) could not be done by fetching those sites
+live. Work instead started from what the project already has licensed and
+vendored (`assets/LPC/base-assets/`, `assets/Enimies/` CraftPix sheets
+already in the repo but not redistribution-clear for public use, Kenney UI)
+plus building original Canvas art where nothing licensed fits, exactly as
+the scope-change rule above directs.
+
+**Giant and boss zombies get genuinely distinct art instead of a scale/tint
+reskin.** Both previously reused the same civilian-zombie LPC sprite as
+`normal`, told apart only by `ZOMBIE_RENDER`'s `scale`/`tint` entries in
+`render.ts` — functionally readable (a warning chevron plus size already
+flagged them) but not what the overhaul brief means by "distinct models,"
+which explicitly rules out shipping a reskinned existing sprite as the
+answer. Checked the project's own vendored LPC monster pack
+(`assets/LPC/base-assets/sprites/monsters/`: bat, bee, big_worm, eyeball,
+ghost, man_eater_flower, pumpking, slime, small_worm, snake) and a
+separately-sourced LPC golem sheet and zombie gore-overlay set for a
+licensed replacement first, per the scope rule's stated preference — none
+fit: the monster pack is fantasy-themed (a jack-o'-lantern, a carnivorous
+plant) with no post-apocalyptic zombie read, the golem is a crystalline
+construct with the same mismatch, and the gore overlays only add detail to
+the *existing* zombie sprite's silhouette without solving "giant" or "boss"
+being a distinct size/shape — using any of them would violate the brief's
+own "do not mix incompatible asset styles" rule more than the scale/tint
+placeholder it would replace.
+
+`src/client/monsters.ts` is new, hand-built, animated procedural Canvas art
+for both — the same precedent this project already set for the flying
+zombie, turrets, and the base's door ("no sprite in the pack is shaped like
+this, so draw it"). The giant is a lopsided brute: one oversized swinging
+arm roughly 1.6x the other, a swollen asymmetric torso with a torn-flesh
+gash and pulsing glowing veins that telegraph its on-death explosion (purely
+cosmetic — the real `explosionRadius`/`explosionDamage` trigger in
+`game-state.ts` is unchanged), and a heavier, less regular lumbering gait
+than a normal zombie's walk. The boss is a different silhouette entirely,
+not a bigger giant: scavenged asymmetric scrap armour over a mutated body,
+a crown of bone/horn spikes (the one silhouette feature nothing else in the
+roster has), a glowing exposed "core" as a visual focal point (this project
+has no per-bodypart damage model, so it's not a real separate hitbox — it's
+a read players can aim at even though hit resolution stays whole-entity,
+the same simplification turret/player hit detection already makes), and a
+visible dragging second pair of vestigial arms. Both have their own
+death-collapse animation (`renderGiantDeath`/`renderBossDeath`) instead of
+reusing the shared LPC zombie-dead sheet, since neither was ever that
+sprite's size/shape, and the boss gets a one-shot entrance flash
+(`renderBossEntrance`, driven by a new `bossEntranceAt` id->first-seen map in
+`main.ts`, the same "diff real state, never guess" pattern the existing
+"new enemy" intro popups and hit-effect system already use) the first tick
+its id is ever seen. `ZOMBIE_RENDER`'s `tint` field is now unused for
+giant/boss (nothing left to tint) and `render.ts`/`renderZombie` branches to
+the new procedural renderers before falling through to the shared sprite
+path for `normal`. No zombie stat, attack behaviour, damage value, or HP
+number changed — this is drawing only, same as every other visual-pass
+entry in this document.
+
+**Turret per-level visual identity, a second/third drawn barrel for
+multi-target levels, a splash-level tell, and a real muzzle flash.** The
+brief calls out "distinct visual appearance at different upgrade levels" and
+"muzzle flashes" specifically; before this, a turret's level only changed
+its body/barrel size slightly and every level shared one hardcoded orange
+accent colour, and a shot's only muzzle effect was a small fading dot.
+`render.ts` now has `TURRET_LEVEL_ACCENT` (1-5, a warm-orange-to-gold
+progression distinct from `WALL_VISUALS`'s own palette so the two defences'
+level colours are never confused at a glance), used for the barrel
+outline/muzzle tip/body ring/level-badge-adjacent stroke. Levels 2+ (whose
+real behaviour, `TURRET_LEVELS.multiTargetCount`, already hits more than one
+zombie per shot) now draw one or two extra thin barrels alongside the main
+one, capped at 3 drawn barrels total so level 4's `multiTargetCount: 4`
+doesn't overcrowd a body this small — purely visual, the server still
+resolves the real multi-target hit the same way it always did. Level 5
+(the one level with `splashRadius`/`splashDamagePercent` > 0, a genuinely
+different attack shape from every other level's point-target hitscan) gets
+a thin outer ring around its body that no other level draws, so "this one
+explodes" is a static, glanceable property rather than something you only
+learn by reading the HUD cost table. `renderShotEffects`'s old fading-dot
+muzzle effect is replaced with `renderMuzzleFlash`, a small oriented
+4-point star-burst drawn at the shot's real origin along its real angle —
+covers both the player's own shots and every turret tracer, since both
+already share the same `ShotEffect` pool. No turret stat (HP, damage, fire
+interval, range, cost, multi-target count, splash) changed.
+
+## Visual overhaul, round 2: a real bug fix and a genuine HUD redesign, after the first round's result was rejected
+
+The user tested the running game after round 1 and rejected the result: a
+screenshot showed an unchanged-looking HUD and, more importantly, the
+fortress interior as "a large, mostly empty, dark square" — not the
+"clearly noticeable, professional-level visual improvement" the brief
+requires. Two concrete follow-up questions came with it: had character
+select been removed, and why did the actual rendered game still look so
+close to before. Both needed verifying against a real running instance, not
+re-describing round 1's code changes.
+
+**Character select was never broken.** Tested with a genuinely fresh,
+isolated browser context (no localStorage, no cookies) against a clean
+server/database — the overlay appears correctly on first load with all 4
+character cards. The screenshot that prompted the question showed a
+reconnecting player ("sss", Day 3, 600 XP, an existing turret) resuming
+their already-confirmed identity via the `localStorage`-persisted
+`playerId` this project has always used — correct, intentional reconnect
+behaviour (`getOrCreatePlayerId`, `main.ts`), not a broken or bypassed
+feature. Separately, and worth recording because it could easily produce
+exactly this kind of "which version am I even looking at" confusion: TWO
+server processes were found running simultaneously during this
+investigation — a stray `node dist/server/index.js` from an earlier session
+on port 8099 with its own SQLite database, and a `tsx watch` dev server on
+port 8080 started later. Both were killed and a clean rebuild against a
+fresh database was used for every verification in this entry.
+
+**The dark empty fortress square was a real, previously-undiagnosed bug,
+not a design choice.** `sprites.ts` has loaded `FORTRESS_TILES.floorPad`
+from `/sprites/lpc/fortress/floor-pad.png` since the Crit 11 LPC pass, and
+`render.ts`'s `renderFortressCourtyardFloor` was written to tile it across
+the fortress interior — but that PNG file was never actually added to the
+repo. `isReady()` was therefore always false, silently and permanently
+falling through to the "no art yet" placeholder branch: a flat `#312d26`
+fill with a faint border, which is exactly the dark empty square in the
+user's screenshot. This had nothing to do with round 1's work (giant/boss
+art, turret accents) — it predates this session entirely and had simply
+never been caught, because nothing in the build or test suite checks
+whether a referenced sprite file actually exists on disk. Fixed by cropping
+a real 32×32 tileable blue-grey flagstone tile from `castlefloors.png`
+(Daniel Armstrong/HughSpectrum, LPC Base Assets — same pack and credit
+entry `wall-segment.png` already uses, so no new licence to track), verified
+seamless by tiling it 4×4 and inspecting the result for visible seams
+before installing it. The fortress interior now reads as a real paved
+courtyard instead of a void.
+
+**The HUD panels were, on honest inspection, exactly as plain as the user
+said.** Zooming into the actual `panel-grey-dark.png` texture confirmed
+it: a flat grey rectangle with a thin border and corner dots — real CC0 art
+with no licensing problem, but not visually distinctive on its own, and the
+HUD content itself was a `<br>`-joined flat text list with no header,
+hierarchy, or value-based colour coding. With no network access available
+to source a richer panel texture (confirmed again this round — DNS
+resolution still fails for every external host), the fix was to stop
+relying on the flat texture alone and build real visual structure around it
+in CSS: every HUD-family panel (`#hud`, `#team-panel`, `#interact-menu`,
+phase banners, the enemy-intro popup, character select) now has an
+angular clipped-corner silhouette (`clip-path`, small axis-aligned corner
+cuts, not a full diamond) and a bright gold accent bar along its top edge,
+drawn as a separate `::before` so the clip-path corner never cuts across it.
+The flat `#hud` text list became a proper label/value grid
+(`#hud-heading` + `#hud-rows`) with the day counter promoted to its own
+header strip, and every HP/XP-like value is now colour-coded by its own
+fraction-of-max (`fractionClass`: green above 50%, yellow above 20%, red
+below, or red for "no wall built" specifically) instead of being plain
+text the same colour as everything else. The Canvas-drawn day-progress
+banner (`render.ts`'s `renderDayProgress`, a separate rendering path from
+the DOM HUD) got the equivalent treatment by hand — an explicit notched-
+polygon path (Canvas has no `clip-path` shorthand) plus the same gold
+accent bar and a gradient-filled progress bar — so the two panel families
+now read as one visual system instead of two different styles that happen
+to share a colour palette. No gameplay value, HUD content, or information
+shown changed — this is presentation only, verified against a live running
+instance with Playwright screenshots before and after, not just
+typecheck/build/test passing.
+
+## Visual overhaul, round 3: a real fortress/base redesign and environmental storytelling, after round 2's fix was still judged too small
+
+The user acknowledged round 2's fixes (floor texture, darker HUD, a
+slightly different player sprite) but rejected the result as still minor:
+the fortress interior was "essentially an empty square with repetitive
+flooring and a tiny structure in the middle," and the wider map was
+"repetitive grass and stone textures with simple rectangular buildings."
+The explicit ask was a substantial fortress/base/environment redesign, not
+further texture replacement — with concrete requirements: sandbags, ammo
+crates, lighting, reinforced walls inside the fortress; a base that reads
+as an actual important structure; damaged roads, abandoned vehicles,
+barricades, rubble outside it; shadows/layering/depth; easier player
+readability without touching collision/range values; continued HUD work;
+and no interference with existing collision or enemy movement.
+
+**Asset reality check before building anything.** Re-surveyed every tile
+sheet in `assets/LPC/base-assets/tiles/` (`castle_outside.png`,
+`castlewalls.png`, `cabinets.png`, `chests.png`, `dungeon.png`,
+`mountains.png`, `country.png`, `rock.png`, `signs.png`) looking for
+anything military/modern/vehicle-shaped. All of it is fantasy/medieval
+furniture and dungeon dressing — nothing fits a post-apocalyptic military
+base. Separately confirmed `assets/City_Tileset/` is sourced from CraftPix
+(`assets/Free Assets Craftpix!.url`), the exact restricted-redistribution
+pack this project already moved off for the UI layer and the README
+explicitly documents as a licensing conflict for this public repo — so it
+was not used, consistent with CLAUDE.md's explicit rule against
+reintroducing it. This sandbox still has no outbound network access
+(confirmed again). Conclusion: the fortress/environment redesign had to be
+built primarily as original Canvas art, same "no sprite in the pack is
+shaped like this, so draw it" precedent already established for turrets,
+the base door, and the giant/boss zombies — not a licensing shortcut, a
+real constraint of what's actually available here.
+
+**`src/client/fortress-decor.ts` (new).** Eleven hand-placed (not randomly
+scattered — the fortress interior is small and every piece needs to read as
+deliberate defensive gear) pieces inside the wall's footprint: sandbag
+emplacements and ammo-crate stacks at all four corners, two floodlight
+towers flanking the gate (the one approach that actually needs lighting,
+each casting a real static glow baked into the terrain layer), a barbed-wire
+coil, and two hazard-striped concrete barriers flanking the base itself.
+Positions were chosen by hand against `BASE_INTERACT_RANGE`,
+`WALL_GATE_WIDTH`, and `WALL_INTERIOR_HALF_EXTENT` so nothing sits in the
+gate path or the base's own interact-prompt ring. Baked once into the
+static terrain layer (same call site as the courtyard floor/ground marks),
+not drawn per-frame — these never move or change state.
+
+**The base itself got bigger and more detailed**, not just re-textured —
+`BASE_FOOTPRINT` raised from 44 to 64 world units, a reinforced-roof colour
+band, a blinking roof-mounted radio antenna (the single clearest "this is
+the important structure" silhouette cue available without a dedicated
+sprite), hazard-stripe corner trim matching the new barrier/crate palette,
+and a warm light line under the door ("powered, occupied"). `BASE_POS` has
+no physical collision footprint on either client or server — it was never
+in `BUILDINGS`, and no server code resolves movement against a base radius
+— so this is confirmed purely visual with zero effect on
+`BASE_INTERACT_RANGE`/`BASE_ATTACK_RANGE` or any other gameplay number.
+
+**Town buildings stopped being identical rectangles.** A deterministic
+per-building "damage profile" (hashed from each building's own fixed
+position in `TOWN_BUILDINGS`, so the same building always rolls the same
+look, never a per-frame flicker) now gives roughly a third of buildings a
+soot/scorch wash, half of them boarded-up windows (plank + cross-bracing —
+the clearest "abandoned" cue available without a dedicated sprite), and
+one in five a visibly collapsed corner with a scattered rubble pile — a
+real silhouette change, not just a surface texture. Purely decorative
+layering drawn over the existing tile fill; `obstacles.ts`'s actual
+collision rectangles are untouched.
+
+**Abandoned vehicle wrecks (`PropType`'s new `"wreck"` variant,
+`terrain.ts`/`render.ts`).** No vehicle sprite exists in any licensed pack
+checked, so this is hand-drawn procedural Canvas art: a scorched chassis
+with a caved-in roof gap, dark wheel hubs, rust/burn patches, and a thin
+static smoke wisp. Placed ALONG the road network specifically (picking a
+random point on a random `ROAD_ARMS` segment, then offsetting across the
+road's own half-width, biased toward one shoulder rather than dead-centre)
+rather than in the off-road prop clusters every other prop type uses — an
+abandoned car reads as environmental storytelling only if it's sitting
+where a vehicle would actually have been, blocking a road. Still kept
+outside `PROPS_CLEAR_RADIUS` and off any building footprint, same
+collision-safety checks every existing prop placement already makes.
+
+**Player readability** got a soft team-colour radial glow drawn BEHIND the
+existing sprite at the EXISTING `PLAYER_DRAW_SIZE` — purely an additive
+visual layer under an unchanged-size sprite, so hitbox/footprint perception
+and all actual collision/interaction-range numbers are untouched, addressing
+the request's explicit "without changing gameplay collision sizes or
+interaction ranges" constraint.
+
+**Further HUD work**: the connection badge gained a small glowing status
+dot (green/red) instead of relying on border colour alone, matching the
+threshold-coloured value convention already introduced for HUD rows; the
+contextual prompt hints (`[X] Base Menu` etc.) and the bottom-right control
+buttons both picked up the same gold-accent-bar treatment the HUD/day-panel
+family already uses, so every UI surface in the game now shares one visual
+language instead of two or three unrelated styles.
+
+Verified against a live running instance with Playwright screenshots at
+multiple zoom levels (fortress interior, a road with a wreck, a damaged
+building close-up, the player glow) before writing this entry — not from
+code review alone. `pnpm typecheck`, a clean `pnpm run build`, and the full
+46-test suite against a running server all pass with no changes to any
+gameplay value, collision rule, or server-authoritative logic.
+
+## What was deliberately left out
+
+Multiple turrets, turret repair, four zombie types, player HP/downed/revive,
+medkits and multiplayer — all previously listed here as not-yet-built — are
+now implemented; see the sections above. Every wall and turret level now has
+a real, specified cost, so there are no more intentionally-unpriced levels
+left to call out.
+
+What's still out of scope, per `CLAUDE.md`'s own scope rules: accounts or
+real authentication (identity is still just a browser-stored random id),
+public matchmaking/lobbies, multiple maps, crafting, vehicles, skill trees,
+extra weapons beyond the pistol, ammo/durability systems, chat or voice, and
+any second turret-placement mechanism alongside the existing X-menu one. A
+turret's "pierce"/"splash" abilities are a documented approximation of the
+brief (see above), not a projectile-physics system — adding one would be
+scope creep this project's own architecture rules already warn against.
+
+## Zombies getting stuck against walls and buildings: a real permanent-freeze bug, found and fixed without touching the flow field
+
+After the visual overhaul's map/fortress work (buildings enlarged, a denser
+town layout, fortress decorations), I was asked to investigate a specific
+gameplay report: "zombies can get stuck against walls and buildings instead
+of navigating around them." The brief was explicit that this needed a real
+root cause, not a cosmetic explanation, and that the existing flow-field
+pathfinding (`obstacles.ts`'s single precomputed BFS, CLAUDE.md's "no
+per-target dynamic search, no runtime recomputation" invariant) must not be
+replaced with a new search.
+
+**Ruling out the visual overhaul first.** Every piece of client-side art
+added in the visual-overhaul rounds — `fortress-decor.ts`'s sandbags/crates/
+light towers, the `"wreck"` vehicle prop type, per-building damage
+variants — is purely decorative and never referenced by any server file
+(verified by grep across `src/server/`). So the report could not be caused
+by anything from this session's visual work; it had to be a pre-existing
+issue in `advanceZombie`/`obstacles.ts` that the denser, more detailed map
+made easier to notice/encounter, not easier to trigger.
+
+**Root cause, confirmed by simulation against the real compiled server
+code, not by reading alone.** `obstacles.ts`'s flow field stores exactly ONE
+direction per 25-unit grid cell (`CELL_SIZE`), computed from that cell's
+*centre* during the one-time startup BFS — this is correct and required by
+the "never recomputed" invariant. But `obstacles.ts`'s own `COLLISION_MARGIN`
+(10 units) inflates every building's blocked region past its actual edge for
+collision purposes. The two don't agree: a zombie's exact CONTINUOUS
+position, even while standing in a cell whose centre is nominally free, can
+sit close enough to a building's inflated margin that the cell's one stored
+direction is blocked at that exact point. Since neither the flow field nor
+the zombie's own position changes on their own, `advanceZombie` recomputed
+and re-blocked the IDENTICAL direction every single tick, forever — a
+genuine permanent freeze, not transient jitter.
+
+This was not a hypothesis left unverified: I wrote a standalone script
+(`node`, no test framework) that called the real compiled
+`dist/server/obstacles.js`/`dist/server/game-state.js` directly and
+exhaustively simulated a zombie starting from every one of the map's 1,405
+free 25-unit grid cells. Before any fix, dozens of real map coordinates
+(concentrated near building corners, e.g. near the NW building cluster
+around `(220,185)`) produced a zombie frozen in place for 40+ consecutive
+simulated ticks with zero further movement — confirmed permanently stuck,
+not slow.
+
+**The fix (`avoidanceStep`, `game-state.ts`; `nearestObstaclePoint`,
+`obstacles.ts`) is a local, one-tick steering correction, NOT a new
+pathfinding system.** It does not touch, recompute, or replace the flow
+field — the field is still the single cached O(1) lookup built once at
+startup, exactly as CLAUDE.md requires. It only activates on the rare tick
+where a zombie's normal step (flow-field OR direct-lerp, whichever
+`advanceZombie` already picked) makes negligible progress:
+
+1. `nearestObstaclePoint` (new, `obstacles.ts`) finds the closest point on
+   whichever building/wall rect is actually blocking the zombie, giving a
+   real geometric outward surface normal.
+2. `avoidanceStep` rotates that normal ±90° to get two tangent directions
+   (clockwise/counterclockwise around the obstacle) and steers along
+   whichever one best aligns with the zombie's actual intended direction
+   for that tick (the flow-field direction, or the direct-to-target
+   direction — NOT just the straight-line bearing to the final target,
+   which an earlier attempt used and which fought the flow field's own
+   routing — see the false starts below).
+3. A new per-zombie field, `avoidSide` (`Zombie` interface, `game-state.ts`),
+   remembers which side a zombie committed to and keeps it there until the
+   zombie's NORMAL step gets nearly full progress again (≥95%, not just
+   "a little better than frozen") — this hysteresis is what stops the
+   zombie from re-deciding every tick and oscillating.
+
+**Two false starts, found and fixed by simulation before this landed, kept
+here because they're the actual trade-offs behind the final design:**
+
+- *First attempt* broke the single-tick freeze (fallback = perpendicular to
+  the raw per-cell flow direction) but visibly OSCILLATED side to side in
+  place, because the flow direction itself flips between adjacent grid
+  cells as the zombie nudges back and forth across a cell boundary — the
+  fallback was reacting to grid-quantisation noise. Fixed by steering off
+  `aimPos`/the real nearest-obstacle geometry (a continuous, non-quantised
+  value) instead of the flow field's own per-cell direction.
+- *Second attempt* fixed that oscillation but produced a slower, longer-
+  period LOOP (confirmed via a cycle-detection scan: a zombie repeating the
+  exact same position every 436 ticks, never reaching the base) — picking
+  "whichever tangent unblocks movement first" sometimes picked a tangent
+  pointing AWAY from the flow field's own intended routing direction, so
+  the flow field pulled the zombie right back the next tick it regained
+  alignment, in a stable fight with the avoidance fallback. Fixed by scoring
+  each tangent by alignment (dot product) with the tick's actual intended
+  direction instead of "first one that unblocks."
+
+**Verification, not just passing a unit test.** After the fix:
+
+- An exhaustive re-run of the same full-grid-cell simulation (1,405 free
+  cells) against the rebuilt `dist/` output: every single cell reaches
+  attack range on the base with zero stuck ticks and zero detected position
+  cycles.
+- Separate exhaustive scans confirmed the same for `giant`/`boss` zombies
+  (slower `speedMultiplier`) and with a wall built (`wallLevel` 1), for
+  multiple zombies converging on the same obstacle simultaneously, and for
+  a zombie whose real target is a player (not just the base) on the far
+  side of a building.
+- Flying zombies were explicitly re-checked to still take the unmodified
+  direct line straight through buildings and the wall (never calling into
+  the new avoidance code at all — `avoidSide` stays `null` for the whole
+  run).
+- Zombies still correctly stop AT an intact wall and set
+  `attackTarget: { kind: "structure" }` rather than being routed around it
+  forever — the new fallback helps a zombie get TO the wall cleanly; it does
+  not change the "ground zombies cannot cross an intact wall" rule at all.
+- `pnpm typecheck` and a clean `pnpm run build` both pass with no errors.
+- The full existing test suite plus six new regression tests added to
+  `spec/zombie-pathing.test.ts` (building-blocks-a-player-target,
+  building-corner navigation, multiple zombies on the same obstacle,
+  giant/boss navigation, flying-zombies-still-bypass-everything, and
+  correctly-attacks-the-destructible-wall) — **52/52 passing** — run against
+  a live local server instance, not in isolation.
+- Live-verified in an actual running instance (Playwright, a separate
+  isolated port/`DATA_DIR` so as not to disturb any other server already
+  running during this session): watched a full Day 1 wave approach the base
+  across several buildings over multiple screenshots with no zombie sprite
+  visibly frozen in an identical position across consecutive frames, and no
+  server-side errors in the log.
+
+**What was deliberately NOT touched**, per the brief's explicit constraints:
+zombie HP, damage, attack intervals, speed values, and `WAVE_TABLE`/spawn
+balance are byte-for-byte unchanged in `game-state.ts` — the only changes
+are to movement/collision resolution when a zombie's normal step stalls.
+Collision and movement for all zombie types remain fully server-authoritative
+(`advanceZombie` runs only in the server's game loop; nothing in this fix
+touches client prediction/rendering). The flow field itself was not
+replaced, recomputed per-tick, or turned into a per-target search — it is
+still the exact same single startup BFS CLAUDE.md requires; the fix only
+adds a bounded, local fallback for the one geometric case that field's own
+cell-quantisation couldn't resolve on its own.
+
+## Player weapon overhaul: a real finite firearm range, and replacing the yellow beam with a drawn rifle and a travelling bullet
+
+Reported after a screenshot showed a long yellow line stretching from the
+player almost to the edge of the visible map: "player attacks currently
+have effectively unlimited range" and "the current yellow beam / long
+yellow line is not acceptable." Two separate problems, one gameplay and one
+visual, fixed independently.
+
+**Root cause of the range problem.** `game-state.ts`'s `PISTOL_RANGE` was
+600 on a `MAP_SIZE` of 1000 — on a map that size, and at the default camera
+zoom (`camera.ts`'s `DEFAULT_VIEW_SIZE` = 420 world units across the
+shorter screen axis), 600 units reaches well past what's visible on screen
+in almost every direction, which is exactly why it read as "unlimited" in
+play even though a literal number was always enforced server-side
+(`resolveShot`'s `if (d > PISTOL_RANGE) continue`). Reduced to 320: longer
+than every turret level except the top splash turret (`TURRET_LEVELS`' own
+ranges top out at 300), comfortably longer than `FLYING_ATTACK_RANGE` (220,
+so the "shoot a flyer down before it's in your face" comment it sits next
+to is still true), but well under a third of the map — a target standing
+near the far edge of the default camera view is now genuinely out of range.
+Damage (`PISTOL_DAMAGE`) and the cone half-angle are untouched; this is a
+single-constant range fix, nothing else about hit resolution changed.
+Verified directly against the compiled `resolveShot`: a zombie at distance
+590 (inside the OLD range) now correctly misses, one at distance 315 (just
+inside the NEW range) still hits.
+
+**Root cause of the "yellow beam" complaint.** `render.ts`'s old
+`renderShotEffects` drew a fixed `TRACER_LENGTH = 220` line from the
+player's muzzle along the aim angle on EVERY shot, regardless of whether
+anything was actually hit or how far away it was — a debug-style "laser"
+rather than a weapon effect, and visually disconnected from the new finite
+range (a 220-unit line from a gun with 320 units of real range looks
+arbitrary either way). Replaced for the player's own shots specifically:
+
+- **A held weapon** (`drawPlayerWeapon`, `render.ts`): a hand-drawn
+  carbine/rifle silhouette (body, barrel tip, stock, magazine), rotated to
+  the local player's live `aimAngle` every frame, drawn at the player's feet
+  for every alive player (a remote player's weapon orients off its
+  movement-derived facing direction, since `PlayerSnapshot` broadcasts no
+  continuous aim angle for anyone but the client's own input — this is
+  cosmetic-only and never a gameplay signal). No weapon/gun sprite exists in
+  either vendored asset pack (`assets/LPC/`, `assets/ui-kenney/` — checked),
+  so this is original Canvas art, the same precedent as turrets/
+  `monsters.ts`/`fortress-decor.ts`, per CLAUDE.md's visual-scope rule.
+- **A real travelling bullet** (`Bullet`/`renderBullets`, `render.ts`,
+  replacing the player's use of the old `ShotEffect`/`renderShotEffects`
+  path — turret tracers still use that function exactly as before; turret
+  presentation wasn't part of this complaint and was deliberately left
+  alone): a small bright bullet body with a short trailing gradient travels
+  from the muzzle to an explicit endpoint over `BULLET_TRAVEL_MS` (90ms —
+  fast, but long enough over the new 320-unit range to read as a moving
+  object, not an instant snap), plus the existing muzzle-flash burst at the
+  barrel. The endpoint is computed by a new client-side function,
+  `guessShotEndpoint` (`main.ts`) — a VISUAL-ONLY mirror of `resolveShot`
+  (same range/cone logic, duplicated the same way `defense-config.ts`
+  already mirrors other server constants) that picks either the nearest
+  in-range, in-cone zombie's position (so the bullet visibly lands on what
+  it actually hit) or a point exactly `PISTOL_RANGE` away along the aim line
+  if nothing qualified (so a miss visibly travels the gun's real maximum
+  range and stops, instead of an infinite line). This mirror decides NOTHING
+  about damage — the server's own `shoot` message handling already resolved
+  the authoritative hit before this plays; a mismatch (lag, a zombie that
+  moved a frame later than this client's last snapshot) could at most make
+  the bullet's cosmetic landing point a touch off, never change who
+  actually took damage.
+- **Impact effects**: when a bullet's travel finishes, `main.ts` spawns the
+  same `ImpactEffect` burst zombie melee hits already use — at the hit
+  zombie's position for an apparent hit, or at the max-range point on a
+  miss (reads as a dust/impact puff on the ground or whatever's there).
+
+**Multiplayer/server-authority impact: none.** No protocol/message shape
+changed (`"shoot"` is still the same zero-payload message; no new fields on
+any snapshot), no new server-side state, and `resolveShot`'s real hit
+resolution is byte-for-byte the same function with one changed constant.
+Every other player's bullet reads identically on every client from the same
+broadcast `attacksLanded`-style diffing this project's other hit-feedback
+already uses (though note: unlike zombie attacks, the player's bullet's
+visual endpoint is a same-client-only guess at fire time, not derived from
+a server-confirmed hit field — there is no `PlayerSnapshot`-level "this shot
+hit" signal to diff, the same limitation the old tracer always had).
+
+**Verification.** `pnpm typecheck` and a clean `pnpm run build` both pass.
+The full test suite (52/52, including the zombie-pathing regression tests
+from the previous entry) passes against a live local server. A standalone
+script against the compiled `dist/server/game-state.js` confirmed the range
+cutoff directly (590 misses, 315 hits, matching the new 320 constant
+exactly). Live-verified via Playwright on an isolated port/`DATA_DIR`:
+screenshots show the drawn rifle held and oriented toward the live aim
+point, a short bullet with a visible trail in flight (not a full-screen
+line), and the bullet cleanly gone by the next frame after its 90ms travel
+— no yellow beam present in any captured frame.
+
+## Weapon follow-up: a real rifle silhouette with integrated arms, and recoil for every player's shot
+
+The previous round's weapon still read as a flat dark bar with no visible
+connection to the character, and only the local player's shot produced any
+muzzle feedback. Asked to redesign it so it "looks like a real held weapon"
+with proper arm interaction, directional posing, and recoil for every
+player's shots, not just the local one.
+
+**`drawPlayerWeapon` (`render.ts`) rebuilt as a full carbine silhouette**
+(stock, pistol grip, receiver with a raised top rail, curved magazine,
+vented handguard, tapering barrel, muzzle brake) with a pair of procedural
+arm strokes drawn on top, landing exactly on the same `gripX`/`foregripX`
+coordinates the weapon body itself uses — gloved hands always sit on the
+grip and foregrip rather than floating near them. The whole arms+weapon
+group rotates as one rigid unit to the aim angle, so the hands never
+visually separate from the gun at any direction (verified left/right/up/
+down/diagonals via Playwright screenshots against a live server).
+
+**Muzzle-origin accuracy.** `weaponMuzzleOffset()` (`render.ts`) computes
+the bullet/muzzle-flash origin from the exact same `WEAPON_LEN_FRAC`/
+`WEAPON_MUZZLE_FRAC` proportions `drawPlayerWeapon` draws with, so the
+visible barrel tip and the point shots actually originate from can never
+drift apart; `main.ts`'s `onShoot` now offsets the bullet's `fromX/fromY` by
+this instead of firing from the player's centre.
+
+**Recoil for every player, not just the local one.** A new transient,
+non-persisted `Player.shotsFired` counter (`game-state.ts`) increments once
+per handled `"shoot"` message — the same `shotsFired`-diffing pattern
+`TurretSnapshot.shotsFired` already established — broadcast via
+`PlayerSnapshot.shotsFired` (both `protocol.ts` copies). `main.ts` diffs it
+per remote player each state broadcast to set `playerLastShotAt`, while the
+local player's own `onShoot` sets it immediately on click (zero added
+latency); `render.ts` turns the resulting `recoilFrac` (eased, `recoilFrac^2`)
+into a brief kick-back-and-tip along the weapon's own axis
+(`WEAPON_RECOIL_MS` = 110ms). No gameplay value changed — `shotsFired` is
+purely a presentation signal, same as the turret counter it mirrors.
+
+**Verification.** `pnpm typecheck`, a clean `pnpm run build`, and the full
+52-test suite all pass (three existing player-fixture tests updated for the
+new `shotsFired` field). Live-verified via Playwright against an isolated
+server/`DATA_DIR`: screenshots across all 4 cardinal directions plus two
+diagonals show the rifle correctly oriented with both hands visibly on the
+grips; a two-browser-context multiplayer session confirmed a second
+player's weapon renders with the same model from another client's view.
+
+## Starting the 3D migration: preserving the 2D game on `main`, branching to `feature/3d-migration`
+
+Asked to begin converting the game from 2D Canvas to a genuine 3D
+presentation using Three.js — an explicit, deliberate override of
+CLAUDE.md's prior "prefer Canvas-based rendering... do not migrate off
+Canvas" rule, not an accidental contradiction of it.
+
+**Preservation came first.** Before any 3D work, the working tree on `main`
+had two layers of completed, verified-but-uncommitted work: the visual-
+overhaul rounds (CLAUDE.md scope change, giant/boss zombie art, turret
+visuals, fortress/environment/HUD redesign), the zombie-stuck-against-
+obstacles pathing bugfix with its regression suite, and an initial weapon/
+range overhaul — plus my own follow-up on top (integrated arms on the
+rifle, accurate muzzle origin, per-player recoil). Both layers were
+verified independently (`pnpm typecheck`, `pnpm run build`, the full 52-test
+suite, all passing) before committing, and `git status --ignored` confirmed
+nothing sensitive (secrets, `data/`, `dist/`, `node_modules/`) was ever
+staged. Committed as two commits on `main` (`fc7a2df` for the prior
+session's work, `29ece72` for my own weapon follow-up) — not a hunk-by-hunk
+split per PROCESS.md entry, a deliberate trade-off: several entries share
+heavily-edited files (`render.ts` alone is touched by four of them), and
+manually reconstructing each intermediate historical state risked a
+transcription slip for no real benefit over the two-layer split, which was
+achievable safely since I had the exact text of my own follow-up edits to
+revert and reapply.
+
+**`main` is now the preserved, playable 2D baseline** — nothing on it was
+touched by any 3D work, and it remains deployable exactly as before.
+`feature/3d-migration` branches from the same commit (`29ece72`) that `main`
+now points to, so the two start identical and diverge only from here.
+CLAUDE.md on the new branch gets a "3D migration rules" section explicitly
+overriding the Canvas-preference line for this branch only, while leaving
+every architecture/persistence/networking/scope/testing rule in force —
+see that section for the specifics. Neither branch has been pushed, merged,
+or deployed.
+
+## Architecture audit before writing any 3D code
+
+Read through the full client before touching anything, to find exactly
+what has to change versus what already generalises to 3D for free.
+
+**What's genuinely 2D-specific (must be replaced):** `render.ts` (2354
+lines of Canvas 2D drawing — sprites, procedural shapes, HUD overlays) and
+`camera.ts` (an orthographic world-to-screen-pixel projection with no
+concept of a third axis). These are the only two files whose actual
+*rendering* logic is 2D; everything else already operates on plain world
+x/y numbers with no Canvas dependency.
+
+**What generalises to 3D with no change in shape, only in how the numbers
+get drawn:** `prediction.ts` (local movement prediction is pure x/y
+arithmetic against `resolveMove`), `obstacles.ts`/`defense-config.ts`
+(buildings/wall/turret positions are plain `{x, y, w, h}` rects and radii —
+these become 3D box footprints on a ground plane, same numbers), `input.ts`
+(WASD state + a world-space aim point — only `screenToWorld`'s math need
+change, not its contract), `interpolate.ts` (snapshot interpolation is
+pure numeric lerp, no rendering), and `protocol.ts` (the WebSocket message
+shapes carry x/y floats and need no change at all). `main.ts` is the
+biggest file but is mostly orchestration (state diffing, HUD DOM updates,
+menu logic) around calls into `render.ts` — it needs its render call sites
+swapped for 3D equivalents, not a rewrite of its own logic.
+
+**Server-side: zero changes needed or planned.** `game-state.ts`,
+`game-loop.ts`, `obstacles.ts` (server copy), `persistence.ts`, and
+`ws-server.ts` operate entirely in the same 2D x/y world space the client
+always received — nothing about moving to a 3D client-side presentation
+requires the server to know about a third axis. Confirmed by reading every
+server file; this matches the brief's explicit "map existing server
+positions into 3D world coordinates... do not unnecessarily rewrite the
+server."
+
+**Coordinate mapping decided:** server/world x,y maps directly to Three.js
+scene x,z (the ground plane); Three.js y is used purely for rendering
+height (character height, zombie hover height, projectile arc, camera
+elevation) and carries no gameplay meaning, matching the brief's "keep
+gameplay movement primarily on a 2D ground plane."
+
+**Tooling decision: esbuild, not a bundler-free tsc emit.** The project's
+client build has never used a bundler (`tsconfig.client.json`'s own
+comment: "loaded by index.html as native ES modules — no bundler") because
+until now every client import was either a relative project file or a
+native DOM API — nothing from `node_modules`. Three.js breaks that
+assumption: a browser can't resolve the bare specifier `import * as THREE
+from "three"` without either a bundler or an import map pointing at a CDN.
+The brief explicitly asked to avoid a CDN runtime dependency and to use "a
+lightweight bundler such as Vite or esbuild." Chose esbuild over Vite: this
+project has no dev-server-with-HMR workflow to preserve (the existing `dev`
+script already does a full `build:client` + `tsx watch` on the server, not
+incremental browser reloading), and esbuild's API is a single `build()`
+call with no project-wide config surface to maintain — the smaller tool
+for what's actually needed here. `pnpm add three`/`pnpm add -D @types/three
+esbuild` all succeeded directly (this sandbox DOES have npm registry
+access, unlike the general web-fetch tool used in earlier visual-asset
+research, which doesn't reach arbitrary hosts) — no CDN fallback was
+needed. `scripts/build-client.ts` replaces `tsconfig.client.json`'s old
+`tsc` emit as the `build:client` script: esbuild bundles `main.ts` and
+everything it imports (including three's source straight out of
+`node_modules`) into one self-contained `dist/client/main.js` — esbuild
+does not type-check, so `pnpm typecheck` (plain `tsc --noEmit`) remains the
+sole place type errors are caught, unchanged. `src/server/index.ts`'s
+existing `serveClientScript` (serves any `*.js` under `dist/client`)
+needed no change — the bundle still lands at the same path. Verified:
+`pnpm typecheck`, `pnpm run build`, and the full 52-test suite all pass
+unchanged with the new build step; a Playwright screenshot against the
+rebuilt (but not yet 3D) client confirms the existing 2D game still runs
+pixel-identical through the new esbuild pipeline, zero console errors. The
+Dockerfile needed no change — it's single-stage and already runs the full
+`pnpm run build` (which now invokes esbuild via `tsx`, both already
+installed as devDependencies by the unmodified `pnpm install
+--frozen-lockfile` step) before `CMD`.
+
+## Phase 2: a minimal playable Three.js prototype, connected to the real server
+
+Built the smallest real 3D scene that proves the whole pipeline works, at a
+SEPARATE route (`/3d`, `src/client/three/`) rather than replacing `/` — the
+brief and CLAUDE.md's 3D migration rules both require `main`'s proven 2D
+game to keep working unmodified while the 3D version is built and proven
+out, so `index.ts` gained one new route/served bundle
+(`dist/client/three/main3d.js`) alongside the existing ones, nothing
+removed or rewritten.
+
+**What's genuinely new:** `src/client/three/scene.ts` (the Three.js scene
+itself: an orthographic three-quarter/isometric-style camera at a fixed
+55°-elevation/45°-azimuth offset from the follow target, a ground plane, a
+directional+ambient light, and a ground-plane raycast `screenToWorld` that
+returns the same `{x, y}` world-space shape camera.ts's 2D version does)
+and `src/client/three/main3d.ts` (the entry point wiring it to the real
+server). **What's reused as-is, unmodified in logic:** `protocol.ts` (same
+message shapes), `prediction.ts` (same client-side dead-reckoning/
+reconciliation), `defense-config.ts`/`WORLD_SIZE`, and — after one small,
+deliberate refactor — `input.ts`.
+
+**The one shared-code change: `InputController` stopped owning a
+`camera.ts` `Camera`.** It previously took `getCamera: () => Camera` and
+called `screenToWorld(camera, x, y)` internally, tightly coupling it to the
+2D orthographic projection shape. Changed its constructor to take
+`screenToWorld: (x, y) => {x, y}` directly instead — the 2D client now
+passes `(x, y) => screenToWorld(currentCamera, x, y)` (same behaviour,
+zero change), and the 3D prototype passes its own ground-plane raycast
+version. This is the only edit to a file the proven 2D game depends on;
+verified `pnpm typecheck`/`pnpm run build`/the full 52-test suite all still
+pass and a live Playwright screenshot of `/` confirms the 2D game is
+pixel-identical after this change.
+
+**Coordinate mapping proven correct, not just asserted.** Server/world x,y
+maps to Three.js scene x,z; scene y is pure render height. Verified live
+against the real server (not a mock): held `d` (move right) for 1000ms and
+confirmed the HUD's local-position readout moved from `(500.0, 560.0)` to
+`(652.5, 560.0)` — a ~150-unit step matching `PLAYER_SPEED` exactly; held
+`s` next and confirmed only y moved, to `(652.5, 712.5)`. The aim-angle
+raycast was checked the same way: moving the mouse to the four screen
+compass points (up/down/left/right of canvas centre) produced world aim
+angles of -135°/45°/135°/-45° respectively — the 90° rotation from screen
+axes to world axes is the EXPECTED result of a 45°-azimuth isometric
+camera looking at a non-rotated ground plane, not a bug (screen-right
+doesn't point along world +x when the camera is rotated 45° around the
+vertical axis). A full multiplayer tick was also confirmed working
+end-to-end: zombies spawned by the real `game-loop.ts` horde-batch logic
+rendered as separate placeholder boxes converging on the player/base at
+the same `AGGRO_RADIUS`/speed behaviour the 2D game already has (screenshot
+shows 8 zombie boxes positioned correctly around a yellow local-player
+box), and a `game_over` transition (this test player never called
+`selectCharacter`, so had no real defence) correctly reflected in the HUD —
+proof the exact same authoritative server loop drives both renderers with
+no special-casing for which client is connected.
+
+**Tooling: esbuild's multi-entry-point output.** `scripts/build-client.ts`
+now lists both `src/client/main.ts` and `src/client/three/main3d.ts` as
+entry points with `outdir` (not a single `outfile`) — esbuild preserves
+each entry's own subdirectory under `outdir`, so `main3d.ts` lands at
+`dist/client/three/main3d.js`, matched by `index.html`'s own script src and
+served by `serveClientScript`'s existing, unmodified "any `*.js` under
+`dist/client`" rule. `tsconfig.client.json` was deleted — it was
+`tsc`-emit-only config, made genuinely dead by the esbuild switch (the root
+`tsconfig.json`'s `include: [..., "src"]` already covers `src/client` for
+`pnpm typecheck`), and keeping a config no script referenced would only
+invite confusion later.
+
+**What's explicitly NOT done yet (not falsely presented as complete):** no
+real models (plain coloured boxes stand in for the player and zombie —
+labelled as such in the HUD's own text and in code comments, per CLAUDE.md's
+"do not describe placeholder geometry as finished"), no animation, no HUD
+button UI (Start is sent automatically on connect so the prototype is
+playable without one), no interpolation for remote entities (zombies/other
+players snap to each new snapshot rather than smoothing between them — the
+2D client's `interpolate.ts` was deliberately not wired in yet), and no
+shooting/combat visuals at all. These are Phase 3+ work.
+
+**Verification.** `pnpm typecheck`, `pnpm run build`, and the full 52-test
+suite all pass. Live-verified via Playwright with real WebGL (headless
+Chromium's software GL, confirmed `WebGL 2.0`/`WebKit WebGL` via a context
+probe before relying on any screenshot) against an isolated server/
+`DATA_DIR`: screenshots show a real rendered 3D scene (visible perspective/
+shading on the box meshes, a lit ground plane), confirmed movement via the
+position readout above, confirmed zombie spawning/convergence, and zero
+browser console errors throughout. The proven 2D game at `/` was
+separately re-verified working after every change in this phase (not just
+assumed from passing tests) — a live screenshot of `/` after the
+`InputController` refactor and again after the esbuild multi-entry change.

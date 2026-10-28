@@ -1,0 +1,698 @@
+<!doctype html>
+<html lang="en-AU">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zombie base defence — 3D</title>
+    <style>
+      /* Phase 9 (feature/3d-migration): the SAME HUD chrome as the proven 2D
+         client's index.html (same CSS, same DOM ids/classes) — the brief's
+         "integrate the existing HUD... into the 3D version" is satisfied by
+         literally reusing the 2D HUD rather than rebuilding a parallel one,
+         so main3d.ts can drive it with near-identical logic to main.ts's own
+         updateHud/updateTeamPanel/renderMenu/etc. Only #game (a 2D canvas)
+         is replaced by #three-canvas (a WebGL canvas, positioned behind
+         every HUD element the same way #game always sat behind them). */
+      :root {
+        --bg: #1a1510;
+        --panel-dark: #2b2219;
+        --panel-glass: rgba(20, 16, 11, 0.82);
+        --text: #ede4d3;
+        --text-dim: #a89a85;
+        --accent-green: #6f9a57;
+        --accent-red: #b5543f;
+        --accent-gold: #d4af37;
+        --accent-yellow: #f0c929;
+        --border-light: #6b5a42;
+        --hud-corner: 10px;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-monospace, "Courier New", monospace;
+        overflow: hidden;
+      }
+      #three-canvas {
+        display: block;
+        position: fixed;
+        inset: 0;
+        cursor: none;
+      }
+
+      #hud,
+      #team-panel,
+      #interact-menu,
+      .phase-panel,
+      #enemy-intro,
+      #character-select {
+        position: relative;
+        border: 2px solid var(--border-light);
+        background:
+          linear-gradient(var(--panel-glass), var(--panel-glass)),
+          url(/sprites/ui/panels/panel-grey-dark.png);
+        background-size:
+          100% 100%,
+          16px 16px;
+        clip-path: polygon(
+          var(--hud-corner) 0,
+          100% 0,
+          100% calc(100% - var(--hud-corner)),
+          calc(100% - var(--hud-corner)) 100%,
+          0 100%,
+          0 var(--hud-corner)
+        );
+        image-rendering: pixelated;
+        color: var(--text);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+      }
+      #hud::before,
+      #team-panel::before,
+      #interact-menu::before,
+      .phase-panel::before,
+      #enemy-intro::before,
+      #character-select::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: var(--hud-corner);
+        right: 0;
+        height: 3px;
+        background: var(--accent-gold);
+      }
+      .phase-panel.danger::before {
+        background: var(--accent-red);
+      }
+      .phase-panel.success::before {
+        background: var(--accent-green);
+      }
+      .ui-icon {
+        display: inline-block;
+        vertical-align: -3px;
+        image-rendering: pixelated;
+      }
+
+      #top-left-stack {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        width: min(320px, calc(100vw - 16px));
+      }
+      #hud {
+        font-size: 13px;
+        padding: 0 0 6px;
+        white-space: nowrap;
+      }
+      #hud-heading {
+        background: rgba(0, 0, 0, 0.35);
+        padding: 7px 14px 6px calc(14px + var(--hud-corner) * 0.4);
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        font-size: 15px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        border-bottom: 1px solid rgba(212, 175, 55, 0.3);
+        margin-bottom: 6px;
+      }
+      #hud-rows {
+        padding: 0 14px;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        row-gap: 3px;
+        column-gap: 10px;
+        align-items: center;
+      }
+      .hud-row-label {
+        color: var(--text-dim);
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .hud-row-value {
+        text-align: right;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      .hud-value-good {
+        color: var(--accent-green);
+      }
+      .hud-value-warn {
+        color: var(--accent-yellow);
+      }
+      .hud-value-critical {
+        color: var(--accent-red);
+      }
+      #hud .hud-note {
+        padding: 5px 14px 0;
+        color: var(--text-dim);
+        font-size: 11px;
+        white-space: normal;
+        line-height: 1.4;
+      }
+      #hud .rejected {
+        padding: 5px 14px 0;
+        color: var(--accent-red);
+        font-weight: 700;
+        white-space: normal;
+        line-height: 1.4;
+      }
+
+      .bar {
+        display: inline-block;
+        width: 64px;
+        height: 8px;
+        background: #000000a0;
+        border: 1px solid #000;
+        vertical-align: middle;
+        margin: 0 2px;
+      }
+      .bar-fill {
+        display: block;
+        height: 100%;
+      }
+      .bar-revive {
+        width: 46px;
+        height: 6px;
+      }
+      .bar-revive .bar-fill {
+        background: var(--accent-green);
+      }
+
+      #team-panel {
+        font-size: 13px;
+        padding: 6px 12px;
+      }
+      .player-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 0;
+        white-space: nowrap;
+      }
+      .player-swatch {
+        width: 10px;
+        height: 10px;
+        flex: 0 0 auto;
+        border: 1px solid #0006;
+      }
+      .player-label {
+        min-width: 26px;
+        max-width: 110px;
+        flex: 0 0 auto;
+        font-weight: 700;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .player-downed {
+        color: #e0a05c;
+      }
+      .player-dead {
+        color: var(--text-dim);
+      }
+
+      #conn {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 5px 12px 5px 10px;
+        border: 1px solid var(--border-light);
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(20, 16, 11, 0.85);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      }
+      #conn::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex: 0 0 auto;
+      }
+      #conn.connected {
+        border-color: var(--accent-green);
+      }
+      #conn.connected::before {
+        background: var(--accent-green);
+        box-shadow: 0 0 5px var(--accent-green);
+      }
+      #conn.connecting,
+      #conn.disconnected {
+        border-color: var(--accent-red);
+      }
+      #conn.connecting::before,
+      #conn.disconnected::before {
+        background: var(--accent-red);
+        box-shadow: 0 0 5px var(--accent-red);
+      }
+
+      footer {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        font-size: 12px;
+      }
+      footer a {
+        color: #8ab4ff;
+      }
+
+      #controls {
+        position: fixed;
+        bottom: 8px;
+        right: 8px;
+        display: flex;
+        gap: 8px;
+      }
+      #controls button {
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        padding: 9px 18px;
+        border: 1px solid var(--border-light);
+        border-top: 2px solid var(--accent-gold);
+        background: var(--panel-dark);
+        color: var(--text);
+        cursor: pointer;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      }
+      #controls button:hover {
+        background: #352a1f;
+        border-top-color: var(--accent-yellow);
+      }
+      #controls button:active {
+        transform: translateY(1px);
+        background: #1d1812;
+      }
+      #controls button[hidden] {
+        display: none;
+      }
+
+      #phase-banner {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+      }
+      #phase-banner:empty {
+        display: none;
+      }
+      .phase-panel {
+        padding: 18px 28px;
+        text-align: center;
+        width: min(320px, calc(100vw - 64px));
+        box-sizing: border-box;
+      }
+      .phase-panel.danger {
+        border-color: var(--accent-red);
+      }
+      .phase-panel.success {
+        border-color: var(--accent-green);
+      }
+      .phase-title {
+        font-size: 28px;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+      }
+      .phase-subtitle {
+        margin-top: 8px;
+        color: var(--text-dim);
+        font-size: 14px;
+      }
+      .controls-legend {
+        margin-top: 16px;
+        text-align: left;
+        display: inline-block;
+        font-size: 12px;
+      }
+      .controls-legend > div {
+        display: flex;
+        gap: 10px;
+        padding: 2px 0;
+      }
+      .legend-key {
+        color: var(--accent-gold);
+        font-weight: 700;
+        min-width: 56px;
+        display: inline-block;
+      }
+
+      #enemy-intro {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        padding: 20px 26px;
+        width: min(300px, calc(100vw - 56px));
+        box-sizing: border-box;
+        text-align: center;
+        pointer-events: none;
+        z-index: 20;
+        animation: intro-glow 1.8s ease-in-out infinite;
+      }
+      #enemy-intro[hidden] {
+        display: none;
+      }
+      @keyframes intro-glow {
+        0%,
+        100% {
+          box-shadow: 0 0 0 rgba(240, 201, 41, 0);
+        }
+        50% {
+          box-shadow: 0 0 22px rgba(240, 201, 41, 0.45);
+        }
+      }
+      .intro-title {
+        color: var(--accent-yellow);
+        font-weight: 800;
+        letter-spacing: 0.18em;
+        font-size: 12px;
+      }
+      #intro-portrait {
+        display: block;
+        margin: 8px auto 6px;
+        image-rendering: pixelated;
+      }
+      .intro-name {
+        font-size: 21px;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        margin-bottom: 10px;
+      }
+      .intro-bullets {
+        list-style: none;
+        margin: 0 0 16px;
+        padding: 0;
+        display: inline-block;
+        text-align: left;
+      }
+      .intro-bullets li {
+        position: relative;
+        padding: 3px 0 3px 18px;
+        font-size: 13px;
+      }
+      .intro-bullets li::before {
+        content: "▲";
+        position: absolute;
+        left: 0;
+        top: 5px;
+        font-size: 9px;
+        color: var(--accent-red);
+      }
+      #intro-dismiss {
+        pointer-events: auto;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        padding: 8px 26px;
+        border: 2px solid var(--accent-yellow);
+        background: var(--panel-dark);
+        color: var(--accent-yellow);
+        cursor: pointer;
+      }
+      #intro-dismiss:hover {
+        background: #352a1f;
+      }
+
+      #character-select {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        padding: 20px 26px;
+        width: min(560px, calc(100vw - 48px));
+        box-sizing: border-box;
+        text-align: center;
+        z-index: 30;
+      }
+      #character-select[hidden] {
+        display: none;
+      }
+      .character-select-heading {
+        color: var(--accent-yellow);
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        font-size: 14px;
+        margin-bottom: 14px;
+      }
+      #character-grid {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+      }
+      .character-card {
+        flex: 1 1 0;
+        min-width: 0;
+        border: 2px solid var(--border-light);
+        background: #16110c;
+        padding: 10px 8px;
+        cursor: pointer;
+      }
+      .character-card.selected {
+        border-color: var(--accent-gold);
+        background: #241c10;
+      }
+      .character-card.taken {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .character-portrait {
+        display: block;
+        margin: 0 auto 6px;
+        image-rendering: pixelated;
+      }
+      .character-card-name {
+        font-size: 13px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+      }
+      .character-card-flavor {
+        font-size: 11px;
+        color: var(--text-dim);
+        margin-top: 4px;
+        line-height: 1.4;
+      }
+      .character-card-taken-label {
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: var(--accent-red);
+        margin-top: 4px;
+      }
+      #character-select-form {
+        margin-top: 16px;
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        align-items: center;
+      }
+      #character-name-input {
+        font: inherit;
+        font-size: 13px;
+        padding: 8px 10px;
+        background: #16110c;
+        border: 2px solid var(--border-light);
+        color: var(--text);
+        width: 180px;
+      }
+      #character-confirm-btn {
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        padding: 8px 16px;
+        border: 2px solid var(--border-light);
+        background: var(--panel-dark);
+        color: var(--text);
+        cursor: pointer;
+      }
+      #character-confirm-btn:hover {
+        background: #352a1f;
+      }
+      #character-confirm-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      #interact-menu {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        padding: 14px 20px;
+        font-size: 14px;
+        width: min(320px, calc(100vw - 64px));
+        box-sizing: border-box;
+        pointer-events: none;
+      }
+      #interact-menu[hidden] {
+        display: none;
+      }
+      .menu-heading {
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-align: center;
+        margin-bottom: 8px;
+      }
+      .menu-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 2px;
+      }
+      .menu-row-disabled {
+        opacity: 0.5;
+      }
+      .menu-key {
+        color: var(--accent-gold);
+        font-weight: 700;
+        width: 22px;
+        flex: 0 0 auto;
+      }
+      .menu-label {
+        flex: 1;
+      }
+      .menu-cost {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        color: var(--accent-gold);
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      .menu-cost-insufficient {
+        color: var(--accent-red);
+      }
+      .menu-hint {
+        text-align: center;
+        margin-top: 8px;
+        color: var(--text-dim);
+        font-size: 12px;
+      }
+
+      #prompt {
+        position: fixed;
+        bottom: 64px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 10px;
+        pointer-events: none;
+      }
+      #prompt[hidden] {
+        display: none;
+      }
+      .prompt-hint {
+        background: rgba(20, 16, 11, 0.88);
+        border: 1px solid var(--accent-gold);
+        border-left-width: 3px;
+        color: var(--text);
+        padding: 5px 12px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      }
+
+      /* 3D-only: a small top-centre link back to the proven 2D version,
+         so nobody playing the in-progress 3D client loses track of how to
+         reach the baseline game. */
+      #back-to-2d {
+        position: fixed;
+        top: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        font-size: 11px;
+        color: var(--text-dim);
+        z-index: 40;
+      }
+      #back-to-2d a {
+        color: #8ab4ff;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="three-canvas"></canvas>
+    <div id="back-to-2d"><a href="/">2D version</a></div>
+    <div id="top-left-stack">
+      <div id="hud"></div>
+      <div id="team-panel"></div>
+    </div>
+    <div id="conn" class="connecting">connecting…</div>
+    <div id="phase-banner"></div>
+    <div id="interact-menu" hidden></div>
+    <div id="prompt" hidden></div>
+    <div id="enemy-intro" hidden>
+      <div class="intro-title">NEW ENEMY</div>
+      <canvas id="intro-portrait" width="110" height="110"></canvas>
+      <div class="intro-name" id="intro-name"></div>
+      <ul class="intro-bullets" id="intro-bullets"></ul>
+      <button id="intro-dismiss">Got it</button>
+    </div>
+    <div id="character-select" hidden>
+      <div class="character-select-heading">CHOOSE YOUR SURVIVOR</div>
+      <div id="character-grid">
+        <div class="character-card" data-index="0">
+          <canvas class="character-portrait" width="64" height="64"></canvas>
+          <div class="character-card-name">Soldier</div>
+          <div class="character-card-flavor">Grey armour. Holds the line.</div>
+          <div class="character-card-taken-label" hidden>TAKEN</div>
+        </div>
+        <div class="character-card" data-index="1">
+          <canvas class="character-portrait" width="64" height="64"></canvas>
+          <div class="character-card-name">Soldier</div>
+          <div class="character-card-flavor">Gold armour. First through the door.</div>
+          <div class="character-card-taken-label" hidden>TAKEN</div>
+        </div>
+        <div class="character-card" data-index="2">
+          <canvas class="character-portrait" width="64" height="64"></canvas>
+          <div class="character-card-name">Sara</div>
+          <div class="character-card-flavor">Teal. Quick on her feet.</div>
+          <div class="character-card-taken-label" hidden>TAKEN</div>
+        </div>
+        <div class="character-card" data-index="3">
+          <canvas class="character-portrait" width="64" height="64"></canvas>
+          <div class="character-card-name">Princess</div>
+          <div class="character-card-flavor">Blue. Doesn't wait to be rescued.</div>
+          <div class="character-card-taken-label" hidden>TAKEN</div>
+        </div>
+      </div>
+      <div id="character-select-form">
+        <input id="character-name-input" type="text" maxlength="20" placeholder="Your name" autocomplete="off" />
+        <button id="character-confirm-btn" disabled>Confirm</button>
+      </div>
+    </div>
+    <div id="controls">
+      <button id="btn-start">Start Game</button>
+      <button id="btn-pause">Pause</button>
+      <button id="btn-resume">Resume</button>
+      <button id="btn-retry">Retry Current Day</button>
+      <button id="btn-restart">Restart (Day 1)</button>
+    </div>
+    <footer><a href="/readme/">About this app</a></footer>
+    <script type="module" src="/three/main3d.js"></script>
+  </body>
+</html>

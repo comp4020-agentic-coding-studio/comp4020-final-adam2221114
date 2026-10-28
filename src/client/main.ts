@@ -514,7 +514,7 @@ function guessShotEndpoint(origin: { x: number; y: number }, aimAngle: number): 
 
 const input = new InputController({
   canvas,
-  getCamera: () => currentCamera,
+  screenToWorld: (x, y) => screenToWorld(currentCamera, x, y),
   send: (msg: ClientMessage) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
   },
