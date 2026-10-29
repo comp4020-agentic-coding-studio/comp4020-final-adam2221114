@@ -28,6 +28,13 @@ export interface Scene3D {
   // screenToWorld, with the same {x, y} world-space return shape so
   // input.ts needs no change to its own contract.
   screenToWorld: (canvasX: number, canvasY: number) => { x: number; y: number };
+  // The inverse of screenToWorld — projects a world ground-plane point to a
+  // canvas-pixel position, in the SAME backing-buffer-pixel basis
+  // screenToWorld's own canvasX/canvasY inputs use (not CSS pixels — see
+  // input.ts's cssToBackingX/Y conversion, which a caller positioning an
+  // HTML overlay from this must invert the same way). Used for the 3D
+  // crosshair overlay, which has no Canvas2D context to draw into directly.
+  worldToScreen: (worldX: number, worldY: number) => { x: number; y: number };
   resize: (width: number, height: number) => void;
   render: () => void;
 }
@@ -39,7 +46,10 @@ export interface Scene3D {
 // classic isometric-ish top-down-but-angled view (brief's "elevated
 // isometric or three-quarter top-down 3D camera").
 const CAMERA_ELEVATION = 55; // degrees above the ground plane
-const CAMERA_AZIMUTH = 45; // degrees around the vertical axis
+// Exported so isometric-input.ts can derive its screen-relative WASD remap
+// from the SAME fixed azimuth the camera actually uses, instead of a second
+// hardcoded copy of "45" that could silently drift out of sync with it.
+export const CAMERA_AZIMUTH = 45; // degrees around the vertical axis
 const CAMERA_DISTANCE = 600; // world units back from the follow target, along the elevation/azimuth direction
 
 function cameraOffset(): THREE.Vector3 {
@@ -174,9 +184,14 @@ export function createScene3D(canvas: HTMLCanvasElement): Scene3D {
     updateCamera(x, y, viewSize);
   };
 
+  function worldToScreen(worldX: number, worldY: number): { x: number; y: number } {
+    const p = new THREE.Vector3(worldX, 0, worldY).project(camera);
+    return { x: ((p.x + 1) / 2) * canvasWidth, y: ((1 - p.y) / 2) * canvasHeight };
+  }
+
   function render(): void {
     renderer.render(scene, camera);
   }
 
-  return { renderer, scene, camera, updateCamera: updateCameraWrapped, screenToWorld, resize, render };
+  return { renderer, scene, camera, updateCamera: updateCameraWrapped, screenToWorld, worldToScreen, resize, render };
 }

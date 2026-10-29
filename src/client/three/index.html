@@ -41,6 +41,57 @@
         inset: 0;
         cursor: none;
       }
+      /* HTML/CSS crosshair overlay — the 3D canvas has no Canvas2D context to
+         draw render.ts's renderCrosshair into directly, so this mirrors its
+         behavior (small red screen-space + marker following the mouse's
+         world aim point) as a positioned DOM element instead. Hidden until
+         the first mousemove gives it a real position, same as the 2D
+         client's crosshair only drawing once getMouseWorldPos() is defined. */
+      /* Four short bars, one per side, each spanning from "inner" (4px off
+         centre) out to "outer" (11px off centre) — the same inner/outer
+         radii as render.ts's renderCrosshair's own `inner = 4` / `outer =
+         11` constants, so the two crosshairs read as the same size. */
+      #crosshair {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 22px;
+        height: 22px;
+        margin: -11px 0 0 -11px;
+        pointer-events: none;
+        z-index: 15;
+      }
+      #crosshair[hidden] {
+        display: none;
+      }
+      #crosshair span {
+        position: absolute;
+        background: #ff5555;
+      }
+      #crosshair .ch-left {
+        left: 0;
+        top: 10px;
+        width: 7px;
+        height: 2px;
+      }
+      #crosshair .ch-right {
+        right: 0;
+        top: 10px;
+        width: 7px;
+        height: 2px;
+      }
+      #crosshair .ch-top {
+        top: 0;
+        left: 10px;
+        width: 2px;
+        height: 7px;
+      }
+      #crosshair .ch-bottom {
+        bottom: 0;
+        left: 10px;
+        width: 2px;
+        height: 7px;
+      }
 
       #hud,
       #team-panel,
@@ -636,6 +687,9 @@
   </head>
   <body>
     <canvas id="three-canvas"></canvas>
+    <div id="crosshair" hidden>
+      <span class="ch-left"></span><span class="ch-right"></span><span class="ch-top"></span><span class="ch-bottom"></span>
+    </div>
     <div id="back-to-2d"><a href="/">2D version</a></div>
     <div id="top-left-stack">
       <div id="hud"></div>

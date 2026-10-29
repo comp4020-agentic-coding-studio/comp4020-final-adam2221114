@@ -1,5 +1,12 @@
 import type { ClientMessage } from "./protocol.ts";
 
+export interface MoveState {
+  up: boolean;
+  down: boolean;
+  left: boolean;
+  right: boolean;
+}
+
 // Reads keyboard + mouse and sends what the server asked for (input/shoot).
 // Never moves anything locally and never decides a hit — position, HP, XP
 // all come back from the server's own state broadcast. getAimAngle() and
@@ -18,7 +25,16 @@ export class InputController {
   readonly #send: (msg: ClientMessage) => void;
   readonly #getPlayerPos: () => { x: number; y: number };
   readonly #onShoot: (origin: { x: number; y: number }, aimAngle: number) => void;
+  // Raw WASD/arrow state as physically pressed. For the 2D client this
+  // already IS wire-protocol up/down/left/right (the 2D camera has no
+  // rotation, so "screen up" and "world up" coincide). For the 3D client
+  // (fixed 45°-azimuth isometric camera) it is screen-relative intent only
+  // — #moveKeyRemap below converts it to the wire shape before it's ever
+  // read by getMoveState() or sent, so prediction.ts and the wire message
+  // always see the same already-remapped values (see
+  // src/client/three/isometric-input.ts).
   readonly #keys = { up: false, down: false, left: false, right: false, reviving: false };
+  readonly #moveKeyRemap: (raw: MoveState) => MoveState;
   #mouseWorldPos: { x: number; y: number } | undefined;
 
   constructor(opts: {
@@ -27,12 +43,14 @@ export class InputController {
     send: (msg: ClientMessage) => void;
     getPlayerPos: () => { x: number; y: number };
     onShoot?: (origin: { x: number; y: number }, aimAngle: number) => void;
+    moveKeyRemap?: (raw: MoveState) => MoveState;
   }) {
     this.#canvas = opts.canvas;
     this.#screenToWorld = opts.screenToWorld;
     this.#send = opts.send;
     this.#getPlayerPos = opts.getPlayerPos;
     this.#onShoot = opts.onShoot ?? (() => {});
+    this.#moveKeyRemap = opts.moveKeyRemap ?? ((raw) => raw);
 
     window.addEventListener("keydown", (e) => this.#onKey(e.key, true));
     window.addEventListener("keyup", (e) => this.#onKey(e.key, false));
@@ -74,8 +92,8 @@ export class InputController {
     return Math.atan2(this.#mouseWorldPos.y - player.y, this.#mouseWorldPos.x - player.x);
   }
 
-  getMoveState(): { up: boolean; down: boolean; left: boolean; right: boolean } {
-    return { up: this.#keys.up, down: this.#keys.down, left: this.#keys.left, right: this.#keys.right };
+  getMoveState(): MoveState {
+    return this.#moveKeyRemap({ up: this.#keys.up, down: this.#keys.down, left: this.#keys.left, right: this.#keys.right });
   }
 
   // Whether E is currently held — the continuous hold-to-revive input,

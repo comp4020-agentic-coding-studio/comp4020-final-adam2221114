@@ -16,6 +16,7 @@ import { createTownBuildings, createBaseStructure, createWallStructure, createTu
 import { createEnvironmentProps } from "./environment.ts";
 import { VfxLayer } from "./vfx.ts";
 import { InputController } from "../input.ts";
+import { remapIsometricMove } from "./isometric-input.ts";
 import { LocalPlayerPrediction } from "../prediction.ts";
 import { interpolateState } from "../interpolate.ts";
 import { clampViewSize, DEFAULT_VIEW_SIZE } from "../camera.ts";
@@ -103,6 +104,7 @@ const enemyIntro = el<HTMLDivElement>("enemy-intro");
 const introName = el<HTMLDivElement>("intro-name");
 const introBullets = el<HTMLUListElement>("intro-bullets");
 const introDismissBtn = el<HTMLButtonElement>("intro-dismiss");
+const crosshair = el<HTMLDivElement>("crosshair");
 
 function resize(): void {
   const width = Math.max(320, window.innerWidth);
@@ -343,6 +345,7 @@ const input = new InputController({
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
   },
   getPlayerPos: () => prediction.getDisplayPos(performance.now()),
+  moveKeyRemap: remapIsometricMove,
   onShoot: (origin, aimAngle) => {
     const endpoint = guessShotEndpoint(origin, aimAngle);
     const firedAt = performance.now();
@@ -954,6 +957,18 @@ function frame(timestamp: number): void {
 
     baseStructure.update(timestamp);
     vfx.update(timestamp);
+
+    // Crosshair overlay — mirrors render.ts's renderCrosshair (hidden until
+    // the first mousemove gives a real world position), positioned in CSS
+    // pixels via scene3d.worldToScreen, the inverse of the same raycast
+    // input.ts's screenToWorld already uses for this same mouse position.
+    const mouseWorld = input.getMouseWorldPos();
+    if (mouseWorld) {
+      const screenPos = scene3d.worldToScreen(mouseWorld.x, mouseWorld.y);
+      crosshair.style.left = `${screenPos.x}px`;
+      crosshair.style.top = `${screenPos.y}px`;
+      crosshair.hidden = false;
+    }
 
     const followPos = predictedPos;
     if (dtMs > 0) {
