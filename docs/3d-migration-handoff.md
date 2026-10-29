@@ -49,12 +49,50 @@ see `PROCESS.md` and `docs/process-history.md` for the graded account.
   `character.ts`/`zombie.ts`; verified live that all 4 zombie types, the
   wall, and turrets now render at correct, consistent scale.
 
-## What's explicitly NOT done — this is the active task
+## Update (2026-10-29 session, after an unexpected shutdown): control parity DONE
+
+The control-parity gaps below were implemented and verified live in the
+resuming session (commit `b1bf520`, "3D control parity: screen-relative
+WASD remap and crosshair overlay"):
+
+- `src/client/three/isometric-input.ts` (new): `remapIsometricMove` derives
+  a static screen-to-world remap from `scene.ts`'s `CAMERA_AZIMUTH` (now
+  exported), converting raw WASD intent into the same
+  `{up,down,left,right}` wire shape `movePlayer` already expects — no
+  wire-protocol or server change.
+- `input.ts`: `InputController` takes an optional `moveKeyRemap` (identity
+  for 2D, `remapIsometricMove` for 3D) so one shared class serves both
+  clients.
+- `scene.ts`: added `worldToScreen` (inverse of the existing
+  `screenToWorld` ground-plane raycast) for positioning an HTML overlay.
+- `index.html`/`main3d.ts`: HTML/CSS crosshair overlay (`#crosshair`,
+  4 red bars) positioned every frame from `worldToScreen`, mirroring
+  `render.ts`'s `renderCrosshair` sizing/behavior — there's no Canvas2D
+  context over the WebGL canvas to draw into directly.
+
+**Verified live** (fresh isolated server, `PORT=8094`/
+`DATA_DIR=/tmp/resume-test-instance`, Playwright against real WebGL 2.0):
+held each of W/A/S/D for 800ms and read the authoritative `state` message's
+`player.x/y` directly off the WebSocket — all four deltas matched
+`remapIsometricMove`'s rotation formula exactly (e.g. W: `{dx:-90.16,
+dy:-90.16}`, D: `{dx:+90.16, dy:-90.16}`, confirming W now moves
+screen-up-and-slightly-left/up as the camera's 45° azimuth predicts, not
+raw world -y). Crosshair screenshot confirms it tracks the mouse pixel-
+accurately and the player model's facing rotates to match the aim point
+independent of movement. `pnpm typecheck`, `pnpm run build`, and the full
+52-test suite all pass unchanged (also re-run against the same fresh
+isolated instance, avoiding the stale-WebSocket pollution noted below).
+
+Items 4/5 from the original gap list below (aim/weapon orientation) were
+re-checked after the remap and are unaffected — aim was already driven
+independently by `input.getAimAngle()` and did not change.
+
+## Original gap list (superseded above; kept for history)
 
 The user tested the running 3D game and rejected the current control feel.
-**Restoring 2D-equivalent controls in 3D is the current, unfinished task.**
-Concrete gaps found before this checkpoint (verified live with Playwright
-against the real dev server, not assumed):
+~~Restoring 2D-equivalent controls in 3D is the current, unfinished task.~~
+**DONE — see update above.** Concrete gaps found before this checkpoint
+(verified live with Playwright against the real dev server, not assumed):
 
 1. **WASD is not screen-relative.** `movePlayer`/`prediction.ts` map W/S/A/D
    directly to world -y/+y/-x/+x. In 2D this IS screen-relative, because the
