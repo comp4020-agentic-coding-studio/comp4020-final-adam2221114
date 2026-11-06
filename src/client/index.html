@@ -54,8 +54,6 @@
          underlying fill, plus a bright accent bar along the top edge. The
          clip-path corners are deliberately small and axis-aligned (not a
          full diamond cut) so text/icons inside never collide with the cut. */
-      #hud,
-      #team-panel,
       #interact-menu,
       .phase-panel,
       #enemy-intro,
@@ -82,8 +80,6 @@
       }
       /* The accent bar is a separate ::before (not border-top) so it isn't
          cut by the parent's own clip-path corner. */
-      #hud::before,
-      #team-panel::before,
       #interact-menu::before,
       .phase-panel::before,
       #enemy-intro::before,
@@ -102,87 +98,290 @@
       .phase-panel.success::before {
         background: var(--accent-green);
       }
+
       .ui-icon {
         display: inline-block;
         vertical-align: -3px;
         image-rendering: pixelated;
       }
 
-      /* #hud and #team-panel stack via flex (not independent fixed offsets)
-         so team-panel always sits below the HUD regardless of the HUD's
-         content-driven height — avoids the two overlapping at narrow
-         viewports or when either panel's content grows. */
-      #top-left-stack {
+      /* --- HUD corner panels (2026-11-06 redesign): replaces the earlier
+         2026-11-05 single full-width bottom bar with four independent
+         panels matching a reference sketch the user supplied — top-left
+         (local player card), top-centre (day/kill-progress), top-right
+         (base/wall/turret status + XP/connection + play-pause/menu
+         buttons), bottom-left (team roster incl. open "+JOIN" slots). The
+         "top-bar" id/class names are kept on the pieces that existed before
+         this pass (day/wave, team roster) since they're purely
+         cosmetic/historical and renaming would touch every selector below
+         for no behavioural change; new pieces introduced this pass use
+         "hud-" names instead. */
+      .hud-panel {
         position: fixed;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 13px;
+        padding: 8px 12px;
+        border: 2px solid var(--border-light);
+        border-top: 3px solid var(--accent-gold);
+        background:
+          linear-gradient(var(--panel-glass), var(--panel-glass)),
+          url(/sprites/ui/panels/panel-grey-dark.png);
+        background-size:
+          100% 100%,
+          16px 16px;
+        image-rendering: pixelated;
+        color: var(--text);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+      }
+      #hud-top-left {
         top: 8px;
         left: 8px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        width: min(320px, calc(100vw - 16px));
       }
-      #hud {
-        font-size: 13px;
-        padding: 0 0 6px;
+      #top-bar-center {
+        top: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        flex-direction: column;
+        align-items: stretch;
+        gap: 4px;
         white-space: nowrap;
       }
-      /* Header strip: a solid band (not the translucent glass body below
-         it) so the HUD reads as "instrument panel with a label" rather than
-         a borderless list of numbers — the day counter is the single most
-         important readout, so it alone gets top billing. */
-      #hud-heading {
+      #hud-top-right {
+        top: 8px;
+        right: 8px;
+        align-items: stretch;
+      }
+      #top-bar-players {
+        bottom: 8px;
+        left: 8px;
+      }
+
+      /* Top-left: local player's own portrait + name + HP + (numeric, not a
+         bar — shared XP has no real maximum to size a fill against) XP. */
+      .hud-self-portrait-frame {
+        width: 44px;
+        height: 44px;
+        flex: 0 0 auto;
+        border: 2px solid var(--border-light);
         background: rgba(0, 0, 0, 0.35);
-        padding: 7px 14px 6px calc(14px + var(--hud-corner) * 0.4);
+        image-rendering: pixelated;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .hud-self-portrait-frame canvas {
+        image-rendering: pixelated;
+      }
+      .hud-self-stats {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+      }
+      .hud-self-name {
         font-weight: 800;
-        letter-spacing: 0.08em;
-        font-size: 15px;
+        font-size: 14px;
+        white-space: nowrap;
+      }
+
+      /* Per-player card: portrait (the character-select sheet's own
+         walk-down frame 0, same reuse convention drawCharacterPortraits
+         already established) + HP/status stacked to its right. The empty
+         "+JOIN" card for a not-yet-joined slot reuses the exact same box so
+         the row's rhythm doesn't jump between 1 and 4 players. */
+      .player-card {
         display: flex;
         align-items: center;
         gap: 6px;
-        border-bottom: 1px solid rgba(212, 175, 55, 0.3);
-        margin-bottom: 6px;
+        flex: 0 0 auto;
       }
-      #hud-rows {
-        padding: 0 14px;
-        display: grid;
-        grid-template-columns: auto 1fr;
-        row-gap: 3px;
-        column-gap: 10px;
-        align-items: center;
-      }
-      .hud-row-label {
-        color: var(--text-dim);
+      .player-portrait-frame {
+        width: 40px;
+        height: 40px;
+        flex: 0 0 auto;
+        border: 2px solid var(--border-light);
+        background: rgba(0, 0, 0, 0.35);
+        image-rendering: pixelated;
         display: flex;
         align-items: center;
-        gap: 5px;
+        justify-content: center;
+        position: relative;
       }
-      .hud-row-value {
-        text-align: right;
+      .player-portrait-frame canvas {
+        image-rendering: pixelated;
+      }
+      .player-portrait-label {
+        position: absolute;
+        bottom: -1px;
+        left: -1px;
+        font-size: 9px;
+        font-weight: 800;
+        padding: 0 3px;
+        background: rgba(0, 0, 0, 0.75);
+        line-height: 1.3;
+      }
+      .player-card-stats {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .player-card-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
+      }
+      .player-card-value {
         font-weight: 700;
         font-variant-numeric: tabular-nums;
-      }
-      .hud-value-good {
-        color: var(--accent-green);
-      }
-      .hud-value-warn {
-        color: var(--accent-yellow);
-      }
-      .hud-value-critical {
-        color: var(--accent-red);
-      }
-      #hud .hud-note {
-        padding: 5px 14px 0;
-        color: var(--text-dim);
         font-size: 11px;
-        white-space: normal;
-        line-height: 1.4;
       }
-      #hud .rejected {
-        padding: 5px 14px 0;
-        color: var(--accent-red);
+      /* A bare, no-portrait slot for a player who hasn't joined yet — a
+         dashed placeholder box with "+JOIN" so the row always shows the
+         team's real capacity (MAX_PLAYERS), not just who's currently in,
+         matching the reference sketch's bottom-left roster. */
+      .player-slot-empty {
+        width: 72px;
+        height: 40px;
+        flex: 0 0 auto;
+        border: 2px dashed var(--border-light);
+        opacity: 0.5;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+      }
+
+      #top-bar-day,
+      #top-bar-wave {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
+        flex: 0 0 auto;
+        justify-content: center;
+      }
+      #top-bar-day {
+        font-weight: 800;
+        font-size: 15px;
+        letter-spacing: 0.04em;
+      }
+      #top-bar-wave .top-bar-wave-label {
         font-weight: 700;
-        white-space: normal;
-        line-height: 1.4;
+      }
+      /* Today's enemy-type badges (flying/giant/boss) — "today has flying
+         zombies" legible before any have spawned, since dayWaveComposition
+         is the day's fixed total, not a live count. */
+      .top-bar-wave-badge {
+        font-size: 10px;
+        font-weight: 800;
+        padding: 2px 6px;
+        border: 1px solid;
+        background: rgba(0, 0, 0, 0.4);
+        white-space: nowrap;
+      }
+
+      /* Top-right: base/wall/turret status box, a divider, then XP+
+         connection, then the play-pause/menu icon buttons — matching the
+         reference sketch's two-box-plus-icons right-hand cluster. */
+      .hud-status-box {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding-right: 10px;
+        border-right: 1px solid var(--border-light);
+      }
+      .hud-xp-box {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        justify-content: center;
+        padding-right: 10px;
+        border-right: 1px solid var(--border-light);
+      }
+      .hud-xp-value {
+        color: var(--accent-green);
+        font-weight: 800;
+        font-size: 15px;
+      }
+      .hud-icon-buttons {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .hud-icon-btn {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 2px solid var(--border-light);
+        border-top: 2px solid var(--accent-gold);
+        background: var(--panel-dark);
+        color: var(--text);
+        cursor: pointer;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      }
+      .hud-icon-btn:hover {
+        background: #352a1f;
+        border-top-color: var(--accent-yellow);
+      }
+      .hud-icon-btn:active {
+        transform: translateY(1px);
+        background: #1d1812;
+      }
+      .hud-icon-btn[hidden] {
+        display: none;
+      }
+
+      /* Hamburger dropdown (Resume/Retry Current Day/Restart) — a plain
+         absolutely-positioned panel under the menu button, not a new
+         interaction pattern: the same three controls that existed as
+         always-visible text buttons before this pass, just tucked behind
+         one icon per the reference sketch's "only two icon buttons" corner. */
+      #hud-menu-dropdown {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 6px;
+        min-width: 180px;
+        border: 2px solid var(--border-light);
+        border-top: 3px solid var(--accent-gold);
+        background: var(--panel-dark);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+        z-index: 15;
+      }
+      #hud-menu-dropdown[hidden] {
+        display: none;
+      }
+      #hud-menu-dropdown button {
+        font: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        padding: 8px 10px;
+        border: 1px solid var(--border-light);
+        background: transparent;
+        color: var(--text);
+        cursor: pointer;
+        text-align: left;
+      }
+      #hud-menu-dropdown button:hover {
+        background: #352a1f;
+      }
+      #hud-menu-dropdown button[hidden] {
+        display: none;
       }
 
       /* --- Meter bars: track + proportional fill, numbers always shown
@@ -214,32 +413,14 @@
         background: var(--accent-green);
       }
 
-      /* --- Multiplayer status (up to 4 players) --- */
-      #team-panel {
-        font-size: 13px;
-        padding: 6px 12px;
+      .hud-value-good {
+        color: var(--accent-green);
       }
-      .player-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 3px 0;
-        white-space: nowrap;
+      .hud-value-warn {
+        color: var(--accent-yellow);
       }
-      .player-swatch {
-        width: 10px;
-        height: 10px;
-        flex: 0 0 auto;
-        border: 1px solid #0006;
-      }
-      .player-label {
-        min-width: 26px;
-        max-width: 110px;
-        flex: 0 0 auto;
-        font-weight: 700;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+      .hud-value-critical {
+        color: var(--accent-red);
       }
       .player-downed {
         color: #e0a05c;
@@ -247,27 +428,38 @@
       .player-dead {
         color: var(--text-dim);
       }
+      /* No longer scoped under #top-bar (removed in the 2026-11-06 corner-
+         panel redesign) — positioned above the bottom-centre "[X] Base
+         Menu"-style prompt instead, the one bottom-centre element left. */
+      .rejected {
+        position: fixed;
+        bottom: 96px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: var(--accent-red);
+        font-weight: 700;
+        white-space: normal;
+        line-height: 1.4;
+        max-width: min(320px, calc(100vw - 32px));
+        text-align: center;
+        pointer-events: none;
+      }
 
       #conn {
-        position: fixed;
-        top: 8px;
-        right: 8px;
-        font-size: 12px;
+        flex: 0 0 auto;
+        font-size: 11px;
         font-weight: 700;
-        letter-spacing: 0.04em;
+        letter-spacing: 0.02em;
         text-transform: uppercase;
-        padding: 5px 12px 5px 10px;
-        border: 1px solid var(--border-light);
-        color: var(--text);
         display: flex;
         align-items: center;
-        gap: 6px;
-        background: rgba(20, 16, 11, 0.85);
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+        gap: 5px;
+        white-space: nowrap;
+        align-self: center;
       }
-      /* A small status dot instead of relying on border colour alone — a
+      /* A small status dot instead of relying on text colour alone — a
          glanceable connection indicator consistent with the threshold-
-         coloured HUD values elsewhere (index.html's #hud-rows). */
+         coloured HUD values elsewhere. */
       #conn::before {
         content: "";
         width: 7px;
@@ -275,16 +467,9 @@
         border-radius: 50%;
         flex: 0 0 auto;
       }
-      #conn.connected {
-        border-color: var(--accent-green);
-      }
       #conn.connected::before {
         background: var(--accent-green);
         box-shadow: 0 0 5px var(--accent-green);
-      }
-      #conn.connecting,
-      #conn.disconnected {
-        border-color: var(--accent-red);
       }
       #conn.connecting::before,
       #conn.disconnected::before {
@@ -292,47 +477,19 @@
         box-shadow: 0 0 5px var(--accent-red);
       }
 
+      /* Bottom-right (not bottom-left, to clear the team roster panel that
+         now occupies that corner — see #top-bar-players above) since this
+         pass removed the old always-visible Start/Pause/Resume/Retry/
+         Restart button row #controls entirely in favour of the top-right
+         play-pause icon + hamburger menu. */
       footer {
         position: fixed;
         bottom: 8px;
-        left: 8px;
+        right: 8px;
         font-size: 12px;
       }
       footer a {
         color: #8ab4ff;
-      }
-
-      #controls {
-        position: fixed;
-        bottom: 8px;
-        right: 8px;
-        display: flex;
-        gap: 8px;
-      }
-      #controls button {
-        font: inherit;
-        font-size: 13px;
-        font-weight: 700;
-        letter-spacing: 0.03em;
-        text-transform: uppercase;
-        padding: 9px 18px;
-        border: 1px solid var(--border-light);
-        border-top: 2px solid var(--accent-gold);
-        background: var(--panel-dark);
-        color: var(--text);
-        cursor: pointer;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-      }
-      #controls button:hover {
-        background: #352a1f;
-        border-top-color: var(--accent-yellow);
-      }
-      #controls button:active {
-        transform: translateY(1px);
-        background: #1d1812;
-      }
-      #controls button[hidden] {
-        display: none;
       }
 
       /* Centred over the canvas, never blocking the controls or team/HUD
@@ -487,27 +644,96 @@
          regardless of game phase, so a late joiner still gets a chance to
          pick. A taken/selected card state is rebuilt every "state" message
          from state.players, same freshness every other live-state-driven UI
-         in this file already has. */
-      #character-select {
+         in this file already has. Restyled 2026-11-06 to match a reference
+         sketch the user supplied (game-title banner, skull-flanked heading,
+         a labelled name field, dashed portrait-placeholder framing, a
+         "customize later" note, and a styled Confirm button) — no change to
+         the underlying pick/confirm logic, which this wraps unchanged. */
+      #character-select-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        z-index: 29;
+      }
+      #character-select-backdrop[hidden] {
+        display: none;
+      }
+      #character-select-wrap {
         position: fixed;
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        padding: 20px 26px;
-        width: min(560px, calc(100vw - 48px));
+        width: min(620px, calc(100vw - 48px));
         box-sizing: border-box;
         text-align: center;
         z-index: 30;
       }
-      #character-select[hidden] {
+      #character-select-wrap[hidden] {
         display: none;
       }
-      .character-select-heading {
-        color: var(--accent-yellow);
+      /* The "LAST STAND" title banner sitting astride the panel's top edge,
+         matching the sketch's framed game-title header above the card. */
+      .character-select-title {
+        position: relative;
+        display: inline-block;
+        margin: 0 auto -14px;
+        padding: 8px 32px;
+        left: 50%;
+        transform: translateX(-50%);
+        border: 2px solid var(--accent-gold);
+        background: var(--panel-dark);
+        color: var(--accent-gold);
+        font-size: 22px;
         font-weight: 800;
-        letter-spacing: 0.1em;
-        font-size: 14px;
-        margin-bottom: 14px;
+        letter-spacing: 0.12em;
+        z-index: 1;
+      }
+      #character-select {
+        padding: 28px 26px 20px;
+      }
+      .character-select-heading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        font-size: 24px;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+      }
+      .character-select-subheading {
+        color: var(--text-dim);
+        font-size: 13px;
+        margin-top: 6px;
+        margin-bottom: 18px;
+      }
+      /* "Player Name" label + input, as one joined control matching the
+         sketch's single bordered bar split into a label half and an input
+         half. */
+      #character-name-row {
+        display: flex;
+        margin: 0 auto 18px;
+        max-width: 460px;
+        border: 2px solid var(--accent-gold);
+      }
+      #character-name-label {
+        flex: 0 0 auto;
+        padding: 10px 16px;
+        background: var(--panel-dark);
+        font-weight: 700;
+        font-size: 13px;
+        border-right: 2px solid var(--accent-gold);
+        display: flex;
+        align-items: center;
+      }
+      #character-name-input {
+        font: inherit;
+        font-size: 13px;
+        flex: 1 1 auto;
+        min-width: 0;
+        padding: 10px 12px;
+        background: #0f0c08;
+        border: none;
+        color: var(--text);
       }
       #character-grid {
         display: flex;
@@ -521,18 +747,42 @@
         background: #16110c;
         padding: 10px 8px;
         cursor: pointer;
+        position: relative;
       }
       .character-card.selected {
         border-color: var(--accent-gold);
+        box-shadow: 0 0 0 2px var(--accent-gold);
         background: #241c10;
+      }
+      /* The small downward-pointing marker above the selected card, matching
+         the sketch's "▾" indicator over its highlighted first card. */
+      .character-card.selected::before {
+        content: "▾";
+        position: absolute;
+        top: -17px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: var(--accent-gold);
+        font-size: 14px;
       }
       .character-card.taken {
         opacity: 0.4;
         cursor: not-allowed;
       }
+      /* Dashed placeholder framing around the portrait canvas, matching the
+         sketch's "Portrait Here" boxes — the canvas itself still draws a
+         real character sprite once PLAYER_SHEETS finishes loading, same as
+         before this pass; this is purely a frame around it. */
+      .character-portrait-frame {
+        border: 2px dashed var(--border-light);
+        padding: 6px;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
       .character-portrait {
         display: block;
-        margin: 0 auto 6px;
         image-rendering: pixelated;
       }
       .character-card-name {
@@ -554,40 +804,72 @@
         color: var(--accent-red);
         margin-top: 4px;
       }
+      /* "(i) You can customize this later" note, matching the sketch's
+         info-icon hint row between the cards and the Confirm button. */
+      .character-select-note {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        color: #7fb6e8;
+        font-size: 12px;
+        margin: 16px 0 14px;
+      }
+      .character-select-note-icon {
+        width: 15px;
+        height: 15px;
+        border-radius: 50%;
+        border: 1.5px solid #7fb6e8;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        font-weight: 800;
+        flex: 0 0 auto;
+      }
       #character-select-form {
-        margin-top: 16px;
         display: flex;
         gap: 10px;
         justify-content: center;
         align-items: center;
       }
-      #character-name-input {
-        font: inherit;
-        font-size: 13px;
-        padding: 8px 10px;
-        background: #16110c;
-        border: 2px solid var(--border-light);
-        color: var(--text);
-        width: 180px;
-      }
       #character-confirm-btn {
+        font: inherit;
+        font-size: 14px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 12px 36px;
+        border: 2px solid #5fb0e0;
+        background: #2a5f7a;
+        color: var(--text);
+        cursor: pointer;
+      }
+      #character-confirm-btn:hover:not(:disabled) {
+        background: #366f8c;
+      }
+      #character-confirm-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      /* Shown only when the overlay was reopened via the hamburger menu's
+         "Change Character" while already playing a confirmed character — a
+         brand-new identity has no prior pick to go back to, so this stays
+         hidden for that case (see main.ts's openCharacterSelect). */
+      #character-cancel-btn {
         font: inherit;
         font-size: 13px;
         font-weight: 700;
-        letter-spacing: 0.03em;
+        letter-spacing: 0.02em;
         text-transform: uppercase;
-        padding: 8px 16px;
+        padding: 12px 22px;
         border: 2px solid var(--border-light);
         background: var(--panel-dark);
         color: var(--text);
         cursor: pointer;
       }
-      #character-confirm-btn:hover {
+      #character-cancel-btn:hover {
         background: #352a1f;
-      }
-      #character-confirm-btn:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
       }
 
       /* X-menu: near the base or a turret, [1]/[2]/.../X/Esc are the only
@@ -653,6 +935,9 @@
          surfaces existing keybinds/interactions when in range, nothing new. */
       #prompt {
         position: fixed;
+        /* Back to 64px (2026-11-06 corner-panel redesign) — the bottom edge
+           no longer has a full-width bar, just the bottom-left team roster
+           panel, which this centred prompt doesn't overlap. */
         bottom: 64px;
         left: 50%;
         transform: translateX(-50%);
@@ -678,11 +963,32 @@
   </head>
   <body>
     <canvas id="game"></canvas>
-    <div id="top-left-stack">
-      <div id="hud"></div>
-      <div id="team-panel"></div>
+    <div id="hud-top-left" class="hud-panel"></div>
+    <div id="top-bar-center" class="hud-panel">
+      <div id="top-bar-day"></div>
+      <div id="top-bar-wave"></div>
     </div>
-    <div id="conn" class="connecting">connecting…</div>
+    <div id="hud-top-right" class="hud-panel">
+      <div id="hud-status-box" class="hud-status-box"></div>
+      <div class="hud-xp-box">
+        <div id="hud-xp-value" class="hud-xp-value"></div>
+        <div id="conn" class="connecting">connecting…</div>
+      </div>
+      <div class="hud-icon-buttons">
+        <button id="btn-start" class="hud-icon-btn" title="Start Game"></button>
+        <button id="btn-pause" class="hud-icon-btn" title="Pause"></button>
+        <div style="position: relative">
+          <button id="btn-menu" class="hud-icon-btn" title="Menu"></button>
+          <div id="hud-menu-dropdown" hidden>
+            <button id="btn-resume">Resume</button>
+            <button id="btn-retry">Retry Current Day</button>
+            <button id="btn-restart">Restart (Day 1)</button>
+            <button id="btn-change-character">Change Character</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="top-bar-players" class="hud-panel"></div>
     <div id="phase-banner"></div>
     <div id="interact-menu" hidden></div>
     <div id="prompt" hidden></div>
@@ -693,45 +999,58 @@
       <ul class="intro-bullets" id="intro-bullets"></ul>
       <button id="intro-dismiss">Got it</button>
     </div>
-    <div id="character-select" hidden>
-      <div class="character-select-heading">CHOOSE YOUR SURVIVOR</div>
-      <div id="character-grid">
-        <div class="character-card" data-index="0">
-          <canvas class="character-portrait" width="64" height="64"></canvas>
-          <div class="character-card-name">Soldier</div>
-          <div class="character-card-flavor">Grey armour. Holds the line.</div>
-          <div class="character-card-taken-label" hidden>TAKEN</div>
+    <!-- Blocks clicks from reaching the canvas (which would otherwise fire a
+         shot) behind the overlay — only matters once "Change Character" can
+         reopen this mid-game over a live, clickable battlefield; the
+         original first-pick case had nothing dangerous behind it to guard
+         against. Shown/hidden in lockstep with #character-select-wrap, see
+         main.ts's setCharacterSelectVisible. -->
+    <div id="character-select-backdrop" hidden></div>
+    <div id="character-select-wrap" hidden>
+      <div class="character-select-title">LAST STAND</div>
+      <div id="character-select">
+        <div class="character-select-heading">
+          <img class="ui-icon" src="/sprites/ui/icons/skull.png" width="20" height="20" alt="" />
+          Create Your Survivor
+          <img class="ui-icon" src="/sprites/ui/icons/skull.png" width="20" height="20" alt="" />
         </div>
-        <div class="character-card" data-index="1">
-          <canvas class="character-portrait" width="64" height="64"></canvas>
-          <div class="character-card-name">Soldier</div>
-          <div class="character-card-flavor">Gold armour. First through the door.</div>
-          <div class="character-card-taken-label" hidden>TAKEN</div>
+        <div class="character-select-subheading">Choose a character and enter your name</div>
+        <div id="character-name-row">
+          <div id="character-name-label">Player Name</div>
+          <input id="character-name-input" type="text" maxlength="20" placeholder="Enter your name…" autocomplete="off" />
         </div>
-        <div class="character-card" data-index="2">
-          <canvas class="character-portrait" width="64" height="64"></canvas>
-          <div class="character-card-name">Sara</div>
-          <div class="character-card-flavor">Teal. Quick on her feet.</div>
-          <div class="character-card-taken-label" hidden>TAKEN</div>
+        <div id="character-grid">
+          <div class="character-card" data-index="0">
+            <div class="character-portrait-frame"><canvas class="character-portrait" width="64" height="64"></canvas></div>
+            <div class="character-card-name">Soldier</div>
+            <div class="character-card-flavor">Grey armour. Holds the line.</div>
+            <div class="character-card-taken-label" hidden>TAKEN</div>
+          </div>
+          <div class="character-card" data-index="1">
+            <div class="character-portrait-frame"><canvas class="character-portrait" width="64" height="64"></canvas></div>
+            <div class="character-card-name">Soldier</div>
+            <div class="character-card-flavor">Gold armour. First through the door.</div>
+            <div class="character-card-taken-label" hidden>TAKEN</div>
+          </div>
+          <div class="character-card" data-index="2">
+            <div class="character-portrait-frame"><canvas class="character-portrait" width="64" height="64"></canvas></div>
+            <div class="character-card-name">Sara</div>
+            <div class="character-card-flavor">Teal. Quick on her feet.</div>
+            <div class="character-card-taken-label" hidden>TAKEN</div>
+          </div>
+          <div class="character-card" data-index="3">
+            <div class="character-portrait-frame"><canvas class="character-portrait" width="64" height="64"></canvas></div>
+            <div class="character-card-name">Princess</div>
+            <div class="character-card-flavor">Blue. Doesn't wait to be rescued.</div>
+            <div class="character-card-taken-label" hidden>TAKEN</div>
+          </div>
         </div>
-        <div class="character-card" data-index="3">
-          <canvas class="character-portrait" width="64" height="64"></canvas>
-          <div class="character-card-name">Princess</div>
-          <div class="character-card-flavor">Blue. Doesn't wait to be rescued.</div>
-          <div class="character-card-taken-label" hidden>TAKEN</div>
+        <div class="character-select-note"><span class="character-select-note-icon">i</span> You can customize this later</div>
+        <div id="character-select-form">
+          <button id="character-confirm-btn" disabled>Confirm</button>
+          <button id="character-cancel-btn" hidden>Cancel</button>
         </div>
       </div>
-      <div id="character-select-form">
-        <input id="character-name-input" type="text" maxlength="20" placeholder="Your name" autocomplete="off" />
-        <button id="character-confirm-btn" disabled>Confirm</button>
-      </div>
-    </div>
-    <div id="controls">
-      <button id="btn-start">Start Game</button>
-      <button id="btn-pause">Pause</button>
-      <button id="btn-resume">Resume</button>
-      <button id="btn-retry">Retry Current Day</button>
-      <button id="btn-restart">Restart (Day 1)</button>
     </div>
     <footer><a href="/readme/">About this app</a></footer>
     <script type="module" src="/main.js"></script>

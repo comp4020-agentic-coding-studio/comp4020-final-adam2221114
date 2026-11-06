@@ -16,30 +16,14 @@ import { attachWebSocketServer } from "./ws-server.ts";
 // STEP 3: a /ws endpoint broadcasts the authoritative state at a stable rate.
 // STEP 4: the client can send input/shoot; the server resolves them.
 // STEP 5: the real canvas client replaces the Step 0 shell page, served from
-// dist/client (bundled from src/client by scripts/build-client.ts, an
-// esbuild bundle — see its own comment for why a bundler replaced the old
-// bundler-free tsc emit once the client started depending on an npm
-// package, three, that a browser can't resolve as a bare specifier).
+// dist/client (built from src/client by tsconfig.client.json).
 
 const port = Number(process.env.PORT ?? 8080);
 const cwd = process.cwd();
 
 const clientIndex = readFileSync(path.join(cwd, "src", "client", "index.html"), "utf8");
-// The 3D prototype (feature/3d-migration, Phase 2) lives at a SEPARATE route
-// and a separate entry bundle (dist/client/main3d.js, from
-// src/client/three/main3d.ts) rather than replacing "/" — this is
-// deliberate: CLAUDE.md's 3D migration rules require main's proven 2D
-// version to keep working unmodified while the 3D version is built and
-// proven out, and "/" + main.js must stay exactly as they are until (and
-// unless) the 3D version is explicitly approved to replace them.
-const client3dIndex = readFileSync(path.join(cwd, "src", "client", "three", "index.html"), "utf8");
 const distClientDir = path.join(cwd, "dist", "client");
 const spritesDir = path.join(cwd, "src", "client", "sprites");
-// Phase 3 (feature/3d-migration): vendored CC0/MIT 3D model assets — see
-// assets/3d/NOTES.md for source/licence per model. Served straight from
-// source the same way serveSprite already serves src/client/sprites/*.png,
-// scoped to *.glb under this one directory only.
-const models3dDir = path.join(cwd, "assets", "3d");
 
 // Reads fresh each request (like renderReadme()) rather than caching, so a
 // rebuild (`pnpm run build`) is visible without restarting the server. Only
@@ -77,29 +61,6 @@ function serveSprite(url: string, res: import("node:http").ServerResponse): bool
   }
 }
 
-// Scoped to assets/3d/ only (no path traversal) — same pattern as
-// serveSprite above. Covers both *.glb (served as model/gltf-binary, the
-// IANA-registered type) and the handful of *.png textures a non-self-
-// contained glTF references by relative path (e.g. the Kenney truck model's
-// Textures/colormap.png — glTF's own external-texture-reference mechanism,
-// not something this project invented).
-function serveModel3d(url: string, res: import("node:http").ServerResponse): boolean {
-  if (!url.startsWith("/assets/3d/")) return false;
-  const isGlb = url.endsWith(".glb");
-  const isPng = url.endsWith(".png");
-  if (!isGlb && !isPng) return false;
-  const resolved = path.resolve(path.join(cwd, url.slice(1)));
-  if (!resolved.startsWith(models3dDir + path.sep)) return false; // no path traversal
-  try {
-    const data = readFileSync(resolved);
-    res.writeHead(200, { "content-type": isGlb ? "model/gltf-binary" : "image/png", "cache-control": "public, max-age=3600" });
-    res.end(data);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 const db = openDatabase();
 const progress = new PersistedState(db);
 console.log("loaded progress:", progress.get());
@@ -122,15 +83,8 @@ const server = createServer((req, res) => {
     return;
   }
 
-  if (url === "/3d" || url === "/3d/") {
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(client3dIndex);
-    return;
-  }
-
   if (serveClientScript(url, res)) return;
   if (serveSprite(url, res)) return;
-  if (serveModel3d(url, res)) return;
 
   res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
   res.end("not found");

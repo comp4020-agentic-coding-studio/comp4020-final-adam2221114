@@ -307,47 +307,6 @@ framework without first demonstrating a clear technical need.
 Performance: target ~60 FPS with multiple players and large zombie waves;
 cache loaded images/sprite data rather than reloading per frame; keep
 particle/lighting effects cheap enough not to regress frame rate.
-3D migration rules (added 2026-10-28, feature/3d-migration branch only)
-This branch explicitly overrides the "prefer Canvas-based rendering... do
-not migrate off Canvas" line above. Three.js is now the authorised primary
-rendering technology for this branch, and genuine 3D assets, skeletal
-animation, and real-time lighting/shadow systems are in scope. The 2D
-Canvas renderer on `main` is the project's proven, playable baseline and is
-NOT touched by this branch's work — `main` keeps working exactly as before,
-and this override applies only on `feature/3d-migration` until (and unless)
-the 3D version is explicitly adopted.
-Visual quality remains a first-class priority (per the visual scope rules
-above), now extended to full 3D presentation: detailed low-poly character/
-zombie/environment models, skeletal rigs or equivalent hand-placement for
-weapon holding, animated movement/combat/death states, 3D projectiles and
-impact effects, and atmospheric lighting are all explicitly authorised.
-Every other rule in this file still applies at full strength and is NOT
-superseded by this section:
-- the server remains authoritative for all gameplay state (Architecture
-  rules) — nothing in the 3D client may decide damage, position validation,
-  XP, day/wave progression, or any other authoritative value;
-- hitscan-only shooting, finite PISTOL_RANGE, and existing damage/cadence
-  numbers are unchanged — a 3D projectile mesh is a presentation of an
-  already-resolved server hit, never a physics simulation that could
-  disagree with it;
-- the existing flow-field zombie pathfinding (Map/obstacles entry) is
-  unchanged — 3D models are driven by the same server-authoritative x/y
-  positions the 2D renderer already consumes, mapped onto a ground plane;
-- WebSocket protocol, SQLite persistence, character selection, and player
-  identity are unchanged;
-- the "do not add" scope list (open world, accounts, matchmaking, multiple
-  maps, crafting, skill trees, many weapons, ammo systems, etc.) still
-  applies — this is a rendering-layer migration, not a scope expansion of
-  gameplay;
-- course/academic-integrity requirements and every process/testing/git rule
-  below still apply unchanged.
-Do not commit placeholder primitive geometry (a bare box/capsule/cone) as a
-final-quality asset in PROCESS.md or in conversation — label it explicitly
-as temporary/in-progress until replaced, per the Documentation rules below.
-Do not push, merge to main, deploy, or run /comp4020:ship from this branch
-without explicit permission — `main`'s playable 2D version must remain the
-default/deployed version until the 3D work is explicitly approved to
-replace it.
 Game-state rules
 Use explicit game phases:
 - waiting

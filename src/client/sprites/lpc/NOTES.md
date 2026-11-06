@@ -116,6 +116,10 @@ subset was (`src/server/index.ts`'s `serveSprite`).
 - LPC Sara: credit Stephen "Redshrike" Challener (graphic artist),
   William.Thompsonj (contributor), and Mandi Paugh (original character/OGA
   mascot creator); link back to <https://opengameart.org/content/lpc-sara>.
+- LPC castle: credit Evert (author), with Sharm and Xenodora
+  (collaborators); link back to <https://opengameart.org/content/lpc-castle>.
+  Full sheet vendored at `assets/LPC/castle-evert/`; used for the base/
+  command-post structure's lookout tower — see `sprites/base/NOTES.md`.
 
 ## Four distinct player identities
 
@@ -142,7 +146,59 @@ geometry (only present once built, with a gate only on the player-facing
 side — see `src/server/obstacles.ts`'s own comment). The corner-tower and
 gate-post art slots were cut entirely (no towers in the new design; the
 gate renders as open space, not a tile). `fortress/wall-segment.png` (item
-2's Daniel Armstrong crop above) is real, finished art from day one of that
-change — the earlier magenta/yellow placeholder blockout this NOTES.md used
-to describe as still-pending was resolved at the same time the fortress was
-redesigned, not left outstanding.
+2's Daniel Armstrong crop above) was real, finished art from day one of that
+change, used for all five wall levels alike (colour/thickness only
+distinguished them — see the next entry for why that changed).
+
+## Wall levels (2026-11-02 wall visual redesign): five distinct materials
+
+`fortress/wall-segment.png` is no longer used by the renderer — replaced by
+five genuinely different wall MATERIALS, one per `WALL_LEVELS` tier, so an
+upgrade reads as new construction rather than the same tile in a different
+outline colour (`render.ts`'s `WALL_VISUALS` HP/ability overlay is
+unchanged and still draws on top of whichever material is active). Each
+level ships two hand-varied 32x32 crops, `-a`/`-b` (`renderWallSegment`
+picks between them per grid cell by a position hash, the same pattern
+`buildingDamageSeed` already uses for town buildings) so a long wall run
+doesn't look like one tile stamped repeatedly.
+
+1. **`wall-level-1-{a,b}.png`** — Wooden Barricade. Base texture: a 32x32
+   crop of `assets/LPC/base-assets/tiles/bridges.png` (Lanea Zimmerman/Sharm,
+   LPC Base Assets, CC-BY-SA 3.0/GPL 3.0/OGA-BY 3.0 — same pack and licence
+   as item 2 above; verified self-tileable before use), darkened slightly,
+   with a hand-drawn diagonal support plank and a few rough nick marks
+   layered on top in Canvas.
+2. **`wall-level-2-{a,b}.png`** — Reinforced Wooden Wall. Same `bridges.png`
+   source (a different 32x32 crop, vertical-grain), tinted darker/warmer,
+   with drawn metal corner brackets, rivets, and (variant b) an extra rivet
+   pair — the "thicker timber, metal brackets" tier. Spike damage begins at
+   this level in the real ability table, drawn separately by the existing
+   `WALL_VISUALS` tick-mark overlay.
+3. **`wall-level-3-{a,b}.png`** — Stone/Brick Defensive Wall. Base texture:
+   a 32x32 crop of `Wall-Stone_01-64x64.png` from the **Top Down Dungeon
+   Pack** by Screaming Brain Studios — CC0/Public Domain, no attribution
+   required (full pack page:
+   <https://opengameart.org/content/top-down-dungeon-pack>; the two sheet
+   crops actually used are vendored at `assets/TopDownDungeonPack/Walls/`
+   with the pack's own `License.txt`) — tinted cool blue-grey (distinct from
+   the town buildings' own warm-grey stone fill) with drawn reinforcing
+   mortar-joint lines.
+4. **`wall-level-4-{a,b}.png`** — Reinforced Concrete Wall. Base texture: a
+   32x32 crop of the same CC0 pack's `Wall-Concrete_03-64x64.png`, tinted
+   lighter grey, with a drawn panel seam, bolt heads, and rebar hint lines —
+   "concrete segments, steel reinforcement."
+5. **`wall-level-5-{a,b}.png`** — Fortress-Grade Wall. Base texture: a 32x32
+   crop of the same CC0 pack's `Wall-Metal_04-64x64.png` (a rusted
+   diamond-plate/armour photo texture), warmed toward this level's own gold
+   `WALL_VISUALS` accent colour, with a drawn overlapping armour-plate seam,
+   a rivet row, and angular spike silhouettes along the top edge — "heavy
+   armoured sections, reinforced metal plating, advanced spikes."
+
+All five were generated with a small local Node/`node-canvas` script (not
+checked into the repo — a one-off asset-authoring tool, not game code) that
+crops/downscales/tints the licensed source photos and layers the structural
+detail (brackets, seams, rivets, spikes) with plain Canvas drawing calls —
+the same "prefer simple Canvas geometry" approach this project already uses
+for turrets, applied here on top of real licensed material rather than
+replacing it, since no single existing asset pack covered this exact five-
+tier wood-to-fortress progression at this project's 32x32 top-down scale.

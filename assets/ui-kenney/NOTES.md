@@ -53,6 +53,45 @@ than guessing from the thumbnail.
 | `house.png`   | (41, 16)        | Day / base                            |
 | `trophy.png`  | (40, 16)        | Victory screen                        |
 
+### Hand-drawn additions (not from Kenney)
+
+`calendar.png` and `hazard.png` (2026-11-05 top HUD bar redesign) have no
+equivalent tile in the vendored 1-bit-pack sheet. Drawn directly as 16x16
+PNGs with the exact same background (`#472d3c`) and foreground (`#cfc6b8`)
+colours as every Kenney-sourced icon above, using the same blocky
+axis-aligned silhouette style, so they read as part of the same set rather
+than a mismatched addition — same "prefer simple Canvas geometry when no
+suitable asset exists" precedent as the turret/wall art elsewhere in this
+project. A CC-BY 3.0 biohazard-style icon was found
+(opengameart.org/content/zombie-ui-pack by Osmic) but rejected: it's a flat
+modern-icon style, not this project's 1-bit pixel look, and would read as a
+mismatch sitting next to heart.png/shield.png/etc.
+
+| File            | Used for                                        |
+|-----------------|--------------------------------------------------|
+| `calendar.png`  | Day counter (top HUD bar)                        |
+| `hazard.png`    | Wave/zombie-kill-progress label (top HUD bar)    |
+
+`play.png`/`pause.png`/`menu.png` (2026-11-05, sketch-layout HUD redesign)
+replace the old text-labelled Start/Pause/Resume buttons and add a hamburger
+menu button holding Retry Current Day/Restart, matching a reference sketch
+the user supplied. Same situation as calendar/hazard above: this project
+never vendored the actual 1-bit-pack source sheet (only its LICENSE.txt), a
+fresh attempt to re-fetch it for this pass failed the same way the
+calendar/hazard attempt did, and a generic play/pause/hamburger icon found
+elsewhere would hit the same style-mismatch problem already documented for
+the rejected OpenGameArt biohazard icon. Drawn with the same convention. A
+circular "retry/refresh" arrow was also attempted for a dedicated Retry
+icon, but didn't read clearly at 16x16 (looked like a plain "O"/"C") — Retry
+Current Day and Restart (Day 1) stayed as text buttons inside the new
+hamburger menu instead of getting their own icons.
+
+| File         | Used for                                      |
+|--------------|-------------------------------------------------|
+| `play.png`   | Start Game button (top-right HUD cluster)        |
+| `pause.png`  | Pause button (top-right HUD cluster)             |
+| `menu.png`   | Hamburger menu (Resume/Retry/Restart, contextual)|
+
 ## Panels (`src/client/sprites/ui/panels/`)
 
 | File                   | Source                       | Used for                                |

@@ -1,0 +1,15 @@
+"LPC castle"
+Author: Evert
+Collaborators: Sharm, Xenodora
+Source: https://opengameart.org/content/lpc-castle
+License: CC-BY 3.0 (https://creativecommons.org/licenses/by/3.0/)
+Tags: LPC, castle, portcullis, merlon, tower, drawbridge, 32x32
+
+Full, unedited original sheet (lpc_castle.png, 480x320) vendored here for
+provenance, same pattern as every other full-sheet LPC source in this
+project (assets/LPC/base-assets/, assets/LPC/terrains/, etc.).
+
+Used in this project: a crop of the round top-down tower-ring (originally
+located at approximately (312,15)-(416,64) in the source sheet) as the
+lookout tower on the base/command-post structure. See
+src/client/sprites/base/NOTES.md for the full usage writeup.

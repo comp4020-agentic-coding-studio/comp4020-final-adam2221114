@@ -1,59 +1,35 @@
 import type { ClientMessage } from "./protocol.ts";
-
-export interface MoveState {
-  up: boolean;
-  down: boolean;
-  left: boolean;
-  right: boolean;
-}
+import { screenToWorld, type Camera } from "./camera.ts";
 
 // Reads keyboard + mouse and sends what the server asked for (input/shoot).
 // Never moves anything locally and never decides a hit — position, HP, XP
 // all come back from the server's own state broadcast. getAimAngle() and
 // getMouseWorldPos() are exposed only so the renderer can draw local cues
 // (aim line, crosshair, the oriented character); neither is a game decision.
-//
-// screenToWorld is injected rather than this class owning a camera.ts
-// Camera itself (feature/3d-migration) — the 2D client passes camera.ts's
-// own screenToWorld bound to its 2D orthographic Camera, the 3D prototype
-// (src/client/three/scene.ts) passes its ground-plane raycast version —
-// same {x, y} world-space contract either way, so this class needs no
-// knowledge of which renderer is driving it.
 export class InputController {
   readonly #canvas: HTMLCanvasElement;
-  readonly #screenToWorld: (canvasX: number, canvasY: number) => { x: number; y: number };
+  readonly #getCamera: () => Camera;
   readonly #send: (msg: ClientMessage) => void;
   readonly #getPlayerPos: () => { x: number; y: number };
   readonly #onShoot: (origin: { x: number; y: number }, aimAngle: number) => void;
-  // Raw WASD/arrow state as physically pressed. For the 2D client this
-  // already IS wire-protocol up/down/left/right (the 2D camera has no
-  // rotation, so "screen up" and "world up" coincide). For the 3D client
-  // (fixed 45°-azimuth isometric camera) it is screen-relative intent only
-  // — #moveKeyRemap below converts it to the wire shape before it's ever
-  // read by getMoveState() or sent, so prediction.ts and the wire message
-  // always see the same already-remapped values (see
-  // src/client/three/isometric-input.ts).
   readonly #keys = { up: false, down: false, left: false, right: false, reviving: false };
-  readonly #moveKeyRemap: (raw: MoveState) => MoveState;
   #mouseWorldPos: { x: number; y: number } | undefined;
 
   constructor(opts: {
     canvas: HTMLCanvasElement;
-    screenToWorld: (canvasX: number, canvasY: number) => { x: number; y: number };
+    getCamera: () => Camera;
     send: (msg: ClientMessage) => void;
     getPlayerPos: () => { x: number; y: number };
     onShoot?: (origin: { x: number; y: number }, aimAngle: number) => void;
-    moveKeyRemap?: (raw: MoveState) => MoveState;
   }) {
     this.#canvas = opts.canvas;
-    this.#screenToWorld = opts.screenToWorld;
+    this.#getCamera = opts.getCamera;
     this.#send = opts.send;
     this.#getPlayerPos = opts.getPlayerPos;
     this.#onShoot = opts.onShoot ?? (() => {});
-    this.#moveKeyRemap = opts.moveKeyRemap ?? ((raw) => raw);
 
-    window.addEventListener("keydown", (e) => this.#onKey(e.key, true));
-    window.addEventListener("keyup", (e) => this.#onKey(e.key, false));
+    window.addEventListener("keydown", (e) => this.#onKey(e.key, true, e.target));
+    window.addEventListener("keyup", (e) => this.#onKey(e.key, false, e.target));
     this.#canvas.addEventListener("mousemove", (e) => this.#onMouseMove(e));
     this.#canvas.addEventListener("click", () => this.#onClick());
 
@@ -92,8 +68,8 @@ export class InputController {
     return Math.atan2(this.#mouseWorldPos.y - player.y, this.#mouseWorldPos.x - player.x);
   }
 
-  getMoveState(): MoveState {
-    return this.#moveKeyRemap({ up: this.#keys.up, down: this.#keys.down, left: this.#keys.left, right: this.#keys.right });
+  getMoveState(): { up: boolean; down: boolean; left: boolean; right: boolean } {
+    return { up: this.#keys.up, down: this.#keys.down, left: this.#keys.left, right: this.#keys.right };
   }
 
   // Whether E is currently held — the continuous hold-to-revive input,
@@ -116,7 +92,17 @@ export class InputController {
     this.#keys.reviving = false;
   }
 
-  #onKey(key: string, down: boolean): void {
+  // Typing into a focused text field (the character-name input, reachable
+  // mid-game now that "Change Character" can reopen the select overlay over
+  // a live running round) must never also drive movement/revive — keydown
+  // bubbles to this window-level listener regardless of focus, so without
+  // this guard typing e.g. "awed" would walk the player left/up/down.
+  #isTypingIntoField(target: EventTarget | null): boolean {
+    return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+  }
+
+  #onKey(key: string, down: boolean, target: EventTarget | null): void {
+    if (this.#isTypingIntoField(target)) return;
     switch (key.toLowerCase()) {
       case "w":
       case "arrowup":
@@ -153,7 +139,7 @@ export class InputController {
     const cssToBackingY = this.#canvas.height / rect.height;
     const canvasX = (e.clientX - rect.left) * cssToBackingX;
     const canvasY = (e.clientY - rect.top) * cssToBackingY;
-    this.#mouseWorldPos = this.#screenToWorld(canvasX, canvasY);
+    this.#mouseWorldPos = screenToWorld(this.#getCamera(), canvasX, canvasY);
   }
 
   #onClick(): void {
