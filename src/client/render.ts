@@ -2175,34 +2175,169 @@ export const WAVE_BADGES: Array<{ key: "flying" | "giant" | "boss"; color: strin
   { key: "boss", color: "#ff5c5c", label: "BOSS" },
 ];
 
+// Six-sided "angled corner" panel outline — the same notched-rectangle
+// silhouette index.html's shared CSS clip-path gives #interact-menu/
+// .phase-panel/#enemy-intro, redrawn here as a Canvas path so the day-intro
+// readout (Canvas-only, no DOM element) matches that same black/gold
+// industrial panel language instead of inventing a different shape.
+function dayIntroPanelPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, cut: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x + cut, y);
+  ctx.lineTo(x + w - cut, y);
+  ctx.lineTo(x + w, y + cut);
+  ctx.lineTo(x + w, y + h - cut);
+  ctx.lineTo(x + w - cut, y + h);
+  ctx.lineTo(x + cut, y + h);
+  ctx.lineTo(x, y + h - cut);
+  ctx.lineTo(x, y + cut);
+  ctx.closePath();
+}
+
+// Bold, glow-outlined centered text: fills twice (a wide dark stroke behind
+// a bright fill) so the label reads clearly over any part of the baked
+// courtyard art behind it, then adds a soft colour-matched halo via
+// shadowBlur — cheaper than a second offscreen pass, and this only runs
+// once per frame for ~5s at the start of a day, not a per-zombie cost.
+function drawGlowText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, font: string, fill: string, glow: string, glowBlur: number): void {
+  ctx.font = font;
+  ctx.lineJoin = "round";
+  ctx.lineWidth = Math.max(3, glowBlur * 0.3);
+  ctx.strokeStyle = "rgba(8, 7, 5, 0.9)";
+  ctx.strokeText(text, x, y);
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = glowBlur;
+  ctx.fillStyle = fill;
+  ctx.fillText(text, x, y);
+  ctx.fillText(text, x, y); // second pass over the shadow deepens the glow without blowing out the fill colour
+  ctx.shadowBlur = 0;
+}
+
+const DAY_INTRO_TOTAL_MS = 5000; // mirrors server's DAY_INTRO_MS (game-state.ts) — client has no reason to import server code for one constant
+const DAY_INTRO_FADE_IN_MS = 350;
+const DAY_INTRO_FADE_OUT_MS = 600;
+
+// Central day-intro readout only — a black/gold "doomsday industrial" dial:
+// a depleting ring of tick marks (lit count is literally remainingMs/total,
+// not a decorative loop) orbiting a notched DAY-X panel, a large glowing
+// countdown digit, and a bracketed "PREPARE" caption below, with a gentle
+// breathing scale and a fade in/out at the two ends of the 5s window. Pure
+// Canvas (matches this project's "Prefer Canvas-based rendering" rule) and
+// driven entirely by the same (day, remainingMs) the old plain-text version
+// took — main.ts's call site, the day/phase logic, and every other HUD
+// element are untouched.
 export function renderDayIntro(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasHeight: number, day: number, remainingMs: number): void {
   const centerX = canvasWidth / 2;
   const centerY = canvasHeight / 2;
-  const t = Math.max(0, Math.min(1, remainingMs / 5000));
+  const now = performance.now();
+  const t = Math.max(0, Math.min(1, remainingMs / DAY_INTRO_TOTAL_MS)); // 1 at the very start, 0 at the end
 
-  ctx.fillStyle = `rgba(0, 0, 0, ${0.35 + 0.25 * t})`;
+  const fadeIn = Math.max(0, Math.min(1, (DAY_INTRO_TOTAL_MS - remainingMs) / DAY_INTRO_FADE_IN_MS));
+  const fadeOut = Math.max(0, Math.min(1, remainingMs / DAY_INTRO_FADE_OUT_MS));
+  const alpha = fadeIn * fadeOut;
+  if (alpha <= 0) return;
+
+  ctx.fillStyle = `rgba(6, 5, 4, ${(0.4 + 0.22 * t) * alpha})`;
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-  const scale = 1 + 0.15 * Math.sin(performance.now() / 180);
-  ctx.save();
-  ctx.translate(centerX, centerY - 40);
-  ctx.scale(scale, scale);
-  ctx.textAlign = "center";
-  ctx.fillStyle = "#fff";
-  ctx.font = "bold 56px system-ui, sans-serif";
-  ctx.shadowColor = "rgba(0,0,0,0.6)";
-  ctx.shadowBlur = 12;
-  ctx.fillText(`DAY ${day}`, 0, 0);
-  ctx.restore();
-
+  const breathe = 1 + 0.035 * Math.sin(now / 450);
   const count = Math.max(1, Math.ceil(remainingMs / 1000));
-  ctx.fillStyle = "#ffcc00";
-  ctx.font = "bold 72px system-ui, sans-serif";
-  ctx.shadowColor = "rgba(0,0,0,0.6)";
-  ctx.shadowBlur = 12;
-  ctx.fillText(`${count}`, centerX, centerY + 60);
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(centerX, centerY);
+
+  // Soft gold halo behind everything.
+  const haloR = 175 * breathe;
+  const halo = ctx.createRadialGradient(0, 0, 8, 0, 0, haloR);
+  halo.addColorStop(0, "rgba(232, 178, 61, 0.32)");
+  halo.addColorStop(1, "rgba(232, 178, 61, 0)");
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(0, 0, haloR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Depleting tick-mark dial: slowly rotating for a "live machinery" feel,
+  // with exactly floor(tickCount * t) ticks lit — a real readout of
+  // remainingMs, not just an animation loop.
+  const ringR = 150 * breathe;
+  const tickCount = 40;
+  const rotation = now / 6000;
+  for (let i = 0; i < tickCount; i++) {
+    const angle = rotation + (i / tickCount) * Math.PI * 2;
+    const lit = i / tickCount < t;
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+    ctx.strokeStyle = lit ? "rgba(255, 204, 51, 0.9)" : "rgba(110, 94, 68, 0.28)";
+    ctx.lineWidth = lit ? 3 : 2;
+    ctx.beginPath();
+    ctx.moveTo(cosA * ringR, sinA * ringR);
+    ctx.lineTo(cosA * (ringR - 14), sinA * (ringR - 14));
+    ctx.stroke();
+  }
+
+  ctx.scale(breathe, breathe);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  // DAY-X panel: notched black/gold rectangle with a chevron on either side.
+  const panelW = 300;
+  const panelH = 62;
+  const panelY = -78;
+  dayIntroPanelPath(ctx, -panelW / 2, panelY - panelH / 2, panelW, panelH, 14);
+  ctx.fillStyle = "rgba(10, 9, 7, 0.92)";
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#e8b23d";
+  ctx.stroke();
+  dayIntroPanelPath(ctx, -panelW / 2 + 5, panelY - panelH / 2 + 5, panelW - 10, panelH - 10, 10);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(232, 178, 61, 0.5)";
+  ctx.stroke();
+
+  ctx.fillStyle = "#e8b23d";
+  for (const side of [-1, 1]) {
+    const cx = side * (panelW / 2 - 28);
+    ctx.save();
+    ctx.translate(cx, panelY);
+    ctx.scale(side, 1);
+    ctx.beginPath();
+    ctx.moveTo(-6, -9);
+    ctx.lineTo(4, 0);
+    ctx.lineTo(-6, 9);
+    ctx.moveTo(0, -9);
+    ctx.lineTo(10, 0);
+    ctx.lineTo(0, 9);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#e8b23d";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  drawGlowText(ctx, `DAY ${day}`, 0, panelY + 1, "bold 34px 'Courier New', monospace", "#ede4d3", "rgba(232, 178, 61, 0.85)", 14);
+
+  // Large glowing countdown digit.
+  drawGlowText(ctx, `${count}`, 0, 38, "bold 96px 'Courier New', monospace", "#ffcc33", "rgba(255, 204, 51, 0.9)", 22);
+
+  // "PREPARE" caption, bracketed by two short gold lines.
+  const prepareLabel = "P R E P A R E";
+  ctx.font = "bold 15px 'Courier New', monospace";
+  const labelHalfWidth = ctx.measureText(prepareLabel).width / 2;
+  const lineY = 118;
+  ctx.strokeStyle = "rgba(232, 178, 61, 0.8)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-labelHalfWidth - 46, lineY);
+  ctx.lineTo(-labelHalfWidth - 10, lineY);
+  ctx.moveTo(labelHalfWidth + 10, lineY);
+  ctx.lineTo(labelHalfWidth + 46, lineY);
+  ctx.stroke();
+  ctx.fillStyle = "#d8cbb3";
   ctx.shadowBlur = 0;
+  ctx.fillText(prepareLabel, 0, lineY);
+
+  ctx.restore();
   ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
 }
 
 export function renderCrosshair(ctx: CanvasRenderingContext2D, camera: Camera, mouseWorldPos: { x: number; y: number }): void {

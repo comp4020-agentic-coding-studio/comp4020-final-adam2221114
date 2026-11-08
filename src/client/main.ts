@@ -51,7 +51,7 @@ import {
   type ImpactEffect,
   type ZombieProjectile,
 } from "./render.ts";
-import { isReady, zombieWalkSheet, PLAYER_SHEETS, type SpritedZombieType, type UiIconName } from "./sprites.ts";
+import { giantSheetFor, isReady, zombieWalkSheet, PLAYER_SHEETS, type SpritedZombieType, type UiIconName } from "./sprites.ts";
 import { overlapsAnyBuilding } from "./obstacles.ts";
 import { computeCamera, clampViewSize, screenToWorld, DEFAULT_VIEW_SIZE, type Camera } from "./camera.ts";
 
@@ -313,6 +313,21 @@ const drawIntroPortrait = (type: ZombieType): void => {
     ctx2.translate(cx, cy);
     renderFlyingZombie(ctx2, 84, true, 0, 0, performance.now());
     ctx2.restore();
+    return;
+  }
+  if (type === "giant") {
+    // Giant has its own real directional LPC sheet (sprites.ts's
+    // GIANT_SHEETS) distinct from the plain "normal" zombie sheet
+    // zombieWalkSheet always returns — using that generic sheet here
+    // previously showed a normal-zombie portrait on the giant's own "new
+    // enemy" intro popup. Frame 0 of its idle-down cycle doubles as a
+    // standing portrait pose, same "reuse what exists" choice this
+    // function already makes for the other types.
+    const sheet = giantSheetFor("idle", "down");
+    if (isReady(sheet.image)) {
+      const size = 90;
+      ctx2.drawImage(sheet.image, 0, 0, sheet.frameWidth, sheet.frameHeight, cx - size / 2, cy - size / 2, size, size);
+    }
     return;
   }
   // No dedicated "idle" sheet in the LPC set (see sprites.ts) — frame 0 of
