@@ -1,129 +1,62 @@
 # Last Stand
 
-A small cooperative zombie base-defence game: up to 4 players survive 28 days of waves, earn shared XP, and decide together how to defend one base — a wall, up to four turrets, and each other, since a downed teammate needs a hand up before the timer runs out. The per-crit sections below record how the scope grew; the game itself is always the current state of the code, not any one crit's snapshot of it.
+Last Stand is a cooperative zombie survival game for up to four players. Players defend one base through 28 days of zombie waves, earn shared XP, build defences, and rescue downed teammates. Everyone shares the same battlefield and progress.
+
+To try it, open [Last Stand](https://comp4020-final-adam2221114.fly.dev/). Open it in two separate browser profiles to see multiplayer in action. Progress is saved in SQLite and can survive server restarts.
+
+## Why I built this
+
+I enjoy zombie survival games, but I wanted cooperation to matter more than individual performance. My question was: what makes another player useful, rather than just someone else shooting zombies?
+
+I chose base defence because it gives everyone one objective. Decisions about resources and survival affect the whole team.
 
 ## What good means here
 
 **Good means cooperation is structural, not decorative.**
 
-The final game is intended for 2–4 friends defending the same base. Multiplayer should not mean several people standing on one map while each person effectively plays alone. Players should depend on the same world state: one base, one wave, one shared XP pool, and the same defences.
+Another player's presence should change how I play.
 
-A good version of this game should make another player change what I decide to do.
+- **Shared progress.** Zombie kills earn XP for the team, not individual players.
+- **Meaningful choices.** Players decide whether to build turrets, upgrade or repair defences, or spend XP reviving teammates.
+- **Mutual survival.** Downed players need help. Rescuing someone means taking a risk instead of continuing to fight.
+- **Real-time cooperation.** Movement, enemies and upgrades are synchronised through WebSockets without reloading.
+- **Persistent progress.** The day, base condition, XP and defences are saved in SQLite.
+- **Readable gameplay.** Enemy health, defensive indicators and clear controls help players understand the battle.
 
-That means:
+Depping and Mandryk's research on cooperation and interdependence helped me evaluate why shared responsibility matters more than simply placing players together.
 
-1. **Progress is shared.** Zombie kills contribute to one XP pool instead of separate personal upgrade trees.
-2. **Defence requires choices.** XP does not automatically create upgrades. Players choose whether to rebuild a wall, improve defence, or build a turret.
-3. **Defences really matter.** Walls block zombies and absorb damage before the base can be attacked. Turrets occupy chosen positions and attack enemies inside their range.
-4. **A day has a clear goal.** The next day begins only when the current wave has been completely defeated.
-5. **Actions leave a trace.** Day progress, base state, XP and constructed defences are persisted so returning does not mean starting from nothing.
-6. **Controls should feel immediate.** The client can predict local movement for responsiveness while the server remains authoritative.
+## How multiplayer works
 
-## Who it is for
+The server controls the shared state and validates player actions.
 
-The target is a small group of friends, not a public competitive audience. A session should be understandable without accounts, matchmaking ladders, a large lobby, or a long tutorial. The shared problem should be obvious: zombies are approaching, the base has limited protection, and the group has to decide how to spend what it earns.
+If two players try to buy the same upgrade simultaneously, the first valid request processed by the server succeeds. The other is rejected without spending XP.
 
-## Crit 8 scope
+I chose this over client-side locking or a request queue because it keeps the rules simple and resources consistent. The cost is that a player's request may be rejected even if both acted at nearly the same time.
 
-This version proves the core loop end-to-end: the player can move, aim and shoot; zombies arrive in waves; kills earn shared XP; XP can be spent through the base menu; walls block and take damage; a turret can be placed inside the build area; zombie HP is visible; days advance only after the wave is cleared; and durable progress is stored in SQLite and survives restart.
+See the [concurrency decision record](docs/decisions/0001-simultaneous-build-conflicts.md).
 
-Realtime multiplayer and concurrency are deliberately deferred to later crits.
+## What is checked and judged
 
-## Crit 9 scope
+Tests in `spec/` check gameplay rules, multiplayer restrictions and persistence. They cannot prove that cooperation is enjoyable or the controls feel responsive. Those qualities require playtesting, and I have not established that all 28 days are equally balanced.
 
-Multiplayer is now real, not deferred: up to 4 players connect at once, see
-each other move and shoot in the same shared world, and spend the same
-shared XP pool — a change one player makes reaches every other open session
-in about a second, with no reload. A 5th connection is turned away rather
-than silently dropping someone already playing.
+## What I left out
 
-Two or more players can race to build the same thing (the wall, the turret)
-at once. How that's resolved — and why — is written up as an architecture
-decision record at
-[`docs/decisions/0001-simultaneous-build-conflicts.md`](docs/decisions/0001-simultaneous-build-conflicts.md),
-chosen specifically because shared XP and shared build state are the one
-place this game's players actually contend with each other.
+I excluded matchmaking, rankings, accounts, crafting and large maps to focus on cooperation. I also tried Three.js but returned to Canvas2D because 3D added complexity without clearly improving gameplay.
 
-## Gameplay expansion scope
+## Limits
 
-The full 28-day wave table is live: four zombie types (normal, flying,
-giant, a boss on days 5/10/20/28), each with its own behaviour — flying
-zombies attack from range and ignore the wall, giants explode on death, a
-ground zombie that reaches a turret fights it instead of passing by. Zombies
-now threaten players directly, not just the base: HP loss can down a
-player (field-revivable by a teammate holding E, or paid-resurrectable at
-the base once truly dead), and medkits give players an active way to look
-after themselves and each other. The wall now has 5 levels and up to 4
-independently-built, independently-upgraded, independently-repaired turrets
-can stand at once, each a real choice of where to spend shared XP. A day
-now opens with a 5-second countdown and a daily heal, and a Game Over can be
-retried from that day's own start rather than only ever restarting from
-Day 1.
+The game supports four concurrent players on one server. Browser-stored identities are not secure accounts; losing that identity may prevent recovery of the same player record.
 
-Where the brief left specifics open (turret "pierce"/"splash" with no
-projectile system to pierce along, what actually damages a turret, boss
-attack stats beyond HP, several interaction ranges), the choice made and why
-is recorded in `PROCESS.md`'s gameplay-expansion entry and in code comments
-at each value's declaration — not left for a reader to guess at.
+## What I looked at
 
-## Visual style
+- [COMP4020 Final Project Brief](https://comp.anu.edu.au/courses/comp4020-agentic-coding-studio/assessments/final-project/) — multiplayer, persistence and defining good.
+- [Liberated Pixel Cup](https://lpc.opengameart.org/content/lpc-about) — consistent 2D pixel-art direction.
+- [Depping and Mandryk (2017)](https://doi.org/10.1145/3116595.3116639) — cooperation and interdependence.
+- [UmaiPixel — Godot 3 Tutorials](https://www.youtube.com/playlist?list=PLyckz_-Rzq6ClGevL2fneJ5YJnMPKWa4M) — general 2D development reference.
 
-Terrain, the base, the wall, and the normal/giant/boss zombies use the
-CraftPix "Zombie Survival" pixel-art pack; the player stays hand-drawn
-Canvas shapes, since the pack has no player-character sprite and a
-mismatched one would read worse than a clean drawn one. Giant and boss are
-palette-swapped reskins of the same civilian-zombie character, told apart by
-scale/tint only (see `PROCESS.md`'s visual-redesign entry). Flying zombies
-used to be a third reskin of that same sprite — easy to mistake for a
-ground zombie, which fed directly into players not being able to tell what
-was attacking them — and are now drawn procedurally instead (a bat/wraith
-silhouette, for the same "no sprite in the pack fits" reason the player and
-turrets are drawn rather than sprited); see `PROCESS.md`'s
-zombie-visual-identity entry.
+## Development evidence
 
-The HUD/menu layer (icons, panels, buttons) is separate: it previously used
-a cropped region of that same CraftPix pack, whose free-tier license
-explicitly forbids redistributing source art files — a real conflict with
-this course's public-repo workflow, flagged but left unresolved at the
-time. It's since been replaced with icons and panel chrome from two
-Kenney.nl packs released CC0 (public domain, redistribution of the
-original files explicitly permitted) — see `PROCESS.md`'s UI-asset-swap
-entry and `assets/ui-kenney/NOTES.md` for sources, licenses, and exactly
-which files/tiles were used. The world sprites above are unaffected and
-keep the same open licensing question.
-
-Battlefield readability built on top of that redesign: the base, its
-interact range, and the wall's protection ring are now visible at a glance
-(a glow, a highlighted range ring, a proportional HP arc on the wall, and a
-visible "exposed" indicator when there's no wall), every non-normal zombie
-carries a small warning marker, and the first time a flying or giant zombie
-appears in a run, a short popup names it and what it does before the
-player's already fighting one — see `PROCESS.md`'s
-map/HUD-readability entry.
-
-The battlefield itself is organised into three zones radiating from the
-base — a kept-clean fortified pad at the centre, a mid "combat zone" with
-clustered debris/barricade props and a believable minority of cracked
-ground, and a sparser, more visibly damaged outer zone — rather than a
-single uniform tile scatter. No new art: the same CraftPix tileset had
-several previously-unused stained/cracked tiles and an undamaged fence
-panel this needed; see `PROCESS.md`'s map-redesign entry.
-
-## What it deliberately leaves out
-
-There are no accounts, public lobbies, crafting systems, inventories, vehicles, weapon attachments beyond the pistol, ammo/durability systems, or large maps. Turret "piercing" and "splash" are a hitscan-based approximation (this project's architecture has no projectile entity), not real projectile physics. The project should become deeper through shared decisions, not through unrelated systems.
-
-## Which claims are checked, and which are judged
-
-The checks in `spec/` can protect concrete rules such as zombie health and weapon damage, wall blocking, wave completion, legal turret placement, persistence, and restart behaviour.
-
-Other parts of “good” cannot be proved by tests alone. Movement must feel responsive, defence choices must feel meaningful, wave difficulty must feel fair, and later multiplayer must actually create cooperation. Those claims need to be judged through playtesting.
-
-## Sources
-
-- The COMP4020 Final Project brief, especially its emphasis on small-scale multiplayer, co-presence, persistence, and defining what “good” means for a specific app.
-- Crit 8 playtesting of this build, which changed movement, wall behaviour, wave progression, and turret feedback.
-- The Crit 9 brief's call for a single documented decision about concurrent use, which produced the simultaneous-build-conflicts ADR linked above.
-- A detailed gameplay-expansion specification (28-day wave table, zombie types, wall/turret levels, player HP/downed/revive/medkits, X-menu redesign) that drove the current scope — see `PROCESS.md`.
-
-This list is intentionally short and includes only sources actually used so far.
+- [Concurrency ADR](docs/decisions/0001-simultaneous-build-conflicts.md)
+- [Player Identity ADR](docs/decisions/0002-player-identity-and-authorization.md)
+- [PROCESS.md](PROCESS.md) — development decisions and verification.
+- [Process History Archive](docs/process-history.md) — earlier experiments, failures and corrections.

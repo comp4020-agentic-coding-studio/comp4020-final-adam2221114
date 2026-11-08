@@ -3,7 +3,7 @@ This project is a small cooperative zombie base-defence game for 2–4 players.
 The design goal is:
 Good means cooperation is structural, not decorative.
 
-Players should affect the same shared world: the same base, the same waves, the same shared XP, and the same defensive upgrades. Multiplayer should eventually change strategy and survival, not just show several players on the same screen.
+Players should affect the same shared world: the same base, the same waves, the same shared XP, and the same defensive upgrades. Multiplayer must create meaningful choices about shared resources, defence, and teammate survival, rather than merely displaying several players on the same screen.
 Keep the project small enough to understand, test, deploy, and explain.
 Scope rules
 Do not add features just because they seem impressive.
@@ -16,22 +16,22 @@ Current core loop:
 5. Players spend shared XP on base defences.
 6. The current day ends only when its wave is cleared.
 7. Key progression persists across sessions/restarts.
-Do not add the following unless I explicitly ask:
-- open world
-- accounts/authentication
-- matchmaking or public lobby
-- multiple maps
-- complex inventory
-- crafting
-- vehicles
-- skill trees
-- any zombie pathfinding beyond a single static, precomputed flow field toward the base (no per-target dynamic search, no runtime recomputation — see Gameplay invariants' Map/obstacles entry)
-- many weapons or attachments
-- ammunition/calibre/durability systems
-- chat or voice
-- multiple turret placement systems
-- unrelated polish
-When requirements are ambiguous, ask before inventing game rules, prices, balance values, or new mechanics.
+   Do not add the following unless I explicitly ask:
+   - open world
+   - accounts/authentication
+   - matchmaking or public lobby
+   - multiple maps
+   - complex inventory
+   - crafting
+   - vehicles
+   - skill trees
+   - any zombie pathfinding beyond a single static, precomputed flow field toward the base (no per-target dynamic search, no runtime recomputation — see Gameplay invariants' Map/obstacles entry)
+   - many weapons or attachments
+   - ammunition/calibre/durability systems
+   - chat or voice
+   - multiple turret placement systems
+   - unrelated polish
+     When requirements are ambiguous, ask before inventing game rules, prices, balance values, or new mechanics.
 Architecture rules
 The server is authoritative.
 The client may predict or interpolate for responsiveness, but it must not decide authoritative gameplay state.
@@ -44,7 +44,7 @@ Authoritative server state includes, where relevant:
 - shared XP
 - day/wave progression
 - purchases and upgrades
-The client is responsible for:
+  The client is responsible for:
 - rendering
 - input collection
 - client-side movement prediction
@@ -53,7 +53,7 @@ The client is responsible for:
 - tracers and muzzle flashes
 - placement previews
 - menus and HUD
-Client-side visual effects must not become a second source of gameplay truth.
+  Client-side visual effects must not become a second source of gameplay truth.
 Networking rules
 Use the existing WebSocket architecture.
 Do not introduce another realtime framework without a documented reason.
@@ -61,12 +61,12 @@ For shooting:
 - keep authoritative hit resolution on the server
 - use hitscan rather than networked bullet physics
 - client bullet/tracer effects are visual only
-For movement:
+  For movement:
 - local player movement may use client-side prediction
 - the server remains authoritative
 - reconcile client prediction with server state
 - remote entities should use interpolation rather than local authority
-Do not duplicate game logic separately on client and server unless the client copy is clearly prediction/preview logic only.
+  Do not duplicate game logic separately on client and server unless the client copy is clearly prediction/preview logic only.
 Persistence rules
 Persist only durable game progress.
 Durable state may include:
@@ -76,31 +76,26 @@ Durable state may include:
 - wall level / HP
 - turret built state / HP / position
 - other future base progression that should survive restart/redeploy
-Do not persist high-frequency transient state such as:
+  Do not persist high-frequency transient state such as:
 - active WebSocket connections
 - aim direction
 - temporary tracer effects
 - live zombie positions
 - live zombie target selection
 - per-frame player movement state
-SQLite is the source of durable state for the current single-machine Fly deployment.
-Schema changes must be backward-compatible with existing databases where practical.
-Do not silently destroy existing stored progress during a migration.
+  SQLite is the source of durable state for the current single-machine Fly deployment.
+  Schema changes must be backward-compatible with existing databases where practical.
+  Do not silently destroy existing stored progress during a migration.
 Gameplay invariants
 Unless I explicitly change them, preserve these rules.
 
-Superseded by Crit 10 (2026-10-08): the single-turret, 3-level-wall,
-one-zombie-type, no-player-damage design below (zombie HP 90 / "three
-pistol hits", one turret, wall levels 1-3, zombiesForDay formula) was
-Crit 8/9's scope. Crit 10 explicitly replaced it with the 28-day/4-type
-zombie table, 5-level wall, up to 4 independent turrets, and player HP/
-downed/dead/revive/medkits. The rules below describe the CURRENT system;
-see PROCESS.md's Crit 10 entry for what changed and why, and
-docs/decisions/ for the one documented concurrency-style decision that
-entry links (simultaneous turret build/upgrade/repair conflicts).
-
-Map/obstacles (added Crit 11, map-visual pass; wall made dynamic in a later
-change)
+The rules below describe the current intended system, not the older Crit 8/9
+prototype. Historical changes belong in PROCESS.md and docs/process-history.md.
+If current implementation and this file disagree, inspect the code and tests
+first, report the mismatch, and ask before changing intended gameplay rules.
+The two decision records in docs/decisions/ cover shared-state concurrency
+and per-player identity/authorisation separately.
+Map and obstacles
 Buildings (obstacles.ts's BUILDINGS, a fixed hand-placed rectangle list —
 town buildings only, not the wall) are real, server-authoritative obstacles:
 players and GROUND zombies cannot walk through them. Decorative props
@@ -133,16 +128,17 @@ current wallLevel and resolve collision against the wall's rects directly
 buildings use — not a parallel copy), independent of the flow field
 entirely. See the Wall entry below for the wall's own rules, including why
 players and zombies see different wall shapes.
-
 Waves
 A day advances only after its complete zombie wave (every type, including
 any boss) is spawned and defeated.
 The wave table (day -> normal/flying/giant/boss counts) is fixed, not a
 formula — see game-state.ts's WAVE_TABLE. Day 28 is the final day
 (DAY_VICTORY); completing it ends the round in victory.
-Spawn pacing is adaptive (spawnIntervalForDay), not a flat interval, so a
-late-game day's much larger zombie count doesn't take excessively long to
-finish spawning.
+Spawning uses 360-degree perimeter positions and day-based batches, not four
+fixed spawn directions or the superseded spawnIntervalForDay formula. Preserve
+the existing tier sizes and intervals defined in game-state.ts, and never
+change WAVE_TABLE when adjusting spawn timing or position. Final batches must
+never exceed the remaining quota for that day.
 Do not reintroduce timer-only day advancement.
 At the start of every day (including Day 1's first Start click, but NOT a
 mid-day resume or process restart), there is a 5-second intro: players can
@@ -270,12 +266,12 @@ The player should be able to understand:
 - every turret's own state (id implicitly, level, HP, position)
 - their own HP/status (alive/downed/dead), medkit count, and any teammate's status
 - current game phase
-Keep Start / Pause / Resume / Retry Current Day / Restart behaviour clear —
-Retry Current Day only appears after a Game Over and is distinct from
-Restart (which resets to Day 1).
-Do not hide important game state behind decorative UI.
-Prefer Canvas-based rendering (sprites, procedural drawing, particles) over introducing a new rendering framework or engine.
-Visual scope rules (added 2026-10-24, visual overhaul)
+  Keep Start / Pause / Resume / Retry Current Day / Restart behaviour clear —
+  Retry Current Day only appears after a Game Over and is distinct from
+  Restart (which resets to Day 1).
+  Do not hide important game state behind decorative UI.
+  Prefer Canvas-based rendering (sprites, procedural drawing, particles) over introducing a new rendering framework or engine.
+Visual scope rules
 High-quality visuals are now an explicit, authorised priority for this
 project, not an unrelated nice-to-have: detailed player/zombie/environment
 artwork, directional movement/attack/death animation, combat VFX (muzzle
@@ -296,10 +292,12 @@ sprites, the Kenney CC0 UI pack) over introducing a new source. Only build
 original Canvas/SVG-drawn artwork where no suitably licensed asset is
 available, and say so plainly rather than silently substituting a thin
 placeholder.
-Do not reintroduce the CraftPix free-tier assets the UI pack was already
-moved off (see README's "Visual style" section and PROCESS.md's
-UI-asset-swap entry) — that licence forbids redistributing source art files
-in this public repo.
+Do not reintroduce CraftPix free-tier source assets whose redistribution
+terms conflict with this public repository. For every third-party asset,
+consult its provenance/attribution notes and preserve the creator, source,
+licence, and required attribution. Follow the current LPC-style visual
+direction and existing Kenney CC0 UI assets; an LPC style reference alone
+does not establish the licence for a particular asset.
 Keep the rendering/animation/VFX code organised by concern (sprites,
 animation state, particles/effects, HUD) rather than piling everything into
 render.ts, but do not migrate off Canvas or introduce a second rendering
@@ -314,9 +312,9 @@ Use explicit game phases:
 - paused
 - game_over
 - victory
-When the game is not running, gameplay simulation must not continue advancing behind the UI.
-Restart behaviour must be explicit and tested.
-Do not silently reset persisted state as a side effect of page refresh.
+  When the game is not running, gameplay simulation must not continue advancing behind the UI.
+  Restart behaviour must be explicit and tested.
+  Do not silently reset persisted state as a side effect of page refresh.
 Testing rules
 Do not claim a behaviour works without verifying it.
 Prefer tests for important promises and invariants, not test-count inflation.
@@ -340,23 +338,30 @@ High-value checks include:
 - restart produces the intended Day-1 reset state; retry_day restores the
   CURRENT day's start snapshot without resetting the day counter
 - client input cannot directly mutate authoritative server state
-When testing realtime behaviour, inspect authoritative WebSocket state where useful instead of relying only on screenshots or logs.
-If a test script is wrong, say so clearly; do not mislabel a test-script failure as a product bug.
+  When testing realtime behaviour, inspect authoritative WebSocket state where useful instead of relying only on screenshots or logs.
+  If a test script is wrong, say so clearly; do not mislabel a test-script failure as a product bug.
 Development workflow
 Before changing code:
 1. inspect the existing implementation
 2. identify the smallest change that satisfies the request
 3. preserve existing architectural decisions unless there is a clear reason to change them
-After changing code:
-1. run relevant focused checks
-2. run pnpm typecheck
-3. run pnpm check when the app/check harness is available
-4. run pnpm check:evidence when relevant
-5. run pnpm run build
-6. inspect git status
-Do not leave test processes or dev servers running accidentally.
-Be alert for stale tsx / Node processes, stale build output, or stale SQLite data before diagnosing a new bug.
-Do not treat old dist/ output as evidence that current source code works.
+   After changing code:
+4. run relevant focused checks
+5. run pnpm typecheck
+6. run pnpm check when the app/check harness is available
+7. run pnpm check:evidence when relevant
+8. run pnpm run build
+9. inspect git status
+   Do not leave test processes or dev servers running accidentally.
+   Be alert for stale tsx / Node processes, stale build output, or stale SQLite data before diagnosing a new bug.
+   Do not treat old dist/ output as evidence that current source code works.
+Test environment isolation
+- State-changing tests must use an isolated server and scratch database, never production Fly.io or the real development save.
+- Before starting an isolated server, verify its port and DATA_DIR and inspect existing Node/tsx processes.
+- Do not assume a process was killed because a pattern-based command exited successfully; verify the actual PID/port.
+- After tests, terminate only processes started for the task and verify cleanup.
+- A passive live-site health check is not equivalent to permission to send gameplay mutations.
+- Report exactly which tests ran, what passed or failed, and what remains unverified.
 Git rules
 Make small commits around coherent changes.
 Do not push unless I explicitly ask.
@@ -369,7 +374,7 @@ Before any push, deploy, or ship:
 - confirm mise.local.toml is ignored
 - confirm data/ is ignored
 - confirm generated dist/ output is not accidentally committed
-Do not rewrite history or force-push unless I explicitly request it.
+  Do not rewrite history or force-push unless I explicitly request it.
 Secrets
 Never print, commit, or expose Fly tokens or other secrets.
 mise.local.toml is local-only and must remain ignored.
@@ -382,7 +387,7 @@ When I ask to verify persistence, test that meaningful game state survives:
 1. normal browser return
 2. process/machine restart
 3. redeploy, when requested
-Do not claim Fly persistence is verified until the deployed version has actually been tested.
+   Do not claim Fly persistence is verified until the deployed version has actually been tested.
 Documentation and process evidence
 README.md explains what “good” means for this project.
 PROCESS.md explains important decisions, trade-offs, corrections, and how the work changed.
@@ -397,12 +402,15 @@ Examples from this project include:
 - a decorative wall becoming a real blocking defence after playtesting
 - timed day progression changing to wave-clear progression
 - turret damage appearing broken until authoritative HP was inspected and the real problem was found to be missing visual feedback
-Do not invent sources, results, tests, user feedback, or process events.
+  Do not invent sources, results, tests, user feedback, or process events.
 Course / Crit rules
-For Crit 8, proof of life matters more than feature count.
-A stranger should be able to open the deployed app, perform the core interaction, and leave durable progress that is still present when they return.
-Realtime multiplayer is a later requirement; do not force unfinished multiplayer into Crit 8 only to increase scope.
-The project must remain explainable: every major feature should support the core idea rather than exist only because it can be built.
+The final A3 app must work at the course's desktop and phone marking viewports.
+A newcomer begins at /readme/ and must be able to discover how to enter
+and use the game without private instructions. The fixed requirements are
+multi-user operation, real-time shared updates, and persistence across
+restarts/redeploys. Check them on the deployed app, not only locally.
+The project must remain explainable: every major feature should support the
+core idea rather than exist only because it can be built.
 Agent behaviour
 Be conservative with scope.
 Do not silently make product decisions for me.
@@ -413,6 +421,6 @@ When I give a concrete requirement:
 - report important trade-offs
 - report any assumptions
 - report what was actually verified
-If something is not verified, say that it is not verified.
-If the implementation already works and the problem is only presentation or feedback, diagnose that before rewriting working logic.
-When a requested change conflicts with an existing rule in this file, stop and point out the conflict before changing it.
+  If something is not verified, say that it is not verified.
+  If the implementation already works and the problem is only presentation or feedback, diagnose that before rewriting working logic.
+  When a requested change conflicts with an existing rule in this file, stop and point out the conflict before changing it.

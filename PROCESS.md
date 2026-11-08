@@ -1,47 +1,89 @@
 # Process overview
 
-A cooperative zombie base-defence game with the server as the sole source of truth and the client limited to rendering, input, prediction and interpolation. I used Claude Code as a pair-programmer: I defined scope and constraints for each round, reviewed the result in the running game, corrected behaviour that didn't match my intent, and had Claude implement and verify the changes. Each round landed as its own commit. This account covers the corrections that changed the design, not every feature; the full history is preserved at `docs/process-history.md` for traceability.
+## What I built
 
-## Stack
+Last Stand is a cooperative zombie survival game for up to four players. Players defend one base through 28 days of zombie waves, earn shared XP, build defences, and rescue teammates. My goal was to make cooperation part of the gameplay rather than simply placing multiple players on the same screen.
 
-Node and TypeScript on both sides, a raw `ws` WebSocket connection rather than a realtime framework, `better-sqlite3` for persistence, and a hand-rolled Canvas2D renderer. The project started from the course placeholder container, replaced with a minimal server that still satisfied the starter contract before any game logic existed ([`5b680de`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/5b680de)).
+The game uses WebSockets for real-time synchronisation and SQLite for persistence. Players share resources and consequences, but each has their own health and survival status.
 
-## Workflow
+## How I worked
 
-Each round began with a narrow, explicit scope and a list of what not to add. I verified behaviour against a real running instance — checking authoritative WebSocket state for server-truth claims, a headless browser for what a player actually saw, and SQLite directly for persistence — rather than trusting tests or a restart that merely looked correct. A recurring lesson: stale `tsx watch` dev servers survived auto-restart and stayed bound to the real database, producing real state changes that could have read as a bug; fixed by killing exact PIDs, not a `pkill -f` pattern that silently matched nothing.
+I used Claude Code as my main coding agent. I decided what the game should do, explained the requirements, reviewed implementations, and requested corrections when something did not match my expectations.
 
-## Corrections that changed the design
+I chose Node.js and TypeScript for both the client and server to keep development easier to follow. WebSockets allowed direct real-time communication without a larger framework, although more networking logic had to be implemented ourselves. SQLite suited the single-machine Fly.io deployment without requiring an external database. Canvas2D kept rendering simple and gave me control over the game's visual presentation.
 
-**The wall was cosmetic.** It was a drawn ring with no HP that didn't stop zombies. I gave it real HP that physically blocks ground zombies and absorbs damage until destroyed, and made building it an explicit `X`-menu purchase instead of an automatic 100-XP trigger, so shared XP became a deliberate resource rather than a passive threshold ([`a9c79c6`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/a9c79c6), [`3e680c9`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/3e680c9)).
+The first server implementation is recorded in [`5b680de`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/5b680de).
 
-**Days advanced on a timer.** A day could end while zombies were still alive. Progression now requires the full wave quota spawned and cleared, matching the "defend against a wave" mental model ([`a9c79c6`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/a9c79c6)).
+I used `CLAUDE.md` to define rules about server authority, persistence, testing, and scope. The checks in `spec/` protected important game behaviour. My workflow gradually changed from accepting Claude's reports to asking for specific evidence through tests, WebSocket state, and actual gameplay.
 
-**Prediction over pure interpolation.** Snapshot interpolation alone made movement feel delayed behind the round trip. I added client-side prediction with server reconciliation; the server still owns the real position ([`537e681`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/537e681)).
+## The moments that mattered
 
-**"Turret damage has no effect" was a feedback bug, not a logic bug.** Authoritative zombie HP showed damage was already applying correctly; the real problem was no visible health feedback. The fix was health bars, not a damage buff — diagnose state before assuming logic is wrong ([`33c50c0`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/33c50c0)).
+### 1. Turning a single-player prototype into multiplayer
 
-**Single-player to real multiplayer (Crit 9).** `GameLoop` moved from one `Player` field to a map keyed by connection id, broadcasting a `players[]` array to every open socket, capped at 4 ([`0dc526a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/0dc526a), [`043c541`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/043c541)). Simultaneous build/upgrade races already resolved correctly server-side (Node processes one message at a time); the missing piece was telling the loser why, via a `rejected` message — see `docs/decisions/0001-simultaneous-build-conflicts.md`.
+**What happened:** The early version supported only one player. Although shared XP already existed, there was no real cooperation because two people could not play together.
 
-**Gameplay expansion.** Four zombie types replacing one, a 28-day wave table, player HP/downed/dead/revive/resurrection, up to four independent turrets, a 5-level wall, medkits, and persistent player identity across reconnects. Open questions the brief left for me to decide — turret pierce/multi-target as "hit N nearest simultaneously" (hitscan-only, no projectile to pierce); zombies able to damage turrets in melee, the only thing that makes "repair" meaningful — are documented inline, not guessed silently.
+**What I did:** I directed Claude to make the server manage several players and broadcast the same world state to everyone. The changes are recorded in [`0dc526a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/0dc526a) and [`043c541`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/043c541).
 
-**A licensing risk was flagged, then fixed.** The CraftPix pixel-art pack's free-tier licence forbids redistributing source art files, awkward given this course's public-repo workflow. I flagged it rather than deciding unilaterally, then later removed the CraftPix HUD atlas in favour of Kenney's CC0 icon/panel packs (public domain, redistribution explicitly permitted) — see `assets/ui-kenney/NOTES.md`.
+This introduced another problem: two players could try to spend the same XP simultaneously. I chose **first-committed-wins**. The server processes requests in order, rejects invalid later requests, and does not charge the rejected player.
 
-**The fortress became the real Wall.** An always-on fixed fortress with corner towers was set dressing only, disconnected from the purchasable Wall's actual HP/level state. I removed it and made the square wall appear only once built, with players and zombies deliberately seeing different shapes (a player gate; zombies see all four sides solid) — sharing the gate would let zombies walk straight through it.
+I preferred this over client-side locking or a request queue because it kept the server authoritative without adding unnecessary complexity. The trade-offs are documented in the [concurrency ADR](docs/decisions/0001-simultaneous-build-conflicts.md).
 
-**A permanent zombie-freeze bug**, found by simulating all 1,405 free grid cells against the compiled server code: the flow field's one-direction-per-cell caching disagreed with a building's inflated collision margin near corners, so a zombie could sit on a cell whose stored direction was blocked, forever. Fixed with a bounded local tangent-steering fallback that activates only when a normal step stalls — it never replaces or recomputes the single cached startup BFS.
+**What I learned:** Multiplayer requires more than synchronising positions. It also needs clear rules for shared decisions and conflicting actions.
 
-**Weapon overhaul.** A screenshot showing an apparently unlimited-range yellow beam traced to two issues: `PISTOL_RANGE` (600 on a 1000-unit map) reached past the visible camera view even though it was always enforced, and the renderer drew a fixed-length line regardless of range or hit. Range dropped to 320; the beam became a drawn rifle, a travelling bullet, and per-player recoil driven by a new `shotsFired` broadcast field, the same diffing pattern turret tracers already used.
+### 2. A turret problem that was not actually a damage bug
 
-**A real Fly shutdown bug**, confirmed by a minimal reproduction outside the project (`http.Server#close()` never fires its callback while a WebSocket connection is open): `shutdown()` now force-closes every socket first, verified by a subprocess test sending `SIGTERM` and checking exit time against Fly's 5-second kill timeout ([`ba5f86a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/ba5f86a)). Not yet re-verified against a real Fly redeploy.
+**What happened:** During playtesting, turrets appeared ineffective against zombies. I initially thought their damage was too low or not working.
 
-**The base/wall footprint was shrunk (2026-11-06), to leave more open ground for zombies to approach across.** Every base/wall/turret-ring geometry constant (`WALL_HALF_EXTENT`, `WALL_THICKNESS`, `WALL_GATE_WIDTH`, `BASE_ATTACK_RANGE`, `BASE_INTERACT_RANGE`, `TURRET_INTERACT_RANGE`, `TURRET_BUILD_RADIUS`, `WALL_PULSE_RADIUS`, `PROPS_CLEAR_RADIUS`, and the hand-tuned pixel offsets `fortress-decor.ts` uses to place interior sandbags/crates/light-towers/barriers) was scaled by the same x0.85 factor and rounded, rather than picked independently — several of these interact geometrically (the wall's interior space must stay bigger than `BASE_INTERACT_RANGE`, and the decor offsets are tuned margins against the wall's inner face, not independent positions), so scaling only one would have let a hand-placed prop clip through the new, smaller wall. No combat-balance number moved (turret min-separation, revive range, zombie speed/damage, turret damage/range/cost) — this is footprint only. Verified live (dev server, wall forced to each level via direct SQLite edit) that the smaller fortress renders with no clipping at any corner, and `pnpm run check` (52 tests) still passes with two spec files updated for the new absolute coordinates (`gameplay-expansion.test.ts`'s turret-placement-inside-wall point; `wall-ring-protection.test.ts`'s hand-copied wall constants).
+**What I did:** Instead of immediately changing the damage values, I had Claude inspect the server's authoritative zombie HP while turrets attacked.
 
-## The 3D migration (`feature/3d-migration`)
+The investigation showed that damage was being applied correctly. The real problem was missing visual feedback. Zombies had no visible health bars, so players could not tell whether attacks were working.
 
-An explicit, requested override of the Canvas-only rule, scoped to rendering only — server authority, hitscan-only combat, the flow field, and every "do not add" scope item stay in force. `main` was committed as the preserved, playable 2D baseline before any 3D work began ([`29ece72`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/29ece72)); the 3D client lives at a separate `/3d` route and bundle, never replacing `/`.
+**How I knew:** The correction added visible zombie HP feedback without changing the damage calculation ([`33c50c0`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/33c50c0)).
 
-An architecture audit found only `render.ts`/`camera.ts` were genuinely 2D-specific; prediction, protocol, and obstacle/defense math already operate on plain x/y numbers the server never needed to change. Three.js required a real bundler for the first time (esbuild, over Vite, since there's no HMR workflow to preserve). A real bug — `THREE.Box3.setFromObject()` silently ignoring un-updated skeleton bone transforms — had earlier been misdiagnosed as a lighting/fog issue; found and fixed once isolated.
+**What I learned:** What looks broken is not always the actual problem. I became more careful about checking game state before asking Claude to rewrite working logic. This principle was also recorded in `CLAUDE.md`.
 
-The most recent round restored 2D-equivalent control feel after I rejected the 3D camera's raw-WASD movement (pressing "forward" moved the player toward the screen's upper-right, since the fixed 45°-azimuth isometric camera isn't axis-aligned with world space) and its missing crosshair. Both were fixed client-side only — a static per-key remap derived from the camera's own azimuth, translated into the same `{up,down,left,right}` wire shape the server expects, plus an HTML/CSS crosshair overlay ([`b1bf520`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/b1bf520)). Verified live: holding each movement key produced position deltas matching the remap's rotation formula exactly, read off authoritative WebSocket state, not assumed from code.
+### 3. Fixing zombies that became stuck near buildings
 
-**The 3D migration was abandoned.** After further work on player/weapon orientation, animation and environment art on `feature/3d-migration`, I decided the final submission stays Canvas2D-only — `main`'s proven, playable 2D baseline was never touched by the migration and remains the project. The 3D branch's history (`15e1267`..`16586b3`) stays in git for traceability; the working tree on `feature/3d-migration` has since had the 3D-only code, assets and design documents removed and its shared-file changes reverted to their original 2D behaviour, so active development continues from the same architecture the 2D baseline always used.
+**What happened:** After adding obstacles, some zombies became permanently stuck near building corners. This prevented them from reaching the base and disrupted the wave progression.
+
+**What I did:** I asked Claude to investigate the movement system rather than simply remove obstacles. The problem involved the precomputed flow field and collision boundaries. Sometimes the movement direction pointed into an obstacle, leaving the zombie unable to move.
+
+I chose to preserve the existing flow field instead of introducing more complex dynamic pathfinding. The fix added a local steering fallback when a zombie became blocked.
+
+**How I checked:** The investigation tested 1,405 accessible grid cells and examined whether zombies could become permanently trapped. The map-related checks in `spec/` and the pathfinding constraints in `CLAUDE.md` help protect this behaviour.
+
+**What I learned:** A good correction should solve the underlying problem without replacing an entire working system. This reinforced my preference for focused changes supported by repeatable tests.
+
+### 4. Trying 3D and deciding to return to 2D
+
+**What happened:** I wanted to improve the game's appearance, so I asked Claude to experiment with Three.js on a separate `feature/3d-migration` branch, keeping the existing 2D game available.
+
+The experiment introduced problems with character movement, aiming, animations, and visual consistency. For example, WASD movement initially did not match the camera's direction.
+
+**What I did:** Claude corrected part of the movement problem using camera-relative controls ([`b1bf520`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/b1bf520)). However, I was still dissatisfied with the overall result.
+
+I decided that continuing the migration would increase complexity without clearly improving cooperation. I abandoned the experiment and removed the 3D implementation ([`f6269ec`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/f6269ec)).
+
+**What I learned:** Time already spent on an implementation is not a reason to keep it. Returning to Canvas2D allowed me to focus on a playable and consistent final game.
+
+### 5. Finding a server shutdown problem
+
+**What happened:** The Node.js server could hang during shutdown when WebSocket connections remained open. This created a risk for restarting the application on Fly.io.
+
+**What I did:** I had Claude reproduce the problem using a minimal server rather than guessing at the cause. The investigation showed that open WebSocket connections prevented the HTTP server from closing properly.
+
+The fix explicitly terminated those connections during shutdown ([`ba5f86a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-adam2221114/commit/ba5f86a)).
+
+**How I checked:** A subprocess regression test sent `SIGTERM` and checked that the server exited within the required timeout. The test also checked the saved SQLite state. The initial fix was verified locally rather than through a production redeployment.
+
+**What I learned:** Passing gameplay tests does not prove deployment reliability. Server lifecycle behaviour and persistence need their own checks.
+
+## Verification and reflection
+
+I used automated tests, browser testing, WebSocket inspection, and SQLite checks for different kinds of evidence. Tests protected rules, server messages showed authoritative state, and actual gameplay revealed problems that automated checks could miss.
+
+I also encountered misleading test failures caused by stale development processes and shared test state. This led to stronger environment-isolation rules in `CLAUDE.md`.
+
+The biggest lesson was that AI-generated code still requires human judgement. Claude helped me implement features quickly, but I needed to define the goals, question unexpected results, and sometimes reject an entire direction.
+
+I now see good agentic development as directing and verifying work, not simply accepting code that appears to run. More detailed historical evidence is preserved in the [Process History Archive](docs/process-history.md), while unresolved operational limitations are documented in [PendingRepair.md](PendingRepair.md).
