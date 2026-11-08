@@ -3,41 +3,40 @@ import { cameraScale, worldToScreen, type Camera } from "./camera.ts";
 import {
   BASE_STRUCTURE_IMAGE,
   baseStructureAspect,
-  BUILDING_BRICK_TILE,
-  BUILDING_STONE_TILE,
+  baseMenuIconUrl,
+  COURTYARD_FLOOR_TILE,
   directionFromVector,
   FLYING_SHEET,
-  FORTRESS_TILES,
+  FORTRESS_INFRA_IMAGES,
   giantSheetFor,
-  GRASS_LIGHT_TILE,
-  GRASS_TILE,
   isReady,
+  MAP_BACKGROUND_IMAGE,
   PLAYER_SHEETS,
   PROP_IMAGES,
-  ROAD_LIGHT_TILE,
-  ROAD_TILE,
-  TERRAIN_TILE_SIZE,
+  RUIN_BUILDING_IMAGES,
   turretSprite,
   uiIconUrl,
-  wallLevelTile,
   ZOMBIE_DEAD,
   zombieAttackSheet,
   zombieWalkSheet,
+  type BaseMenuIconName,
   type Direction,
+  type RuinQuadrant,
   type SpritedZombieType,
   type UiIconName,
 } from "./sprites.ts";
 import { BOSS_ENTRANCE_MS, giantAnimState, renderBossDeath, renderBossEntrance, renderBossZombie, renderGiantDeath, renderGiantZombie, type MonsterPose } from "./monsters.ts";
 import { FALL_TRANSITION_MS, renderProneRig, renderProneShadow, RISE_TRANSITION_MS, shouldFaceAimDirection, weaponDrawsBehindBody } from "./player-pose.ts";
-import { DECORATIVE_PROPS, distanceToRoad, GROUND_MARKS, OUTER_ZONE_RADIUS, ROAD_HALF_WIDTH, type GroundMark, type Prop } from "./terrain.ts";
+import { DECORATIVE_PROPS, GROUND_MARKS, type GroundMark, type Prop } from "./terrain.ts";
 import { renderFortressDecor } from "./fortress-decor.ts";
-import { BUILDINGS, TOWN_BUILDINGS, WALL_GATE_WIDTH, WALL_HALF_EXTENT, WALL_INTERIOR_HALF_EXTENT, wallRectsForPlayers, type Rect } from "./obstacles.ts";
+import { TOWN_BUILDINGS, WALL_GATE_WIDTH, WALL_HALF_EXTENT, WALL_INTERIOR_HALF_EXTENT, wallRectsForPlayers, type Rect } from "./obstacles.ts";
+import { renderWallImageLevel } from "./wall-render.ts";
 import type { PlayerStatus, StateMessage, TurretSnapshot, ZombieSnapshot, ZombieType } from "./protocol.ts";
 
 // The HP/ability status overlay traced around the wall (border colour, tick
 // marks, pulse ring) — independent of the per-level MATERIAL art the wall
-// itself is now built from (wallLevelTile/renderWallSegment below handles
-// that). This table only decides the overlay's colour/thickness and which
+// itself is now built from (renderWallSegment below handles that). This
+// table only decides the overlay's colour/thickness and which
 // ability each level actually has (WALL_LEVELS in defense-config.ts says the
 // real numbers).
 const WALL_VISUALS: Record<number, { color: string; lineWidth: number; ability: "none" | "pulse" | "spike" }> = {
@@ -114,7 +113,6 @@ let terrainLayerReady = false;
 let baseHighlightIntensity = 0;
 let baseHighlightLastFrameAt: number | undefined;
 const BASE_HIGHLIGHT_EASE_PER_SEC = 6;
-const GROUND_TILE_WORLD = 25; // world units per ground tile — coarser than the asset's native 32px, which keeps the per-frame blit count down without reading as obviously different art
 // Pixels-per-world-unit the terrain bakes at. Higher than the old
 // canvasSize/WORLD_SIZE (~0.8-1.2 depending on canvas size) specifically
 // because the camera now shows a ~420-unit window at up to full-viewport
@@ -123,68 +121,19 @@ const GROUND_TILE_WORLD = 25; // world units per ground tile — coarser than th
 const BAKE_PX_PER_UNIT = 3;
 const BAKED_WORLD_SIZE = WORLD_SIZE * BAKE_PX_PER_UNIT;
 
+// 2026-11-08 map-visual pass: the procedural grass/road tile-stamping ground
+// layer is replaced by a single user-supplied AI-generated painting of the
+// whole world (sprites.ts's MAP_BACKGROUND_IMAGE — see
+// sprites/map-ai-gen/NOTES.md for provenance/licensing), drawn once into the
+// same baked terrainLayer canvas instead of ~1,600 individual grass/road
+// tile blits. The old groundTileFor/hash2D/ROAD_EDGE_DITHER_WIDTH dithered-
+// tile-stamping machinery is removed entirely (not left dead) since nothing
+// else in this file calls it — ROAD_ARMS/distanceToRoad/ROAD_HALF_WIDTH
+// themselves stay exactly as they were in terrain.ts (roads are unchanged
+// gameplay-adjacent geometry, just no longer consulted for ground-tile
+// choice) per the spec's "roads stay as-is."
 function allTerrainImagesReady(): boolean {
-  return isReady(GRASS_TILE) && isReady(GRASS_LIGHT_TILE) && isReady(ROAD_TILE) && isReady(ROAD_LIGHT_TILE);
-}
-
-// A real 2D hash (same family as this file's own pseudo() for ground marks)
-// in [0, 1) — NOT a small-multiplier modulo trick. An earlier version used
-// `(gx*928371 + gy*654323) % 97`, which reduces mod 97 to just (81, 58): the
-// multiples of two such small numbers land in a visible diagonal lattice,
-// not noise (confirmed by reproducing it standalone — an unmistakable
-// regular grid, exactly the "bright green checkerboard" the user's
-// screenshot showed). This hash has no such small period.
-function hash2D(gx: number, gy: number): number {
-  const v = Math.sin(gx * 12.9898 + gy * 78.233) * 43758.5453;
-  return v - Math.floor(v);
-}
-
-// Soft dither band at the grass/road edge, a few world units wide, instead
-// of a hard isOnRoad() cutoff — at the boundary each tile independently
-// rolls (hashed by its own position, so it's stable frame to frame) toward
-// whichever surface is closer, so the transition reads as a worn, uneven
-// edge rather than a ruler-straight line.
-const ROAD_EDGE_DITHER_WIDTH = 30; // wider than one ground tile (25 units) so the dither band is visibly more than a single row
-
-function groundTileFor(worldX: number, worldY: number, gx: number, gy: number): HTMLImageElement {
-  const roadDist = distanceToRoad(worldX, worldY) - ROAD_HALF_WIDTH; // negative = inside the road
-  const variantRoll = hash2D(gx * 1.7 + 0.5, gy * 1.7 + 0.5);
-  let onRoad: boolean;
-  if (roadDist <= -ROAD_EDGE_DITHER_WIDTH) {
-    onRoad = true;
-  } else if (roadDist >= ROAD_EDGE_DITHER_WIDTH) {
-    onRoad = false;
-  } else {
-    // Linearly blend the PROBABILITY of being road across the dither band,
-    // using a separate hash draw so it doesn't correlate with the variant
-    // roll above (which would make the edge look patterned too).
-    const t = 0.5 - roadDist / (2 * ROAD_EDGE_DITHER_WIDTH); // 1 at the inner edge, 0 at the outer edge
-    onRoad = hash2D(gx * 3.1 + 7.7, gy * 3.1 + 7.7) < t;
-  }
-  if (onRoad) {
-    return variantRoll < 0.15 ? ROAD_LIGHT_TILE : ROAD_TILE;
-  }
-  return variantRoll < 0.2 ? GRASS_LIGHT_TILE : GRASS_TILE;
-}
-
-// A soft, static drop shadow under every building footprint, baked into the
-// ground layer (so it never needs re-sorting against moving entities — it's
-// always beneath everything, same as a real cast shadow). Offset down-right,
-// same light-direction convention as every other shadow this project draws
-// (renderPlayer's own body shadow, etc).
-function renderBuildingShadows(ctx: CanvasRenderingContext2D): void {
-  ctx.save();
-  ctx.fillStyle = "rgba(10, 10, 8, 0.35)";
-  for (const b of BUILDINGS) {
-    const x = (b.x + 6) * BAKE_PX_PER_UNIT;
-    const y = (b.y + 8) * BAKE_PX_PER_UNIT;
-    const w = b.w * BAKE_PX_PER_UNIT;
-    const h = b.h * BAKE_PX_PER_UNIT;
-    ctx.beginPath();
-    ctx.ellipse(x + w / 2, y + h / 2, w / 2 + 4 * BAKE_PX_PER_UNIT, h / 2 + 4 * BAKE_PX_PER_UNIT, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.restore();
+  return isReady(MAP_BACKGROUND_IMAGE) && Object.values(FORTRESS_INFRA_IMAGES).every(isReady);
 }
 
 function buildTerrainLayer(): HTMLCanvasElement {
@@ -193,19 +142,16 @@ function buildTerrainLayer(): HTMLCanvasElement {
   layer.height = BAKED_WORLD_SIZE;
   const lctx = layer.getContext("2d");
   if (!lctx) return layer;
+  // The map background is painted/anti-aliased art (a single photoreal-style
+  // image), not a repeating pixel tile — imageSmoothingEnabled stays ON here
+  // (unlike the old pixel-art tile-stamping loop this replaces) for the same
+  // reason renderBase/renderWallImageLevel already draw their own AI-gen art
+  // with smoothing on. Scaled to exactly fill BAKED_WORLD_SIZE x
+  // BAKED_WORLD_SIZE (i.e. the full WORLD_SIZE x WORLD_SIZE world), matching
+  // the source's own square aspect ratio.
+  lctx.imageSmoothingEnabled = true;
+  lctx.drawImage(MAP_BACKGROUND_IMAGE, 0, 0, BAKED_WORLD_SIZE, BAKED_WORLD_SIZE);
   lctx.imageSmoothingEnabled = false;
-  const drawTile = GROUND_TILE_WORLD * BAKE_PX_PER_UNIT;
-  const cols = Math.ceil(WORLD_SIZE / GROUND_TILE_WORLD);
-  const rows = Math.ceil(WORLD_SIZE / GROUND_TILE_WORLD);
-  for (let gx = 0; gx < cols; gx++) {
-    for (let gy = 0; gy < rows; gy++) {
-      const worldX = (gx + 0.5) * GROUND_TILE_WORLD;
-      const worldY = (gy + 0.5) * GROUND_TILE_WORLD;
-      const tile = groundTileFor(worldX, worldY, gx, gy);
-      lctx.drawImage(tile, 0, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE, gx * drawTile, gy * drawTile, drawTile + 1, drawTile + 1);
-    }
-  }
-  renderBuildingShadows(lctx);
   renderGroundMarks(lctx);
   renderFortressCourtyardFloor(lctx);
   renderFortressDecor(lctx, BAKE_PX_PER_UNIT);
@@ -214,13 +160,16 @@ function buildTerrainLayer(): HTMLCanvasElement {
 
 // Interior courtyard floor: fills the square the wall encloses once built
 // (WALL_INTERIOR_HALF_EXTENT around BASE_POS) so the ground reads as
-// "inside the walls" right up to them, rather than leaving bare grass
-// visible between the walls and the base. Deliberately unconditional —
-// baked once into the static terrain layer regardless of wallLevel, same
-// as every other decorative ground tile, so the base always has a
-// consistent "home" patch whether or not a wall currently stands. Tiles
-// FORTRESS_TILES.floorPad once that art exists; until then, a flat-colour +
-// border placeholder fill.
+// "inside the walls" right up to them, rather than leaving the painted plaza
+// background showing bare between the walls and the base. Deliberately
+// unconditional — baked once into the static terrain layer regardless of
+// wallLevel, same as every other decorative ground tile, so the base always
+// has a consistent "home" patch whether or not a wall currently stands.
+// Tiles COURTYARD_FLOOR_TILE (sampled from the map background's own plaza
+// flagstones, see sprites.ts's own comment) once that art exists; until then,
+// a flat-colour + border placeholder fill.
+const COURTYARD_FLOOR_TILE_SIZE = 56; // native px size of sprites/map-ai-gen/courtyard-floor.png
+
 function renderFortressCourtyardFloor(ctx: CanvasRenderingContext2D): void {
   const half = WALL_INTERIOR_HALF_EXTENT * BAKE_PX_PER_UNIT;
   const cx = BASE_POS.x * BAKE_PX_PER_UNIT;
@@ -230,15 +179,15 @@ function renderFortressCourtyardFloor(ctx: CanvasRenderingContext2D): void {
   const size = half * 2;
 
   ctx.save();
-  const tile = FORTRESS_TILES.floorPad;
+  const tile = COURTYARD_FLOOR_TILE;
   if (isReady(tile)) {
-    ctx.imageSmoothingEnabled = false;
-    const ts = TERRAIN_TILE_SIZE * BAKE_PX_PER_UNIT;
+    ctx.imageSmoothingEnabled = true;
+    const ts = COURTYARD_FLOOR_TILE_SIZE * (BAKE_PX_PER_UNIT / 2);
     for (let ty = 0; ty < size; ty += ts) {
       for (let tx = 0; tx < size; tx += ts) {
         const dw = Math.min(ts, size - tx);
         const dh = Math.min(ts, size - ty);
-        ctx.drawImage(tile, 0, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE, x + tx, y + ty, dw, dh);
+        ctx.drawImage(tile, 0, 0, COURTYARD_FLOOR_TILE_SIZE, COURTYARD_FLOOR_TILE_SIZE, x + tx, y + ty, dw, dh);
       }
     }
   } else {
@@ -336,24 +285,34 @@ function getTerrainLayer(): HTMLCanvasElement | undefined {
 
 // Native pixel sizes for each curated LPC prop crop (sprites/lpc/NOTES.md) —
 // used to preserve aspect ratio when drawing at a chosen world-unit width.
-// "wreck" is excluded — it's hand-drawn Canvas art (drawVehicleWreck below),
-// not a sprite crop, so it has no native pixel size to preserve.
-type SpritedPropType = Exclude<Prop["type"], "wreck">;
+// "wreck"/"stump" are excluded — both are hand-drawn Canvas art
+// (drawVehicleWreck/drawTreeStump below), not sprite crops, so neither has a
+// native pixel size to preserve.
+type SpritedPropType = Exclude<Prop["type"], "wreck" | "stump">;
 const PROP_NATIVE_SIZE: Record<SpritedPropType, { w: number; h: number }> = {
   tree: { w: 96, h: 112 },
   bush: { w: 96, h: 112 },
   barrel: { w: 32, h: 64 },
   chest: { w: 32, h: 32 },
+  rock: { w: 32, h: 32 },
+  ruin: { w: 40, h: 80 },
+  "broken-column": { w: 24, h: 50 },
 };
 // World-unit width each prop type is drawn at (height follows its own aspect
 // ratio) — chosen so a tree reads as a real landmark and a chest/barrel
 // reads as a small, human-scale object, same relative sizing the old
-// CraftPix crate/barrel/tree crops had.
+// CraftPix crate/barrel/tree crops had. rock/ruin/broken-column follow the
+// same "reads as its real-world scale" logic: a rock is knee-high clutter, a
+// ruin is a small collapsed structure (shorter than a real building but
+// taller than a prop), a broken column is a slender waist-high remnant.
 const PROP_DRAW_WIDTH: Record<SpritedPropType, number> = {
   tree: 46,
   bush: 40,
   barrel: 16,
   chest: 20,
+  rock: 22,
+  ruin: 34,
+  "broken-column": 14,
 };
 
 // A burnt-out car wreck — hand-drawn Canvas art (no vehicle sprite exists in
@@ -427,6 +386,56 @@ function drawVehicleWreck(ctx: CanvasRenderingContext2D, scale: number): void {
   ctx.restore();
 }
 
+// A cut tree stump — hand-drawn Canvas art. No licensed pack vendored in
+// this repo has a cut-stump sprite (treetop.png is a standing canopy,
+// trunk.png is a standing trunk base with a ground-shadow splat — both
+// checked and ruled out while sourcing the 2026-11-06 map-style pass, see
+// terrain.ts's own comment on PropType), so this follows the same
+// "no sprite fits, so draw it" precedent as the vehicle wreck above: a
+// squat ring-grain top on a short cylindrical base, with a couple of root
+// flares at the ground line.
+function drawTreeStump(ctx: CanvasRenderingContext2D, scale: number): void {
+  const r = 11 * scale;
+  ctx.save();
+  ctx.fillStyle = "rgba(10, 10, 8, 0.3)";
+  ctx.beginPath();
+  ctx.ellipse(2, 4, r * 1.1, r * 0.55, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Root flares at the base, drawn before the trunk so the trunk overlaps them.
+  ctx.fillStyle = "#4a3321";
+  for (const a of [0.3, 1.8, 3.4, 5.1]) {
+    ctx.beginPath();
+    ctx.ellipse(Math.cos(a) * r * 0.7, Math.sin(a) * r * 0.4 + r * 0.3, r * 0.35, r * 0.2, a, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Trunk side (short cylinder read via a darker lower ellipse + lighter top).
+  ctx.fillStyle = "#5c4028";
+  ctx.beginPath();
+  ctx.ellipse(0, r * 0.15, r * 0.85, r * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Top face with concentric growth rings.
+  ctx.fillStyle = "#caa873";
+  ctx.beginPath();
+  ctx.ellipse(0, 0, r * 0.8, r * 0.46, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(90, 60, 30, 0.5)";
+  ctx.lineWidth = 1;
+  for (const ringR of [0.3, 0.5, 0.65]) {
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r * 0.8 * ringR, r * 0.46 * ringR, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // A single surface crack across the top for texture.
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.6, -r * 0.1);
+  ctx.lineTo(r * 0.55, r * 0.15);
+  ctx.stroke();
+  ctx.restore();
+}
+
 // Only props within (roughly) the visible viewport are drawn — the full
 // prop list can include points far outside whatever window the camera
 // currently shows, and with the camera now zoomed in (viewSize ~420 of the
@@ -451,6 +460,13 @@ function renderProps(ctx: CanvasRenderingContext2D, camera: Camera): void {
       ctx.restore();
       continue;
     }
+    if (prop.type === "stump") {
+      ctx.save();
+      ctx.translate(screen.x, screen.y);
+      drawTreeStump(ctx, scale);
+      ctx.restore();
+      continue;
+    }
 
     const img = PROP_IMAGES[prop.type];
     if (!isReady(img)) continue;
@@ -464,134 +480,50 @@ function renderProps(ctx: CanvasRenderingContext2D, camera: Camera): void {
   }
 }
 
-// --- Buildings: solid, server-authoritative obstacles (obstacles.ts) drawn
-// as a tiled wall-material rectangle plus a darker "roof band" top strip (a
-// flat colour band, not the pack's diagonal roof tiles — those don't tile
-// cleanly at arbitrary footprint sizes, and a flat band reads fine at this
-// top-down scale) and a light trim border for edge definition. Drawn as a
-// SORTED entity (see render()'s drawables list) so a zombie/player passing
-// in front of or behind one is occluded correctly, not always-on-top or
-// always-behind. ---
-// Deterministic per-building "damage profile" (round 3 of the visual
-// overhaul, request #3: "destroyed structures, environmental storytelling" —
-// every town building previously used the exact same two-tone tile/roof
-// treatment, so a dozen of them in view read as one copy-pasted rectangle).
-// Hashed from the building's own fixed position (TOWN_BUILDINGS never
-// changes at runtime), so the same building always rolls the same damage —
-// not a per-frame random flicker. Purely decorative, drawn over the existing
-// tile fill; the rectangle's actual collision footprint (obstacles.ts) is
-// completely unaffected.
-function buildingDamageSeed(b: Rect): number {
-  return hashStr(`${b.x},${b.y},${b.w},${b.h}`);
+// --- Buildings: solid, server-authoritative obstacles (obstacles.ts), drawn
+// as the actual ruin artwork already painted into MAP_BACKGROUND_IMAGE at
+// this exact footprint (sprites.ts's RUIN_BUILDING_IMAGES — an alpha cutout
+// of that same painted structure, background grass erased), not a
+// procedurally tiled wall-material rectangle. Drawn as a SORTED entity (see
+// render()'s drawables list) so a zombie/player passing in front of or
+// behind one is occluded correctly, not always-on-top or always-behind —
+// the same reason the old procedural version was sorted. 2026-11-08: this
+// replaces the prior tiled-wall/roof-band/door/window procedural renderer
+// entirely (removed, not kept as a fallback) now that every TOWN_BUILDINGS
+// rect corresponds 1:1 with one of the four ruins actually visible in the
+// background art; drawing BOTH would duplicate the same structure twice.
+function ruinQuadrantFor(b: Rect): RuinQuadrant {
+  const cx = b.x + b.w / 2;
+  const cy = b.y + b.h / 2;
+  if (cx < BASE_POS.x) return cy < BASE_POS.y ? "nw" : "sw";
+  return cy < BASE_POS.y ? "ne" : "se";
 }
 
 function renderBuilding(ctx: CanvasRenderingContext2D, camera: Camera, b: Rect): void {
   const scale = cameraScale(camera);
   const screen = worldToScreen(camera, b.x, b.y);
-  const x = screen.x;
-  const y = screen.y;
   const w = b.w * scale;
   const h = b.h * scale;
-  const tile = isReady(BUILDING_STONE_TILE) ? BUILDING_STONE_TILE : undefined;
-  const brick = isReady(BUILDING_BRICK_TILE) ? BUILDING_BRICK_TILE : undefined;
-  const seed = buildingDamageSeed(b);
-  const collapsedCorner = seed % 5 === 0; // ~1 in 5 buildings has visibly caved in
-  const scorched = seed % 3 === 1;
-  const boarded = seed % 2 === 0;
+  const img = RUIN_BUILDING_IMAGES[ruinQuadrantFor(b)];
 
   ctx.save();
-  ctx.imageSmoothingEnabled = false;
-  if (tile) {
-    const ts = TERRAIN_TILE_SIZE * scale;
-    for (let ty = 0; ty < h; ty += ts) {
-      for (let tx = 0; tx < w; tx += ts) {
-        const dw = Math.min(ts, w - tx);
-        const dh = Math.min(ts, h - ty);
-        ctx.drawImage(tile, 0, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE, x + tx, y + ty, dw, dh);
-      }
-    }
+  if (isReady(img)) {
+    // Scale-to-fill the exact collision footprint (not scale-to-fit/
+    // letterboxed) — each cutout's own crop was measured directly against
+    // this same rect (obstacles.ts's own comment on TOWN_BUILDINGS), so
+    // filling it exactly reproduces the structure's real painted position
+    // and size, matching the collision geometry pixel-for-pixel instead of
+    // floating independently of it. imageSmoothingEnabled stays ON (unlike
+    // the pixel-art tiles this replaces) since this is the same painted,
+    // anti-aliased art as the background it was cut from.
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(img, screen.x, screen.y, w, h);
   } else {
+    // Image not loaded yet — a flat placeholder so the footprint is never
+    // invisible before the cutout art finishes loading.
     ctx.fillStyle = "#4a4a56";
-    ctx.fillRect(x, y, w, h);
+    ctx.fillRect(screen.x, screen.y, w, h);
   }
-
-  // Roof band: the top ~30% of the footprint, in the brick material, so the
-  // building reads as having a distinct roof plane from its stone walls —
-  // simple flat colour-blocking rather than attempting diagonal roof tiles.
-  const roofH = h * 0.3;
-  if (brick) {
-    const ts = TERRAIN_TILE_SIZE * scale;
-    for (let tx = 0; tx < w; tx += ts) {
-      const dw = Math.min(ts, w - tx);
-      ctx.drawImage(brick, 0, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE, x + tx, y, dw, Math.min(ts, roofH));
-    }
-  } else {
-    ctx.fillStyle = "#6b3a34";
-    ctx.fillRect(x, y, w, roofH);
-  }
-
-  // A soot/scorch wash on roughly a third of buildings — reads as fire
-  // damage from whatever happened before the player arrived.
-  if (scorched) {
-    const scorchGrad = ctx.createLinearGradient(x, y + h, x, y + h * 0.3);
-    scorchGrad.addColorStop(0, "rgba(15, 12, 10, 0.5)");
-    scorchGrad.addColorStop(1, "rgba(15, 12, 10, 0)");
-    ctx.fillStyle = scorchGrad;
-    ctx.fillRect(x, y + h * 0.3, w, h * 0.7);
-  }
-
-  // Boarded-up windows: a couple of plank rectangles with cross-bracing —
-  // the single clearest "abandoned, not just decorative" cue available
-  // without a dedicated sprite (no boarded-window crop exists in any
-  // licensed pack checked while planning this change).
-  if (boarded && w > 24 && h > 24) {
-    const plankW = Math.min(14, w * 0.3);
-    const plankH = Math.min(10, h * 0.22);
-    const px = x + w * 0.5 - plankW / 2;
-    const py = y + h * 0.55;
-    ctx.fillStyle = "#5c4a36";
-    ctx.fillRect(px, py, plankW, plankH);
-    ctx.strokeStyle = "rgba(20, 15, 10, 0.7)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(px, py);
-    ctx.lineTo(px + plankW, py + plankH);
-    ctx.moveTo(px + plankW, py);
-    ctx.lineTo(px, py + plankH);
-    ctx.stroke();
-  }
-
-  // A collapsed corner: part of the footprint drawn as a rubble pile instead
-  // of standing wall — the clearest "destroyed structure" read, since it
-  // changes the building's own silhouette rather than only its surface.
-  if (collapsedCorner && w > 20 && h > 20) {
-    const cw = w * 0.4;
-    const ch = h * 0.4;
-    const cx = x + w - cw * 0.6;
-    const cy = y + h - ch * 0.6;
-    ctx.fillStyle = "#6b6358";
-    ctx.beginPath();
-    ctx.moveTo(cx, cy + ch);
-    ctx.lineTo(cx + cw * 0.3, cy + ch * 0.3);
-    ctx.lineTo(cx + cw * 0.7, cy + ch * 0.55);
-    ctx.lineTo(cx + cw, cy + ch * 0.1);
-    ctx.lineTo(cx + cw, cy + ch);
-    ctx.closePath();
-    ctx.fill();
-    // Scattered rubble chunks at the base of the collapse.
-    for (let i = 0; i < 4; i++) {
-      const rx = cx + (i / 4) * cw + (pseudo(seed, i) - 0.5) * 6;
-      const ry = cy + ch + pseudo(seed, i + 5) * 5;
-      ctx.fillStyle = i % 2 === 0 ? "#8a8276" : "#5c564c";
-      ctx.beginPath();
-      ctx.arc(rx, ry, 3 + pseudo(seed, i + 10) * 2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  ctx.strokeStyle = "rgba(20, 18, 22, 0.6)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
   ctx.restore();
 }
 
@@ -644,43 +576,22 @@ function drawPlaceholderBlockout(ctx: CanvasRenderingContext2D, x: number, y: nu
   ctx.restore();
 }
 
-// Wall segment: tiled with the CURRENT wallLevel's own material texture
-// (wallLevelTile — five genuinely distinct materials, not a colour/
-// thickness reskin of one tile; see sprites/lpc/NOTES.md's "Wall levels"
-// entry), else an explicit "WALL" blockout — see the comment above. Each
-// 32x32 cell alternates between that level's two hand-varied crops (A/B),
-// picked by the cell's own world position (not the segment's, so the
-// pattern stays continuous across adjacent wall rects) — same deterministic-
-// per-position-hash approach buildingDamageSeed already uses for town
-// buildings, so a long wall run reads as built from distinct sections rather
-// than one tile stamped repeatedly. Only ever called for rects
-// wallRectsForPlayers actually returned, i.e. only while wallLevel > 0, so
-// nothing draws before the wall is built or after it's destroyed. No corner
-// towers — cut entirely from this design.
+// Wall segment: draws the current level's user-supplied image (see
+// wall-render.ts/sprites/wall-ai-gen/NOTES.md) anchored at the segment's
+// real collision footprint, taller than that footprint so it reads as a
+// raised standing structure rather than a painted rectangle. Falls back to
+// the "WALL" placeholder blockout only if that level's image hasn't
+// finished loading yet. Only ever called for rects wallRectsForPlayers
+// actually returned, i.e. only while wallLevel > 0. No corner towers — cut
+// entirely from this design.
 function renderWallSegment(ctx: CanvasRenderingContext2D, camera: Camera, b: Rect, wallLevel: number): void {
+  if (renderWallImageLevel(ctx, camera, b, wallLevel)) return;
+
   const scale = cameraScale(camera);
   const screen = worldToScreen(camera, b.x, b.y);
   const w = b.w * scale;
   const h = b.h * scale;
-  const tileA = wallLevelTile(wallLevel, "a");
-  const tileB = wallLevelTile(wallLevel, "b");
-  if (isReady(tileA) && isReady(tileB)) {
-    ctx.save();
-    ctx.imageSmoothingEnabled = false;
-    const ts = TERRAIN_TILE_SIZE * scale;
-    for (let ty = 0, wy = b.y; ty < h; ty += ts, wy += TERRAIN_TILE_SIZE) {
-      for (let tx = 0, wx = b.x; tx < w; tx += ts, wx += TERRAIN_TILE_SIZE) {
-        const dw = Math.min(ts, w - tx);
-        const dh = Math.min(ts, h - ty);
-        const cellSeed = hashStr(`${Math.round(wx / TERRAIN_TILE_SIZE)},${Math.round(wy / TERRAIN_TILE_SIZE)}`);
-        const tile = cellSeed % 2 === 0 ? tileA : tileB;
-        ctx.drawImage(tile, 0, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE, screen.x + tx, screen.y + ty, dw, dh);
-      }
-    }
-    ctx.restore();
-  } else {
-    drawPlaceholderBlockout(ctx, screen.x, screen.y, w, h, "WALL");
-  }
+  drawPlaceholderBlockout(ctx, screen.x, screen.y, w, h, "WALL");
 }
 
 // --- Facing: a shared per-entity (zombie or player) direction memory, keyed
@@ -790,6 +701,20 @@ function renderZombie(ctx: CanvasRenderingContext2D, camera: Camera, z: ZombieSn
     // direction a real multi-frame walk/attack sequence). Falls back to the
     // original procedural monster if a sheet image hasn't finished loading
     // yet, so the giant is never blank mid-load.
+    //
+    // Unlike every OTHER directional sheet in this project (zombie-walk,
+    // player walk cycles), where "left" and "right" are the SAME leftward-
+    // facing source art and render.ts mirrors it at draw time, the giant's
+    // left-*.png/right-*.png are genuinely distinct, already-correct mirror
+    // pairs (confirmed by a pixel-exact diff: left-walk frame 0 bitwise
+    // equals a horizontal flip of right-walk frame 0, for every frame of
+    // every anim) — sprites/zombies/giant-directional/NOTES.md's claim that
+    // "right-*.png here is deliberately the same un-mirrored source art as
+    // left-*.png" does not match the actual files on disk. Applying the
+    // same extra `scale(-1,1)` flip used for the shared-sheet types here
+    // re-mirrors an already-correctly-facing sheet, which is what produced
+    // the "giant walks backward when approaching from the right" bug — so
+    // the giant draws its own matching directional sheet unflipped.
     const pose: MonsterPose = { id: z.id, dir: face.dir, walking: face.moving, attacking: z.attacking, lungeFrac, hitFlashFrac, now, phase };
     const { anim, frameFrac } = giantAnimState(pose);
     const sheet = giantSheetFor(anim, face.dir);
@@ -797,7 +722,6 @@ function renderZombie(ctx: CanvasRenderingContext2D, camera: Camera, z: ZombieSn
       const frameIdx = Math.min(sheet.frameCount - 1, Math.floor(frameFrac * sheet.frameCount));
       ctx.save();
       ctx.translate(screen.x + lungeOffset, screen.y);
-      ctx.scale(face.dir === "left" ? -1 : 1, 1);
       ctx.imageSmoothingEnabled = true;
       const h = drawSize * 1.35;
       const w = h; // every giant frame is a square 64x64 LPC tile now
@@ -2089,10 +2013,17 @@ function renderPlayer(
     // crossfaded against the standing sprite above via proneAmount/
     // standingAlpha. A dropped weapon is drawn as part of the rig itself,
     // underneath the body, so nothing floats above a downed character.
+    //
+    // Always the player's own fixed DOWN-facing standing frame (not
+    // face.dir, which keeps whatever direction they were last walking) —
+    // the same "canonical pose regardless of previous facing" rule the rig
+    // itself already follows, just applied to which sprite frame feeds it.
+    const proneSheet = hasCharacter ? PLAYER_SHEETS[p.characterIndex % PLAYER_SHEETS.length].down : undefined;
+    const proneSprite = proneSheet && isReady(proneSheet.image) ? { image: proneSheet.image, sx: 0, sy: 0, sw: proneSheet.frameWidth, sh: proneSheet.frameHeight } : undefined;
     ctx.save();
     ctx.translate(screen.x, screen.y);
     ctx.globalAlpha = proneAmount * (dead ? 0.4 : 0.85);
-    renderProneRig(ctx, drawSize, color, { proneAmount, dead, now, phase });
+    renderProneRig(ctx, drawSize, color, proneSprite, { proneAmount, dead, now, phase });
     ctx.restore();
     ctx.globalAlpha = 1;
   }
@@ -2677,4 +2608,12 @@ export function renderTurretPlacementPreview(
 // --- UI icon helper, for main.ts's HTML-rendered HUD/menus (not canvas) ---
 export function uiIcon(name: UiIconName, size = 16): string {
   return `<img class="ui-icon" src="${uiIconUrl(name)}" width="${size}" height="${size}" alt="" />`;
+}
+
+// --- Base/turret X-menu icon helper (2026-11-08 base redesign) — separate
+// from uiIcon above since these are a different, more detailed icon set used
+// ONLY inside #interact-menu (see sprites/base-ai-gen/NOTES.md); the HUD
+// keeps the original flat Kenney-style icons everywhere else. ---
+export function baseMenuIcon(name: BaseMenuIconName, size = 22): string {
+  return `<img class="menu-icon" src="${baseMenuIconUrl(name)}" width="${size}" height="${size}" alt="" />`;
 }

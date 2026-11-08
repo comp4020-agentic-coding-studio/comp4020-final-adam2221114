@@ -16,33 +16,29 @@ export interface Rect {
   h: number;
 }
 
+// Mirrors src/server/obstacles.ts's TOWN_BUILDINGS exactly — see that file's
+// own comment for how these four rects were derived from the new AI-
+// generated map background's four painted ruin structures.
 export const TOWN_BUILDINGS: Rect[] = [
-  { x: 663, y: 255, w: 110, h: 70 },
-  { x: 523, y: 132, w: 70, h: 100 },
-  { x: 615, y: 154, w: 80, h: 60 },
-  { x: 744, y: 638, w: 90, h: 75 },
-  { x: 751, y: 734, w: 140, h: 60 },
-  { x: 854, y: 613, w: 65, h: 95 },
-  { x: 142, y: 720, w: 100, h: 80 },
-  { x: 369, y: 798, w: 75, h: 95 },
-  { x: 271, y: 662, w: 70, h: 65 },
-  { x: 220, y: 185, w: 95, h: 70 },
-  { x: 121, y: 292, w: 70, h: 95 },
-  { x: 232, y: 282, w: 80, h: 60 },
+  { x: 128, y: 68, w: 120, h: 104 }, // NW ruin
+  { x: 729, y: 76, w: 179, h: 96 }, // NE ruin
+  { x: 63.8, y: 809.4, w: 203.3, h: 119.6 }, // SW ruin
+  { x: 745, y: 721, w: 136, h: 104 }, // SE ruin
 ];
 
 // Mirrors src/server/obstacles.ts's wall geometry exactly — see that file's
 // own comment for the full rationale (half-extent/thickness/gate-width, and
 // why the wall is live state derived from wallLevel rather than a fixed
-// always-on fortress, with no corner towers). Exported so render.ts can
-// anchor the Wall status overlay (level/HP/ability indicators) and the
+// always-on fortress, with no corner towers), including the 2026-11-06
+// x0.85 footprint shrink these three numbers reflect. Exported so render.ts
+// can anchor the Wall status overlay (level/HP/ability indicators) and the
 // courtyard floor decoration to the same rectangle instead of a separate
 // invented shape.
-export const WALL_HALF_EXTENT = 116;
-const WALL_THICKNESS = 16;
+export const WALL_HALF_EXTENT = 99; // was 116
+const WALL_THICKNESS = 14; // was 16
 // Exported so render.ts can draw the same gate gap into the HP/level
 // overlay's perimeter stroke instead of re-deriving or duplicating it.
-export const WALL_GATE_WIDTH = 90;
+export const WALL_GATE_WIDTH = 77; // was 90
 
 // Half-extent of the open interior the wall encloses (inner wall face
 // distance from BASE_POS) — exported so render.ts can size the courtyard

@@ -26,6 +26,21 @@
         --accent-yellow: #f0c929;
         --border-light: #6b5a42;
         --hud-corner: 10px;
+        /* 2026-11-08 HUD-legibility pass: a single shared multiplier for the
+           four corner HUD panels (top-left player card, top-centre day/wave,
+           top-right base/wall/turret/XP/menu, bottom-left team roster) — the
+           user found the whole HUD too small to read and asked for ~1.4-1.5x
+           across text/icons/bars/portraits together, not just a bigger outer
+           panel around unchanged-size contents. Every panel-internal size
+           below is expressed as calc(base * var(--hud-scale)) so the whole
+           group scales from this one number; main.ts's HUD_SCALE constant
+           mirrors this value for the sizes it sets directly (icon px
+           arguments, canvas portrait resolution, inline bar widths) since
+           those can't read a CSS custom property. Deliberately NOT applied
+           to #interact-menu, #phase-banner, #enemy-intro, or
+           #character-select — those weren't flagged as too small and
+           changing them wasn't asked for. */
+        --hud-scale: 1.45;
       }
       html,
       body {
@@ -120,9 +135,9 @@
         position: fixed;
         display: flex;
         align-items: center;
-        gap: 10px;
-        font-size: 13px;
-        padding: 8px 12px;
+        gap: calc(10px * var(--hud-scale));
+        font-size: calc(13px * var(--hud-scale));
+        padding: calc(8px * var(--hud-scale)) calc(12px * var(--hud-scale));
         border: 2px solid var(--border-light);
         border-top: 3px solid var(--accent-gold);
         background:
@@ -145,7 +160,7 @@
         transform: translateX(-50%);
         flex-direction: column;
         align-items: stretch;
-        gap: 4px;
+        gap: calc(4px * var(--hud-scale));
         white-space: nowrap;
       }
       #hud-top-right {
@@ -161,8 +176,8 @@
       /* Top-left: local player's own portrait + name + HP + (numeric, not a
          bar — shared XP has no real maximum to size a fill against) XP. */
       .hud-self-portrait-frame {
-        width: 44px;
-        height: 44px;
+        width: calc(44px * var(--hud-scale));
+        height: calc(44px * var(--hud-scale));
         flex: 0 0 auto;
         border: 2px solid var(--border-light);
         background: rgba(0, 0, 0, 0.35);
@@ -173,16 +188,18 @@
       }
       .hud-self-portrait-frame canvas {
         image-rendering: pixelated;
+        width: 100%;
+        height: 100%;
       }
       .hud-self-stats {
         display: flex;
         flex-direction: column;
-        gap: 3px;
+        gap: calc(3px * var(--hud-scale));
         min-width: 0;
       }
       .hud-self-name {
         font-weight: 800;
-        font-size: 14px;
+        font-size: calc(14px * var(--hud-scale));
         white-space: nowrap;
       }
 
@@ -194,12 +211,12 @@
       .player-card {
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: calc(6px * var(--hud-scale));
         flex: 0 0 auto;
       }
       .player-portrait-frame {
-        width: 40px;
-        height: 40px;
+        width: calc(40px * var(--hud-scale));
+        height: calc(40px * var(--hud-scale));
         flex: 0 0 auto;
         border: 2px solid var(--border-light);
         background: rgba(0, 0, 0, 0.35);
@@ -211,12 +228,14 @@
       }
       .player-portrait-frame canvas {
         image-rendering: pixelated;
+        width: 100%;
+        height: 100%;
       }
       .player-portrait-label {
         position: absolute;
         bottom: -1px;
         left: -1px;
-        font-size: 9px;
+        font-size: calc(9px * var(--hud-scale));
         font-weight: 800;
         padding: 0 3px;
         background: rgba(0, 0, 0, 0.75);
@@ -225,27 +244,27 @@
       .player-card-stats {
         display: flex;
         flex-direction: column;
-        gap: 2px;
+        gap: calc(2px * var(--hud-scale));
         min-width: 0;
       }
       .player-card-row {
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: calc(4px * var(--hud-scale));
         white-space: nowrap;
       }
       .player-card-value {
         font-weight: 700;
         font-variant-numeric: tabular-nums;
-        font-size: 11px;
+        font-size: calc(11px * var(--hud-scale));
       }
       /* A bare, no-portrait slot for a player who hasn't joined yet — a
          dashed placeholder box with "+JOIN" so the row always shows the
          team's real capacity (MAX_PLAYERS), not just who's currently in,
          matching the reference sketch's bottom-left roster. */
       .player-slot-empty {
-        width: 72px;
-        height: 40px;
+        width: calc(72px * var(--hud-scale));
+        height: calc(40px * var(--hud-scale));
         flex: 0 0 auto;
         border: 2px dashed var(--border-light);
         opacity: 0.5;
@@ -253,7 +272,7 @@
         align-items: center;
         justify-content: center;
         gap: 4px;
-        font-size: 11px;
+        font-size: calc(11px * var(--hud-scale));
         font-weight: 800;
         letter-spacing: 0.03em;
       }
@@ -262,14 +281,14 @@
       #top-bar-wave {
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: calc(6px * var(--hud-scale));
         white-space: nowrap;
         flex: 0 0 auto;
         justify-content: center;
       }
       #top-bar-day {
         font-weight: 800;
-        font-size: 15px;
+        font-size: calc(15px * var(--hud-scale));
         letter-spacing: 0.04em;
       }
       #top-bar-wave .top-bar-wave-label {
@@ -279,9 +298,9 @@
          zombies" legible before any have spawned, since dayWaveComposition
          is the day's fixed total, not a live count. */
       .top-bar-wave-badge {
-        font-size: 10px;
+        font-size: calc(10px * var(--hud-scale));
         font-weight: 800;
-        padding: 2px 6px;
+        padding: calc(2px * var(--hud-scale)) calc(6px * var(--hud-scale));
         border: 1px solid;
         background: rgba(0, 0, 0, 0.4);
         white-space: nowrap;
@@ -293,31 +312,31 @@
       .hud-status-box {
         display: flex;
         flex-direction: column;
-        gap: 4px;
-        padding-right: 10px;
+        gap: calc(4px * var(--hud-scale));
+        padding-right: calc(10px * var(--hud-scale));
         border-right: 1px solid var(--border-light);
       }
       .hud-xp-box {
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: calc(6px * var(--hud-scale));
         justify-content: center;
-        padding-right: 10px;
+        padding-right: calc(10px * var(--hud-scale));
         border-right: 1px solid var(--border-light);
       }
       .hud-xp-value {
         color: var(--accent-green);
         font-weight: 800;
-        font-size: 15px;
+        font-size: calc(15px * var(--hud-scale));
       }
       .hud-icon-buttons {
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: calc(6px * var(--hud-scale));
       }
       .hud-icon-btn {
-        width: 36px;
-        height: 36px;
+        width: calc(36px * var(--hud-scale));
+        height: calc(36px * var(--hud-scale));
         padding: 0;
         display: flex;
         align-items: center;
@@ -395,6 +414,16 @@
         vertical-align: middle;
         margin: 0 2px;
       }
+      /* The .hud-panel-scoped bars (HP/wave/wall mini-bars, all built with
+         inline width/height from main.ts's miniBar()/wave-bar literals so
+         the fraction-fill math stays simple) need their own thickness bump
+         too — "make health bars slightly thicker" was explicit. Doubling as
+         inline-style overrides is awkward from pure CSS, so main.ts's
+         HUD_SCALE constant multiplies those literals directly instead; this
+         selector only bumps the border, which inline styles don't set. */
+      .hud-panel .bar {
+        border-width: 1.5px;
+      }
       .bar-fill {
         display: block;
         height: 100%;
@@ -406,8 +435,8 @@
         background: var(--accent-green);
       }
       .bar-revive {
-        width: 46px;
-        height: 6px;
+        width: calc(46px * var(--hud-scale));
+        height: calc(6px * var(--hud-scale));
       }
       .bar-revive .bar-fill {
         background: var(--accent-green);
@@ -447,7 +476,7 @@
 
       #conn {
         flex: 0 0 auto;
-        font-size: 11px;
+        font-size: calc(11px * var(--hud-scale));
         font-weight: 700;
         letter-spacing: 0.02em;
         text-transform: uppercase;
@@ -462,8 +491,8 @@
          coloured HUD values elsewhere. */
       #conn::before {
         content: "";
-        width: 7px;
-        height: 7px;
+        width: calc(7px * var(--hud-scale));
+        height: calc(7px * var(--hud-scale));
         border-radius: 50%;
         flex: 0 0 auto;
       }
@@ -873,33 +902,84 @@
       }
 
       /* X-menu: near the base or a turret, [1]/[2]/.../X/Esc are the only
-         inputs — kept keyboard-only (no click targets) like the previous
-         plain-text version, just restyled with panel chrome + icons. */
+         inputs — kept keyboard-only (no click targets). 2026-11-08 base
+         redesign: restyled to match the user's uploaded reference image
+         (dark industrial panel, thin gold border + corner rivets, a
+         fortress-icon header, clearly separated rows with icons, gold
+         [N] shortcuts, right-aligned XP costs) — purely visual, the same
+         #interact-menu element, same computeMenuChoices data, same
+         keyboard-only [1]/[2]/[3]/X/Esc handling in main.ts. */
       #interact-menu {
         position: fixed;
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        padding: 14px 20px;
-        font-size: 14px;
-        width: min(320px, calc(100vw - 64px));
+        padding: 16px 22px;
+        font-size: 15px;
+        width: min(380px, calc(100vw - 48px));
         box-sizing: border-box;
         pointer-events: none;
+        background:
+          linear-gradient(rgba(10, 9, 7, 0.94), rgba(10, 9, 7, 0.94)),
+          url(/sprites/ui/panels/panel-grey-dark.png);
+        border: 2px solid var(--accent-gold);
+        border-radius: 6px;
+        /* Override the shared angled-corner clip-path (used by the other
+           panels in this selector group) — the reference image's base menu
+           has plain rounded corners with small rivets, not an angled cut. */
+        clip-path: none;
+      }
+      #interact-menu::before {
+        /* Override the shared top accent-bar ::before (angled-corner
+           layout) — this panel's border already reads as a complete frame,
+           so no separate accent bar is needed. */
+        display: none;
       }
       #interact-menu[hidden] {
         display: none;
       }
+      /* Four corner rivets, matching the reference's bolted-panel corners —
+         a second layered background (not an extra DOM element) so this adds
+         no new nodes for main.ts's innerHTML churn to fight. */
+      #interact-menu::after {
+        content: "";
+        position: absolute;
+        inset: 6px;
+        pointer-events: none;
+        background-image:
+          radial-gradient(circle, #5a4a2e 0 2px, transparent 2.5px),
+          radial-gradient(circle, #5a4a2e 0 2px, transparent 2.5px),
+          radial-gradient(circle, #5a4a2e 0 2px, transparent 2.5px),
+          radial-gradient(circle, #5a4a2e 0 2px, transparent 2.5px);
+        background-repeat: no-repeat;
+        background-position:
+          top 0 left 0,
+          top 0 right 0,
+          bottom 0 left 0,
+          bottom 0 right 0;
+      }
       .menu-heading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        font-size: 19px;
         font-weight: 800;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.1em;
         text-align: center;
-        margin-bottom: 8px;
+        color: var(--text);
+        margin-bottom: 10px;
+        padding-bottom: 10px;
+        border-bottom: 2px solid var(--border-light);
       }
       .menu-row {
         display: flex;
         align-items: center;
-        gap: 8px;
-        padding: 4px 2px;
+        gap: 10px;
+        padding: 7px 6px;
+        margin: 3px 0;
+        border-radius: 3px;
+        background: rgba(212, 175, 55, 0.05);
       }
       .menu-row-disabled {
         opacity: 0.5;
@@ -907,8 +987,19 @@
       .menu-key {
         color: var(--accent-gold);
         font-weight: 700;
-        width: 22px;
+        width: 26px;
         flex: 0 0 auto;
+        text-align: center;
+      }
+      .menu-row-icon {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .menu-icon {
+        image-rendering: pixelated;
+        vertical-align: -5px;
       }
       .menu-label {
         flex: 1;
@@ -916,17 +1007,21 @@
       .menu-cost {
         display: flex;
         align-items: center;
-        gap: 3px;
+        justify-content: flex-end;
+        gap: 4px;
         color: var(--accent-gold);
         font-size: 13px;
         white-space: nowrap;
+        min-width: 80px;
       }
       .menu-cost-insufficient {
         color: var(--accent-red);
       }
       .menu-hint {
         text-align: center;
-        margin-top: 8px;
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 2px solid var(--border-light);
         color: var(--text-dim);
         font-size: 12px;
       }

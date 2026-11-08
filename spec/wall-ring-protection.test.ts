@@ -63,10 +63,11 @@ const BASE_POS = { x: 500, y: 500 };
 // file in this project either imports the real server module (where
 // convenient) or hand-copies a handful of plain numeric constants (where a
 // live WebSocket integration test can't easily import server internals
-// without also standing up more machinery than the test needs).
-const WALL_HALF_EXTENT = 116;
-const WALL_THICKNESS = 16;
-const WALL_GATE_WIDTH = 90;
+// without also standing up more machinery than the test needs). Updated for
+// the 2026-11-06 x0.85 footprint shrink — see that file's own comment.
+const WALL_HALF_EXTENT = 99;
+const WALL_THICKNESS = 14;
+const WALL_GATE_WIDTH = 77;
 
 function connect(playerId: string): Promise<{ ws: WebSocket; messages: ServerMsg[] }> {
   return new Promise((resolve, reject) => {

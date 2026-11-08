@@ -152,18 +152,27 @@ export interface InputState {
 
 export const MAP_SIZE = 1000;
 export const BASE_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 };
+// Base/wall footprint shrink (2026-11-06, "leave more room for zombies"):
+// every base/wall/turret-ring geometry constant below is the original value
+// x0.85, rounded — a smaller fortress footprint without touching any combat
+// balance number (zombie speed/damage, turret damage/range/min-separation,
+// revive range). See obstacles.ts's own comment on WALL_HALF_EXTENT for the
+// one subtlety this scale touches (fortress-decor.ts's interior margins).
 // Where ground zombies stop once the wall is gone — right up against the base.
-export const BASE_ATTACK_RANGE = 40;
+export const BASE_ATTACK_RANGE = 34; // was 40
 // How close a player has to be to the base / to a turret to open its X-menu.
-export const BASE_INTERACT_RANGE = 80;
-export const TURRET_INTERACT_RANGE = 80;
+export const BASE_INTERACT_RANGE = 68; // was 80
+export const TURRET_INTERACT_RANGE = 68; // was 80
 export const BASE_MAX_HP = 100;
 export const ZOMBIE_SPEED = 40; // units/second, before a type's own speedMultiplier
 export const ZOMBIE_ATTACK_INTERVAL_MS = 1000; // kept for reference; per-type intervals live in ZOMBIE_TYPES now
 export const DAY_VICTORY = 28; // completing this day ends the round in victory
 export const PLAYER_MAX_HP = 100;
 export const PLAYER_SPEED = 150; // units/second
-export const PLAYER_START_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 + 60 };
+// y offset (60 -> 51) scaled down with the wall so the player still starts
+// well inside the gate's own footprint (south wall inner face is now at
+// offset 85 — see obstacles.ts's WALL_INTERIOR_HALF_EXTENT).
+export const PLAYER_START_POS: Vec2 = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 + 51 };
 
 export const PISTOL_DAMAGE = 30;
 // Was 600 — on a 1000x1000 map (MAP_SIZE) that reached almost the full
@@ -234,13 +243,13 @@ export const WALL_MAX_LEVEL = 5;
 // How far level 2's periodic pulse reaches from the base. Not specified;
 // bigger than the wall ring so it's a meaningfully different ability from
 // the later levels' on-hit spikes, not just the same thing on a timer.
-export const WALL_PULSE_RADIUS = 110;
+export const WALL_PULSE_RADIUS = 94; // was 110 (x0.85 footprint shrink)
 
 // --- Turrets: up to 4 independent, 5 levels each ----------------------------
 
 // Where a turret is allowed to go: an annulus around the base (outer
 // TURRET_BUILD_RADIUS, inner BASE_ATTACK_RANGE — the base's own footprint).
-export const TURRET_BUILD_RADIUS = 150;
+export const TURRET_BUILD_RADIUS = 128; // was 150 (x0.85 footprint shrink)
 export const MAX_TURRETS = 4;
 // Minimum distance between two turrets. Not specified by the brief; a small
 // separation so 4 turrets can't be placed fully overlapping each other.

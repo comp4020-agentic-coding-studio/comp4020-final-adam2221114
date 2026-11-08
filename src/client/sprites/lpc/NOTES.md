@@ -150,7 +150,7 @@ gate renders as open space, not a tile). `fortress/wall-segment.png` (item
 change, used for all five wall levels alike (colour/thickness only
 distinguished them — see the next entry for why that changed).
 
-## Wall levels (2026-11-02 wall visual redesign): five distinct materials
+## Wall levels (2026-11-06 revision; originally 2026-11-02): five distinct materials
 
 `fortress/wall-segment.png` is no longer used by the renderer — replaced by
 five genuinely different wall MATERIALS, one per `WALL_LEVELS` tier, so an
@@ -162,43 +162,66 @@ picks between them per grid cell by a position hash, the same pattern
 `buildingDamageSeed` already uses for town buildings) so a long wall run
 doesn't look like one tile stamped repeatedly.
 
+The 2026-11-06 pass redrew all ten crops against a user-supplied reference
+image (a five-panel "wood → wood-with-spikes → stone → sandbag/wire →
+armoured-tech" base-defence comparison sheet) for closer alignment with
+that progression and better per-level readability when tiled into a long
+wall run. The reference itself was a single non-tileable scene render of
+unknown origin — not redistributable, licensed, or usable as a game asset
+as-is — so it was used only as a style target; every pixel below is either
+cropped from this project's own already-vendored, attributed licensed
+packs or drawn fresh with Canvas geometry, same as the original pass.
+
 1. **`wall-level-1-{a,b}.png`** — Wooden Barricade. Base texture: a 32x32
    crop of `assets/LPC/base-assets/tiles/bridges.png` (Lanea Zimmerman/Sharm,
    LPC Base Assets, CC-BY-SA 3.0/GPL 3.0/OGA-BY 3.0 — same pack and licence
-   as item 2 above; verified self-tileable before use), darkened slightly,
-   with a hand-drawn diagonal support plank and a few rough nick marks
-   layered on top in Canvas.
+   as item 2 below; crop at (0,96), a plain horizontal-plank fill, verified
+   self-tileable before use), lightened toward a raw driftwood tan, with
+   drawn horizontal plank seams, nail dots, and light grain-noise speckling.
 2. **`wall-level-2-{a,b}.png`** — Reinforced Wooden Wall. Same `bridges.png`
-   source (a different 32x32 crop, vertical-grain), tinted darker/warmer,
-   with drawn metal corner brackets, rivets, and (variant b) an extra rivet
-   pair — the "thicker timber, metal brackets" tier. Spike damage begins at
-   this level in the real ability table, drawn separately by the existing
-   `WALL_VISUALS` tick-mark overlay.
+   source (a different 32x32 crop at (0,128)), tinted darker/warmer, with a
+   continuous drawn spike ridge across the top edge (period divides the
+   32px tile evenly so it reads as one unbroken ridge across a tiled run)
+   and, on the `-a` crop only, a vertical metal support beam at the tile's
+   left edge — alternating with the unbeamed `-b` crop gives a "post every
+   other tile" rhythm along a wall run rather than a post-per-cell. Spike
+   damage begins at this level in the real ability table, drawn separately
+   by the existing `WALL_VISUALS` tick-mark overlay.
 3. **`wall-level-3-{a,b}.png`** — Stone/Brick Defensive Wall. Base texture:
    a 32x32 crop of `Wall-Stone_01-64x64.png` from the **Top Down Dungeon
    Pack** by Screaming Brain Studios — CC0/Public Domain, no attribution
    required (full pack page:
    <https://opengameart.org/content/top-down-dungeon-pack>; the two sheet
    crops actually used are vendored at `assets/TopDownDungeonPack/Walls/`
-   with the pack's own `License.txt`) — tinted cool blue-grey (distinct from
-   the town buildings' own warm-grey stone fill) with drawn reinforcing
-   mortar-joint lines.
-4. **`wall-level-4-{a,b}.png`** — Reinforced Concrete Wall. Base texture: a
-   32x32 crop of the same CC0 pack's `Wall-Concrete_03-64x64.png`, tinted
-   lighter grey, with a drawn panel seam, bolt heads, and rebar hint lines —
-   "concrete segments, steel reinforcement."
-5. **`wall-level-5-{a,b}.png`** — Fortress-Grade Wall. Base texture: a 32x32
-   crop of the same CC0 pack's `Wall-Metal_04-64x64.png` (a rusted
-   diamond-plate/armour photo texture), warmed toward this level's own gold
-   `WALL_VISUALS` accent colour, with a drawn overlapping armour-plate seam,
-   a rivet row, and angular spike silhouettes along the top edge — "heavy
-   armoured sections, reinforced metal plating, advanced spikes."
+   with the pack's own `License.txt`) — tinted cool light-grey (distinct
+   from the town buildings' own warm-grey stone fill) with a drawn mortar-
+   joint border outline and light/dark speckle noise for stone texture.
+4. **`wall-level-4-{a,b}.png`** — Sandbag & Wire Barrier. Entirely Canvas-
+   drawn (no photo crop) — three staggered rows of hand-drawn sandbags
+   (quadratic-curve outlines, alternating tan shades, a centre seam stroke)
+   over a dark olive fill, with a drawn barbed-wire strand (sine-wave path)
+   and barb tufts along the top edge — "dug-in fortification," replacing
+   the previous Reinforced-Concrete-Wall treatment of this tier (dropped:
+   it read too similarly to level 3's stone at this project's 32px scale).
+5. **`wall-level-5-{a,b}.png`** — Fortress-Grade Armour Wall. Base texture:
+   a 32x32 crop of the same CC0 pack's `Wall-Metal_04-64x64.png`,
+   desaturated and darkened toward gunmetal (rather than the previous
+   pass's rust tone) with a drawn armour-plate seam, a rivet row, an amber
+   radial-glow warning light in this level's own gold `WALL_VISUALS` accent
+   colour (plus a hazard-stripe accent on the `-b` crop), and angular spike
+   silhouettes along the top edge — "heavy armoured sections, reinforced
+   metal plating, warning lights, advanced spikes."
 
-All five were generated with a small local Node/`node-canvas` script (not
+All ten were generated with a small local Node/`node-canvas` script (not
 checked into the repo — a one-off asset-authoring tool, not game code) that
-crops/downscales/tints the licensed source photos and layers the structural
-detail (brackets, seams, rivets, spikes) with plain Canvas drawing calls —
-the same "prefer simple Canvas geometry" approach this project already uses
-for turrets, applied here on top of real licensed material rather than
-replacing it, since no single existing asset pack covered this exact five-
-tier wood-to-fortress progression at this project's 32x32 top-down scale.
+crops/tints the licensed source photos (or, for level 4, draws from scratch)
+and layers the structural detail (seams, rivets, spikes, sandbags, wire)
+with plain Canvas drawing calls — the same "prefer simple Canvas geometry"
+approach this project already uses for turrets, applied here on top of real
+licensed material rather than replacing it, since no single existing asset
+pack covered this exact five-tier wood-to-fortress progression at this
+project's 32x32 top-down scale. Verified live in a local dev-server run
+(each level set directly via the SQLite `game_state` row, since reaching
+level 5 through normal play requires the full XP grind): all five tile
+seamlessly into a continuous wall ring with no visible repeat seam, and
+each is visually distinct from its neighbours at in-game scale.

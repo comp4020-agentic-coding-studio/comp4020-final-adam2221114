@@ -6,12 +6,14 @@
 // orchestrator (screen position, sprite lookup, HP bar/status text) and
 // delegates the body-pose decisions here.
 //
-// Deliberately does NOT touch src/client/sprites.ts's LPC character sheets
-// (kept exactly as-is per explicit instruction) or the existing
-// drawPlayerWeapon geometry in render.ts (arms+weapon rigid unit, reused
-// unchanged) — this module only decides WHEN to use which facing/draw order,
-// plus the brand-new downed/prone artwork that previously didn't exist at
-// all (the old pose was a plain vertical squash of the standing sprite).
+// This module has no import-time dependency on src/client/sprites.ts (kept
+// exactly as-is per explicit instruction) or the existing drawPlayerWeapon
+// geometry in render.ts (arms+weapon rigid unit, reused unchanged) — render.ts
+// passes in the exact LPC frame (as a generic {image, sx, sy, sw, sh} rect,
+// see ProneSprite below) the player's own chosen PLAYER_SHEETS appearance
+// already uses for its standing pose, so this module only decides WHEN to
+// use which facing/draw order, plus HOW to pose/rotate/animate that real
+// sprite while downed/dying/reviving — it never invents a second body.
 import type { Direction } from "./sprites.ts";
 
 // --- Facing: movement over aim --------------------------------------------
@@ -50,27 +52,32 @@ export function weaponDrawsBehindBody(aimAngle: number): boolean {
 }
 
 // --- Downed / dying / reviving prone rig -----------------------------------
-// Replaces the old `ctx.scale(1, 0.6)` vertical squash (render.ts's previous
-// renderPlayer), which is what actually produced the "unnaturally
-// flattened" look the brief calls out — squashing a TOP-DOWN sprite
-// vertically doesn't read as "lying down" at all, since a body lying flat
-// and viewed from directly above should show its FULL length, not a
-// shorter/thinner silhouette. This draws a small hand-built figure (head,
-// torso, two arms, two legs — each its own outlined shape, same
-// fill-then-stroke technique monsters.ts already established so parts read
-// as distinct rather than blending into one blob) lying along a fixed
-// canonical diagonal, independent of whatever direction the player was
-// last facing before going down (the brief explicitly asks for this: "the
-// pose is correct regardless of the player's previous facing direction").
+// 2026-11-08 rebuild. Replaces an earlier hand-built figure (head/torso/two
+// arms/two legs, each its own disconnected outlined ellipse) after review
+// found it read as "disconnected oval-shaped body parts", not a lying-down
+// character — a reasonable description of what six independently-rotated
+// ellipses with no shared silhouette actually looks like. This version
+// instead poses the player's OWN real LPC standing sprite (whichever
+// PLAYER_SHEETS appearance they picked at character-select — see
+// ProneSprite below) as one rigid image, rotated to lie along a fixed
+// canonical diagonal: the exact same pixels as the standing character,
+// just tipped onto their side, so the downed body is unmistakably the same
+// character, clothing/head/arms/legs/proportions included, never a
+// different procedural shape standing in for them.
 //
-// `proneAmount` (0..1) parametrises the WHOLE transition in one continuous
-// value: 0 is a collapsed point at the player's own centre (the instant
-// before they start to fall/the instant they're fully back on their feet —
-// render.ts hands off to the normal standing sprite at that end), 1 is the
-// fully fallen, fully spread-out resting pose. render.ts drives this upward
-// (0->1) right after an alive->downed/dead transition for the fall, and
-// downward (1->0) right after a downed/dead->alive transition for the
-// get-up, using the SAME rig both ways rather than two separate animations.
+// `proneAmount` (0..1) still parametrises the WHOLE transition in one
+// continuous value: 0 is upright (render.ts hands off to the normal
+// standing sprite at that end), 1 is the fully fallen, fully-rotated resting
+// pose. render.ts drives this upward (0->1) right after an alive->downed/
+// dead transition for the fall, and downward (1->0) right after a downed/
+// dead->alive transition for the get-up, using the SAME rig both ways
+// rather than two separate animations — i.e. "getting-up" is just this
+// collapse played backward, matching the brief's 5 visual states (standing/
+// falling/prone/breathing/getting-up) without a second rig to keep in sync.
+// The fixed tilt (not a perfect 90°/180°) means a whole team of downed
+// players never all lie in the exact same rigid line, which would read as
+// artificial — still true of this rebuild, just applied to a real sprite
+// instead of procedural shapes.
 export interface PronePose {
   proneAmount: number; // 0 standing/collapsed .. 1 fully prone and settled
   dead: boolean; // true = corpse (fully still); false = downed (still breathing)
@@ -78,11 +85,22 @@ export interface PronePose {
   phase: number; // per-player offset (hashStr(id)) so multiple downed players don't breathe in lockstep
 }
 
-const PRONE_OUTLINE = "#241f1a";
-const PRONE_SKIN = "#caa37c";
-const PRONE_SKIN_SHADOW = "#a07e58";
-const PRONE_SLEEVE = "#454a3c";
-const PRONE_SLEEVE_SHADOW = "#333a2c";
+// The exact drawImage source rect render.ts already resolved for this
+// player's standing sprite (PLAYER_SHEETS[characterIndex]["down"], frame 0 —
+// a fixed down-facing standing pose, independent of whichever direction the
+// player was actually walking/facing before going down, per the brief's own
+// "pose is correct regardless of previous facing direction"). Passed in
+// rather than imported so this module stays free of a sprites.ts dependency
+// (the explicit "do not touch the character sheets" instruction extends to
+// not even importing from that module here).
+export interface ProneSprite {
+  image: HTMLImageElement;
+  sx: number;
+  sy: number;
+  sw: number;
+  sh: number;
+}
+
 const PRONE_WEAPON_BODY = "#34343a";
 const PRONE_WEAPON_DARK = "#1f1f22";
 
@@ -90,14 +108,6 @@ const PRONE_WEAPON_DARK = "#1f1f22";
 // a whole team of downed players never all lie in the exact same rigid
 // line, which would read as artificial.
 const PRONE_CANONICAL_ANGLE = 1.15;
-
-function fillAndStrokeProne(ctx: CanvasRenderingContext2D, fill: string, width: number): void {
-  ctx.fillStyle = fill;
-  ctx.fill();
-  ctx.strokeStyle = PRONE_OUTLINE;
-  ctx.lineWidth = width;
-  ctx.stroke();
-}
 
 function ellipsePath(ctx: CanvasRenderingContext2D, x: number, y: number, rx: number, ry: number, rot = 0): void {
   ctx.beginPath();
@@ -124,23 +134,34 @@ export function renderProneShadow(ctx: CanvasRenderingContext2D, drawSize: numbe
 // Draws the lying-down figure itself, ALREADY translated to the player's
 // own screen position by the caller (same convention renderPlayer already
 // uses for the standing sprite's own save/translate block) — this only
-// rotates/scales around that local origin.
-export function renderProneRig(ctx: CanvasRenderingContext2D, drawSize: number, teamColor: string, pose: PronePose): void {
+// rotates/scales around that local origin. `sprite` is undefined only in
+// the same "not loaded yet/no character chosen" case renderPlayer's own
+// standing-sprite branch already falls back from; this mirrors that with a
+// small flat-colour placeholder rather than skipping the fall animation
+// entirely.
+export function renderProneRig(ctx: CanvasRenderingContext2D, drawSize: number, teamColor: string, sprite: ProneSprite | undefined, pose: PronePose): void {
   const { proneAmount, dead, now, phase } = pose;
-  const spread = proneAmount; // 0 = collapsed to a point, 1 = fully extended
+  const spread = proneAmount; // 0 = still upright, 1 = fully settled on the ground
   const halfLen = drawSize * 0.56;
-  const outline = Math.max(1, drawSize * 0.035);
 
   // A subtle breathing pulse once settled and still alive — the one signal
   // that tells a teammate "still alive, still worth rescuing" at a glance,
   // without the downed-timer HUD text (render.ts draws that separately,
-  // unaffected by this module).
-  const breathe = !dead && proneAmount > 0.9 ? Math.sin(now / 650 + phase) * 0.07 : 0;
+  // unaffected by this module). Scales the WHOLE body a couple of percent
+  // rather than one isolated part, reading as a chest rising/falling under
+  // the real sprite instead of a detached pulsing shape.
+  const breathe = !dead && proneAmount > 0.9 ? Math.sin(now / 650 + phase) * 0.05 : 0;
 
   ctx.save();
   ctx.rotate(spread * PRONE_CANONICAL_ANGLE);
+  // Slide the body along its own rotated axis as it falls (0 at the collapse
+  // point, settling forward by half its own length once fully prone) and
+  // ease it down near the ground line — replaces the old per-limb spread
+  // math with a single rigid transform of the real sprite.
+  ctx.translate(halfLen * 0.25 * spread, drawSize * 0.18 * spread);
+  ctx.scale(1 + breathe, 1 - breathe * 0.6);
 
-  // Dropped weapon, lying just past the torso — fades in only once mostly
+  // Dropped weapon, lying just past the body — fades in only once mostly
   // fallen (threshold deliberately matches render.ts's renderPlayer
   // `showWeapon` cutoff of proneAmount < 0.5, so the standing held weapon
   // and this dropped one are never both visible during the rise/fall
@@ -151,8 +172,8 @@ export function renderProneRig(ctx: CanvasRenderingContext2D, drawSize: number, 
     const weaponAlpha = Math.min(1, (spread - 0.5) / 0.3);
     ctx.save();
     ctx.globalAlpha = weaponAlpha;
-    ctx.translate(halfLen * 0.05 * spread, drawSize * 0.26);
-    ctx.rotate(0.25);
+    ctx.translate(halfLen * 0.5, drawSize * 0.08);
+    ctx.rotate(0.2);
     const wlen = drawSize * 0.62;
     ctx.fillStyle = PRONE_WEAPON_BODY;
     ctx.fillRect(-wlen * 0.3, -drawSize * 0.035, wlen, drawSize * 0.07);
@@ -161,67 +182,35 @@ export function renderProneRig(ctx: CanvasRenderingContext2D, drawSize: number, 
     ctx.restore();
   }
 
-  // Far leg (drawn first so the near leg/torso overlap it, reading as
-  // slightly behind) — the two legs end at slightly different lengths/
-  // angles rather than a perfectly mirrored pair, so the pose reads as a
-  // relaxed/collapsed body rather than a rigid stick figure.
-  ctx.save();
-  ctx.translate(halfLen * 0.12 * spread, drawSize * 0.145 * spread);
-  ctx.rotate(0.12 * spread);
-  ellipsePath(ctx, halfLen * 0.42 * spread, 0, halfLen * 0.4 * spread, drawSize * 0.075);
-  fillAndStrokeProne(ctx, PRONE_SLEEVE_SHADOW, outline);
-  ctx.restore();
+  // The real standing sprite, drawn as ONE rigid unit lying along the
+  // rotated axis above — this is what makes the downed body visibly the
+  // same character (clothing/head/arms/legs/proportions) as the brief
+  // requires, rather than a stand-in shape. Drawn centred on the rig's
+  // local origin so the rotate/translate above does all the posing work;
+  // no non-uniform squash is applied to the sprite itself (the brief's
+  // explicit "do not flatten or non-uniformly scale the standing sprite" —
+  // only the whole-rig breathe scale above, which is uniform and tiny).
+  if (sprite) {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(sprite.image, sprite.sx, sprite.sy, sprite.sw, sprite.sh, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+  } else {
+    ctx.fillStyle = teamColor;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, drawSize * 0.3, drawSize * 0.22, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
-  // Far arm.
+  // A small team-colour patch stays over the sprite's shoulder — keeps
+  // "which player is this" readable while downed, same purpose the
+  // standing pose's team-pip serves, without needing a second floating
+  // indicator.
   ctx.save();
-  ctx.translate(-halfLen * 0.22 * spread, drawSize * 0.19 * spread);
-  ctx.rotate(-0.18 * spread);
-  ellipsePath(ctx, -halfLen * 0.22 * spread, 0, halfLen * 0.26 * spread, drawSize * 0.065);
-  fillAndStrokeProne(ctx, PRONE_SLEEVE_SHADOW, outline * 0.85);
-  ctx.restore();
-
-  // Torso — the breathing pulse scales its own ry only, so it reads as a
-  // chest rising/falling rather than the whole body pulsing.
-  ellipsePath(ctx, -halfLen * 0.12 * spread, 0, halfLen * 0.34 * spread + drawSize * 0.02, drawSize * (0.15 + breathe));
-  fillAndStrokeProne(ctx, PRONE_SLEEVE, outline);
-  // A small team-colour patch on the shoulder — keeps "which player is
-  // this" readable while downed, same purpose the standing pose's team-pip
-  // serves, without needing a second floating indicator.
-  ctx.save();
-  ellipsePath(ctx, -halfLen * 0.3 * spread, -drawSize * 0.05, drawSize * 0.09, drawSize * 0.07);
+  ellipsePath(ctx, -drawSize * 0.28, -drawSize * 0.22, drawSize * 0.09, drawSize * 0.07);
   ctx.fillStyle = teamColor;
   ctx.fill();
-  ctx.strokeStyle = PRONE_OUTLINE;
-  ctx.lineWidth = outline * 0.6;
+  ctx.strokeStyle = "#241f1a";
+  ctx.lineWidth = Math.max(1, drawSize * 0.025);
   ctx.stroke();
-  ctx.restore();
-
-  // Head.
-  ellipsePath(ctx, -halfLen * 0.82 * spread, 0, drawSize * 0.15, drawSize * 0.14);
-  fillAndStrokeProne(ctx, PRONE_SKIN, outline);
-  ctx.save();
-  ellipsePath(ctx, -halfLen * 0.82 * spread, 0, drawSize * 0.15, drawSize * 0.14);
-  ctx.clip();
-  ctx.fillStyle = PRONE_SKIN_SHADOW;
-  ctx.beginPath();
-  ctx.ellipse(-halfLen * 0.82 * spread + drawSize * 0.05, drawSize * 0.05, drawSize * 0.1, drawSize * 0.1, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  // Near arm, draped slightly across/forward of the torso.
-  ctx.save();
-  ctx.translate(-halfLen * 0.3 * spread, -drawSize * 0.2 * spread);
-  ctx.rotate(0.3 * spread);
-  ellipsePath(ctx, -halfLen * 0.2 * spread, 0, halfLen * 0.28 * spread, drawSize * 0.07);
-  fillAndStrokeProne(ctx, PRONE_SLEEVE, outline * 0.9);
-  ctx.restore();
-
-  // Near leg.
-  ctx.save();
-  ctx.translate(halfLen * 0.14 * spread, -drawSize * 0.15 * spread);
-  ctx.rotate(-0.08 * spread);
-  ellipsePath(ctx, halfLen * 0.44 * spread, 0, halfLen * 0.42 * spread, drawSize * 0.08);
-  fillAndStrokeProne(ctx, PRONE_SLEEVE, outline);
   ctx.restore();
 
   ctx.restore();

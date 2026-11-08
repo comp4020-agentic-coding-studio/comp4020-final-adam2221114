@@ -178,7 +178,7 @@ describe("zombie obstacle avoidance (regression for the 'stuck against walls/bui
   });
 
   it("a ground zombie still settles into attacking the destructible wall itself, not stuck short of or past it", () => {
-    const spawnPos: Vec2 = { x: BASE_POS.x + 320, y: BASE_POS.y + 320 }; // verified clear of every building
+    const spawnPos: Vec2 = { x: BASE_POS.x + 300, y: BASE_POS.y + 200 }; // verified clear of every building (2026-11-08 map-visual pass: TOWN_BUILDINGS replaced with 4 larger ruin footprints, see obstacles.ts)
     expect(overlapsAnyBuilding(spawnPos)).toBe(false);
     for (const type of ["normal", "giant", "boss"] satisfies ZombieType[]) {
       // Spawn well outside the wall, off-axis, so the approach must also

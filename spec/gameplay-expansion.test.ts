@@ -154,12 +154,12 @@ it(
       send({ type: "interact", action: "build_wall" });
       await waitForMatch(conn.messages, (m) => m.type === "state" && m.wallLevel === 1, 5000);
 
-      // (500, 392) sits inside the wall's own north side (BASE_POS (500,500),
-      // WALL_HALF_EXTENT 116, WALL_THICKNESS 16 => north wall spans y
-      // 384-400, i.e. 100-116 units from base) — well inside
-      // TURRET_BUILD_RADIUS (150) and outside BASE_ATTACK_RANGE (40), so
+      // (500, 408) sits inside the wall's own north side (BASE_POS (500,500),
+      // WALL_HALF_EXTENT 99, WALL_THICKNESS 14 => north wall spans y
+      // 401-415, i.e. 85-99 units from base) — well inside
+      // TURRET_BUILD_RADIUS (128) and outside BASE_ATTACK_RANGE (34), so
       // only the wall-overlap check can be what rejects it.
-      send({ type: "place_turret", x: 500, y: 392 });
+      send({ type: "place_turret", x: 500, y: 408 });
       const rejected = await waitForMatch(conn.messages, (m) => m.type === "rejected" && m.action === "place_turret", 5000);
       expect(rejected.reason).toMatch(/wall/i);
     } finally {

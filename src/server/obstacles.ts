@@ -33,51 +33,45 @@ export interface Rect {
   h: number;
 }
 
-// Twelve building footprints of VARIED sizes (12 distinct w/h pairs, not a
-// handful repeated), placed by a one-off rejection-sampling script (not
-// typed by hand) into the four angular GAPS between terrain.ts's curved
-// ROAD_ARMS — three buildings loosely grouped per gap, at varied distances
-// and offsets so the result reads as an irregular town, not four mirrored
-// quadrant blocks. Every footprint satisfies, simultaneously: >210 units
-// from BASE_POS (clear of TURRET_BUILD_RADIUS=150 and the decorative-prop
-// clear zone, terrain.ts's PROPS_CLEAR_RADIUS=220); >25 units clear of the
-// nearest point on any road arm beyond the road's own ROAD_HALF_WIDTH; no
-// inflated overlap with any other building; inside the map bounds with a
-// 20-unit margin. Verified against all four constraints plus full
-// base-connectivity (0 unreached cells) before being committed here —
+// Four ruined-building footprints (replacing the prior twelve procedural
+// ones), one per diagonal quadrant, matching the four ruin structures
+// painted directly into the new AI-generated map background
+// (src/client/sprites/map-ai-gen/map-background.png — see that directory's
+// NOTES.md for asset provenance). Each rect was measured by hand against the
+// source PNG (pixel-space bounding box of the visible brick/stone ruin,
+// including its rubble pile, converted to world units at scale
+// 1000/1254) and visually verified to tightly enclose — without excess
+// empty-grass margin — the painted structure it represents. Buildings here
+// are deliberately NOT decorative recreations of the art; the art itself is
+// drawn directly (render.ts/sprites.ts's ruin-*-cutout images), and these
+// rects exist purely to give that already-visible geometry real
+// server-authoritative collision. Verified against: no inflated overlap
+// with any other building; comfortable clearance beyond every road arm's
+// ROAD_HALF_WIDTH; and full base-connectivity (0 unreached cells) —
 // assertMapIsFullyConnected() re-verifies the connectivity part at every
 // startup so a future hand-edit that seals a region fails loudly instead of
 // silently stranding zombies.
 export const TOWN_BUILDINGS: Rect[] = [
-  // NE gap
-  { x: 663, y: 255, w: 110, h: 70 },
-  { x: 523, y: 132, w: 70, h: 100 },
-  { x: 615, y: 154, w: 80, h: 60 },
-  // SE gap
-  { x: 744, y: 638, w: 90, h: 75 },
-  { x: 751, y: 734, w: 140, h: 60 },
-  { x: 854, y: 613, w: 65, h: 95 },
-  // SW gap
-  { x: 142, y: 720, w: 100, h: 80 },
-  { x: 369, y: 798, w: 75, h: 95 },
-  { x: 271, y: 662, w: 70, h: 65 },
-  // NW gap
-  { x: 220, y: 185, w: 95, h: 70 },
-  { x: 121, y: 292, w: 70, h: 95 },
-  { x: 232, y: 282, w: 80, h: 60 },
+  { x: 128, y: 68, w: 120, h: 104 }, // NW ruin
+  { x: 729, y: 76, w: 179, h: 96 }, // NE ruin
+  { x: 63.8, y: 809.4, w: 203.3, h: 119.6 }, // SW ruin
+  { x: 745, y: 721, w: 136, h: 104 }, // SE ruin
 ];
 
 // The purchasable Wall's physical geometry: a square ring (half-extent
-// H=116, thickness T=16, outer bounds (384,384)-(616,616)) around BASE_POS,
+// H=99, thickness T=14, outer bounds (401,401)-(599,599)) around BASE_POS,
 // present ONLY while wallLevel > 0 (game-state.ts's wallLevel/wallHp) — no
 // fixed always-on fortress and no corner towers (both removed; see git
 // history for the Crit 11 fortress this replaces). Geometry (half-extent/
-// thickness/gate-width) is unchanged from that fortress's own numbers, just
-// now conditional on wallLevel instead of always present.
+// thickness/gate-width) was the original fortress's own numbers x0.85,
+// rounded (2026-11-06 footprint shrink: "leave more room for zombies" — see
+// game-state.ts's own comment on BASE_ATTACK_RANGE/BASE_INTERACT_RANGE,
+// scaled by the same factor so the ring geometry stays internally
+// consistent), now conditional on wallLevel instead of always present.
 //
 // PLAYERS and ZOMBIES see deliberately DIFFERENT wall shapes once built:
 //   - wallRectsForPlayers: north/east/west solid, south split around a
-//     GATE_WIDTH=90 gap facing PLAYER_START_POS (500,560) — a player can
+//     GATE_WIDTH=77 gap facing PLAYER_START_POS (500,551) — a player can
 //     always walk in/out through the gate once the wall stands.
 //   - wallRectsForZombies: all four sides solid, NO gate at all.
 // This asymmetry is deliberate, not an oversight: CLAUDE.md's invariant is
@@ -96,9 +90,9 @@ export const TOWN_BUILDINGS: Rect[] = [
 // them as an extra-rects parameter (see below) and advanceZombie
 // (game-state.ts) consults wallRectsForZombies directly, independent of
 // BUILDINGS/the BFS entirely.
-export const WALL_HALF_EXTENT = 116;
-export const WALL_THICKNESS = 16;
-export const WALL_GATE_WIDTH = 90;
+export const WALL_HALF_EXTENT = 99; // was 116
+export const WALL_THICKNESS = 14; // was 16
+export const WALL_GATE_WIDTH = 77; // was 90
 // How far inside the outer half-extent the wall's inner face sits — the
 // boundary of the courtyard a player/the base sits inside once walled in.
 export const WALL_INTERIOR_HALF_EXTENT = WALL_HALF_EXTENT - WALL_THICKNESS;

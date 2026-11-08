@@ -33,7 +33,21 @@ import { overlapsAnyBuilding } from "./obstacles.ts";
 // Deliberately placed ON/NEAR roads (see buildClusters below) rather than in
 // the same off-road clusters as barrels/chests — an abandoned car makes
 // sense blocking a street, not sitting in a field.
-export type PropType = "tree" | "bush" | "barrel" | "chest" | "wreck";
+//
+// "rock"/"ruin"/"broken-column" added 2026-11-06 (user asked for the map's
+// visual style to move toward a reference crossroads-town image, scoped to
+// terrain dressing + building exteriors only — roads stay curved and the
+// wall's interior decor stays as-is, see PROCESS.md). All three are real
+// licensed sprite crops (sprites/lpc/NOTES.md) — "rock" from
+// base-assets/tiles/rock.png, "ruin"/"broken-column" from the LPC castle
+// sheet's arched-window and baluster-post art, reused here as scattered
+// ruined-structure debris rather than an intact building. "stump" has no
+// matching licensed sprite in any pack vendored in this repo (treetop.png/
+// trunk.png are a standing canopy and a standing trunk base, not a cut
+// stump — checked while sourcing this change), so it's hand-drawn
+// procedural Canvas art, same "no sprite fits, so draw it" precedent as
+// wreck/turrets/the base door.
+export type PropType = "tree" | "bush" | "barrel" | "chest" | "wreck" | "rock" | "stump" | "ruin" | "broken-column";
 
 export interface Prop {
   x: number;
@@ -124,10 +138,12 @@ export function isOnRoad(worldX: number, worldY: number): boolean {
   return distanceToRoad(worldX, worldY) <= ROAD_HALF_WIDTH;
 }
 
-// Kept clear of the base/wall/turret-build area (TURRET_BUILD_RADIUS is 150
+// Kept clear of the base/wall/turret-build area (TURRET_BUILD_RADIUS is 128
 // — see defense-config.ts) so decoration never visually crowds the actual
-// play space, with real margin to spare.
-export const PROPS_CLEAR_RADIUS = 220;
+// play space, with real margin to spare. 220 -> 187 in the 2026-11-06
+// footprint shrink, scaled with TURRET_BUILD_RADIUS so the margin between
+// them stays proportional.
+export const PROPS_CLEAR_RADIUS = 187;
 // Beyond this, the "mid combat zone" gives way to the sparser "outer danger
 // zone" — roughly halfway to the map's own edge from the base.
 export const OUTER_ZONE_RADIUS = 400;
@@ -145,6 +161,13 @@ const SUPPLY_CACHE: ClusterTemplate = { props: ["barrel", "chest", "barrel"], sp
 const SCRAP_HEAP: ClusterTemplate = { props: ["barrel", "barrel"], spread: 18 };
 const THICKET: ClusterTemplate = { props: ["tree", "tree", "bush", "bush", "bush"], spread: 38 };
 const LONE_TREE: ClusterTemplate = { props: ["tree"], spread: 0 };
+// Added 2026-11-06 (map-style pass — see PROCESS.md): a cleared patch where
+// trees used to stand (stump + a loose rock or two) and a small collapsed
+// structure (a ruin's arched wall remnant flanked by a couple of broken
+// columns), reusing the same "believable grouping, not a random bag" rule
+// every other template here already follows.
+const ROCKY_CLEARING: ClusterTemplate = { props: ["stump", "rock", "rock"], spread: 22 };
+const RUIN_SITE: ClusterTemplate = { props: ["ruin", "broken-column", "broken-column"], spread: 30 };
 
 function buildClusters(): Prop[] {
   const rand = seededRandom(20261008);
@@ -202,6 +225,41 @@ function buildClusters(): Prop[] {
     placeCluster(template, cx, cy);
     placed++;
   }
+
+  // Rocky clearings (mid zone) and ruin sites (outer zone), placed as a
+  // fixed count rather than folded into the weighted template rolls above —
+  // a weighted roll risks these two new types never actually appearing on a
+  // given seed (verified: they didn't, on this project's actual seed, before
+  // this change), and the user explicitly asked for rock/ruin/column
+  // decoration to exist on the map, not to exist only probabilistically.
+  const rockyClearingCount = 5;
+  attempts = 0;
+  placed = 0;
+  while (placed < rockyClearingCount && attempts < rockyClearingCount * 25) {
+    attempts++;
+    const angle = rand() * Math.PI * 2;
+    const dist = PROPS_CLEAR_RADIUS + rand() * (OUTER_ZONE_RADIUS - PROPS_CLEAR_RADIUS);
+    const cx = BASE_POS.x + Math.cos(angle) * dist;
+    const cy = BASE_POS.y + Math.sin(angle) * dist;
+    if (cx < 40 || cx > WORLD_SIZE - 40 || cy < 40 || cy > WORLD_SIZE - 40) continue;
+    placeCluster(ROCKY_CLEARING, cx, cy);
+    placed++;
+  }
+  const ruinSiteCount = 4;
+  attempts = 0;
+  placed = 0;
+  while (placed < ruinSiteCount && attempts < ruinSiteCount * 25) {
+    attempts++;
+    const angle = rand() * Math.PI * 2;
+    const maxDist = Math.hypot(WORLD_SIZE, WORLD_SIZE) / 2;
+    const dist = OUTER_ZONE_RADIUS + rand() * (maxDist - OUTER_ZONE_RADIUS);
+    const cx = BASE_POS.x + Math.cos(angle) * dist;
+    const cy = BASE_POS.y + Math.sin(angle) * dist;
+    if (cx < 30 || cx > WORLD_SIZE - 30 || cy < 30 || cy > WORLD_SIZE - 30) continue;
+    placeCluster(RUIN_SITE, cx, cy);
+    placed++;
+  }
+
   const loneTreeCount = 10;
   attempts = 0;
   placed = 0;
@@ -257,7 +315,17 @@ function buildClusters(): Prop[] {
   return props;
 }
 
-export const DECORATIVE_PROPS: Prop[] = buildClusters();
+// 2026-11-08 map-visual pass: the new AI-generated map background
+// (sprites.ts's MAP_BACKGROUND_IMAGE) already paints its own trees, rocks,
+// car wrecks, and rubble directly into the ground art at fixed positions.
+// Drawing buildClusters()'s procedural LPC prop scatter on top of it would
+// duplicate objects already visible in the PNG (explicitly out of scope for
+// that pass) and would visually clash (blocky pixel-art crops over painted/
+// semi-realistic art). buildClusters() itself is left intact, unused, rather
+// than deleted, in case a future pass reintroduces a non-overlapping prop
+// layer (e.g. clutter placed only in areas the background doesn't already
+// decorate).
+export const DECORATIVE_PROPS: Prop[] = [];
 
 // Ground-level marks baked into the static terrain layer (render.ts) —
 // cracks, scorch marks, blood stains, and dark damage patches. None of

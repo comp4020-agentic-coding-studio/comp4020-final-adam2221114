@@ -40,6 +40,7 @@ import {
   DAMAGE_NUMBER_MS,
   EXPLOSION_EFFECT_MS,
   PROJECTILE_TRAVEL_MS,
+  baseMenuIcon,
   lastZombieDir,
   nextTurretBarrelIndex,
   turretMuzzlePositions,
@@ -58,6 +59,17 @@ import { computeCamera, clampViewSize, screenToWorld, DEFAULT_VIEW_SIZE, type Ca
 // Must match src/server/game-state.ts's MAP_SIZE (see protocol.ts's comment
 // on why this is a duplicated constant, not a shared import).
 const WORLD_SIZE = 1000;
+
+// 2026-11-08 HUD-legibility pass: mirrors index.html's --hud-scale (same
+// value, kept in sync by hand — a CSS custom property can't be read into a
+// JS numeric literal without an extra getComputedStyle round trip for a
+// constant that never changes at runtime). Everything CSS can size on its
+// own (panel padding/gaps/font-size) uses the CSS variable directly; this
+// constant exists only for the handful of sizes main.ts itself sets as raw
+// numbers — uiIcon()'s px argument, the player-portrait canvas's pixel
+// resolution, and the inline bar width/height literals below, none of which
+// a stylesheet can reach.
+const HUD_SCALE = 1.45;
 // The canvas now resizes to fill the entire browser window (see
 // resizeCanvas() below) instead of staying a fixed 800x800 — canvas.width/
 // height are read fresh every frame from the live canvas element rather
@@ -140,9 +152,9 @@ if (!btnRestart) throw new Error("index.html is missing #btn-restart");
 // Static icon content for the three top-right icon buttons (set once —
 // these never change, unlike btn.hidden which updatePhaseUi toggles every
 // state message).
-btnStart.innerHTML = uiIcon("play", 18);
-btnPause.innerHTML = uiIcon("pause", 18);
-btnMenu.innerHTML = uiIcon("menu", 18);
+btnStart.innerHTML = uiIcon("play", Math.round(18 * HUD_SCALE));
+btnPause.innerHTML = uiIcon("pause", Math.round(18 * HUD_SCALE));
+btnMenu.innerHTML = uiIcon("menu", Math.round(18 * HUD_SCALE));
 // Hides/shows the whole wrap (title banner + panel together) — the panel
 // itself (#character-select) is just the inner chrome-styled card and is
 // never hidden on its own.
@@ -821,10 +833,23 @@ const computeMenuChoices = (state: StateMessage, context: MenuContext): MenuChoi
   return unkeyed.map((choice, i) => ({ key: String(i + 1), ...choice }) as MenuChoice);
 };
 
+// Maps each row's existing UiIconName (unchanged choice data — see
+// computeBaseChoices/computeTurretChoices above, neither touched by this
+// visual pass) onto the new, more-detailed base-menu icon set used only
+// inside #interact-menu. Falls back to the original flat icon for anything
+// with no equivalent in the reference image (e.g. "skull" for reviving a
+// dead teammate, which the reference doesn't depict).
+const rowIcon = (o: MenuChoice): string => {
+  if (o.kind === "place_turret" || o.kind === "turret_action") return baseMenuIcon("turret");
+  if (o.icon === "shield") return baseMenuIcon("wall");
+  if (o.icon === "medkit") return baseMenuIcon("medkit");
+  return uiIcon(o.icon, 22);
+};
+
 const renderMenu = (state: StateMessage | undefined): void => {
   if (placementMode) {
     menu.innerHTML = [
-      `<div class="menu-heading">${uiIcon("shield")} PLACING TURRET</div>`,
+      `<div class="menu-heading">${baseMenuIcon("turret")} PLACING TURRET</div>`,
       `<div class="menu-hint">Click a valid spot (dashed ring around the base)</div>`,
       `<div class="menu-hint">[X / Esc] Cancel</div>`,
     ].join("");
@@ -836,15 +861,15 @@ const renderMenu = (state: StateMessage | undefined): void => {
     return;
   }
   menuChoices = computeMenuChoices(state, menuContext);
-  const heading = menuContext.kind === "base" ? "BASE" : "TURRET";
+  const heading = menuContext.kind === "base" ? `${baseMenuIcon("fortress")} BASE` : `${baseMenuIcon("turret")} TURRET`;
   const rows = menuChoices.map((o) => {
     const affordable = state.sharedXp >= o.cost;
     return [
       `<div class="menu-row${affordable ? "" : " menu-row-disabled"}">`,
       `<span class="menu-key">[${o.key}]</span>`,
-      `${uiIcon(o.icon)}`,
+      `<span class="menu-row-icon">${rowIcon(o)}</span>`,
       `<span class="menu-label">${o.label}</span>`,
-      `<span class="menu-cost${affordable ? "" : " menu-cost-insufficient"}">${uiIcon("coin", 14)}${o.cost} XP</span>`,
+      `<span class="menu-cost${affordable ? "" : " menu-cost-insufficient"}">${baseMenuIcon("xp", 16)}${o.cost} XP</span>`,
       `</div>`,
     ].join("");
   });
@@ -1139,7 +1164,9 @@ const fractionClass = (current: number, max: number): string => {
 // vertical HUD followed) for the per-player cards below.
 const miniBar = (barClass: string, current: number, max: number, text: string): string => {
   const fraction = max > 0 ? Math.max(0, Math.min(1, current / max)) : 0;
-  return `<span class="bar ${barClass}" style="width:50px;height:7px"><span class="bar-fill" style="width:${(fraction * 100).toFixed(0)}%"></span></span><span class="player-card-value">${text}</span>`;
+  const width = Math.round(50 * HUD_SCALE);
+  const height = Math.round(7 * HUD_SCALE);
+  return `<span class="bar ${barClass}" style="width:${width}px;height:${height}px"><span class="bar-fill" style="width:${(fraction * 100).toFixed(0)}%"></span></span><span class="player-card-value">${text}</span>`;
 };
 
 // Crit 10's gameplay-expansion requirement "their own HP/status... and any
@@ -1154,17 +1181,23 @@ const TEAM_SIZE = 4; // matches server-side MAX_PLAYERS (game-state.ts) — not 
 // Draws one player's portrait (frame 0 of their walk-down cycle, same
 // "reuse what exists" choice drawCharacterPortraits/drawIntroPortrait
 // already make — no dedicated idle sheet exists in the LPC set) into a
-// freshly created small canvas, returned ready to insert into the DOM.
+// freshly created small canvas, returned ready to insert into the DOM. The
+// backing resolution is scaled by HUD_SCALE too (not just the CSS frame it
+// sits in via width:100%/height:100%) so a bigger on-screen portrait is
+// still drawn from a bigger source bitmap — stretching the old fixed 36x36
+// canvas up via CSS alone would have read as soft/blurry despite
+// image-rendering:pixelated, which only prevents smoothing, not low source
+// resolution.
 const drawPlayerPortraitCanvas = (characterIndex: number): HTMLCanvasElement => {
   const c = document.createElement("canvas");
-  c.width = 36;
-  c.height = 36;
+  c.width = Math.round(36 * HUD_SCALE);
+  c.height = Math.round(36 * HUD_SCALE);
   const pctx = c.getContext("2d");
   if (!pctx) return c;
   const sheet = PLAYER_SHEETS[characterIndex % PLAYER_SHEETS.length]?.down;
   if (sheet && isReady(sheet.image)) {
     pctx.imageSmoothingEnabled = false;
-    const size = 34;
+    const size = Math.round(34 * HUD_SCALE);
     pctx.drawImage(sheet.image, 0, 0, sheet.frameWidth, sheet.frameHeight, (c.width - size) / 2, (c.height - size) / 2, size, size);
   }
   return c;
@@ -1216,22 +1249,22 @@ const updateTopBar = (state: StateMessage): void => {
     if (selfPlayer.status === "alive") {
       const hpRow = document.createElement("div");
       hpRow.className = "player-card-row";
-      hpRow.innerHTML = `${uiIcon("heart", 12)} ${miniBar("bar-hp", selfPlayer.hp, selfPlayer.maxHp, `${selfPlayer.hp}/${selfPlayer.maxHp}`)}`;
+      hpRow.innerHTML = `${uiIcon("heart", Math.round(12 * HUD_SCALE))} ${miniBar("bar-hp", selfPlayer.hp, selfPlayer.maxHp, `${selfPlayer.hp}/${selfPlayer.maxHp}`)}`;
       stats.appendChild(hpRow);
     } else if (selfPlayer.status === "downed") {
       const statusRow = document.createElement("div");
       statusRow.className = "player-card-row player-downed";
-      statusRow.innerHTML = `${uiIcon("skull", 12)} DOWNED ${Math.ceil(selfPlayer.downedRemainingMs / 1000)}s`;
+      statusRow.innerHTML = `${uiIcon("skull", Math.round(12 * HUD_SCALE))} DOWNED ${Math.ceil(selfPlayer.downedRemainingMs / 1000)}s`;
       stats.appendChild(statusRow);
     } else {
       const statusRow = document.createElement("div");
       statusRow.className = "player-card-row player-dead";
-      statusRow.innerHTML = `${uiIcon("skull", 12)} DEAD`;
+      statusRow.innerHTML = `${uiIcon("skull", Math.round(12 * HUD_SCALE))} DEAD`;
       stats.appendChild(statusRow);
     }
     const xpRow = document.createElement("div");
     xpRow.className = "player-card-row";
-    xpRow.innerHTML = `${uiIcon("coin", 12)} <span class="player-card-value hud-value-good">${state.sharedXp} XP</span>`;
+    xpRow.innerHTML = `${uiIcon("coin", Math.round(12 * HUD_SCALE))} <span class="player-card-value hud-value-good">${state.sharedXp} XP</span>`;
     stats.appendChild(xpRow);
 
     hudTopLeft.replaceChildren(frame, stats);
@@ -1276,7 +1309,7 @@ const updateTopBar = (state: StateMessage): void => {
       stats.appendChild(nameRow);
       const hpRow = document.createElement("div");
       hpRow.className = "player-card-row";
-      hpRow.innerHTML = `${uiIcon("heart", 12)} ${miniBar("bar-hp", p.hp, p.maxHp, `${p.hp}/${p.maxHp}`)}`;
+      hpRow.innerHTML = `${uiIcon("heart", Math.round(12 * HUD_SCALE))} ${miniBar("bar-hp", p.hp, p.maxHp, `${p.hp}/${p.maxHp}`)}`;
       stats.appendChild(hpRow);
     } else if (p.status === "downed") {
       const nameRow = document.createElement("div");
@@ -1288,7 +1321,7 @@ const updateTopBar = (state: StateMessage): void => {
       const statusRow = document.createElement("div");
       statusRow.className = "player-card-row player-downed";
       const revive = state.reviveProgress.find((r) => r.targetId === p.id);
-      statusRow.innerHTML = `${uiIcon("skull", 12)} DOWNED ${Math.ceil(p.downedRemainingMs / 1000)}s`;
+      statusRow.innerHTML = `${uiIcon("skull", Math.round(12 * HUD_SCALE))} DOWNED ${Math.ceil(p.downedRemainingMs / 1000)}s`;
       stats.appendChild(statusRow);
       if (revive) {
         const reviveFraction = Math.max(0, Math.min(1, 1 - revive.remainingMs / 3000));
@@ -1306,7 +1339,7 @@ const updateTopBar = (state: StateMessage): void => {
       stats.appendChild(nameRow);
       const statusRow = document.createElement("div");
       statusRow.className = "player-card-row player-dead";
-      statusRow.innerHTML = `${uiIcon("skull", 12)} DEAD`;
+      statusRow.innerHTML = `${uiIcon("skull", Math.round(12 * HUD_SCALE))} DEAD`;
       stats.appendChild(statusRow);
     }
 
@@ -1315,7 +1348,7 @@ const updateTopBar = (state: StateMessage): void => {
     if (isSelf && hasCharacter && p.status === "alive") {
       const medkitRow = document.createElement("div");
       medkitRow.className = "player-card-row";
-      medkitRow.innerHTML = `${uiIcon("medkit", 12)} x${p.medkits}`;
+      medkitRow.innerHTML = `${uiIcon("medkit", Math.round(12 * HUD_SCALE))} x${p.medkits}`;
       stats.appendChild(medkitRow);
     }
 
@@ -1333,13 +1366,14 @@ const updateTopBar = (state: StateMessage): void => {
   }
 
   // --- Top-centre: day + real kill-progress + today's enemy-type badges ---
-  topBarDay.innerHTML = `${uiIcon("calendar", 18)} DAY ${state.day}`;
+  topBarDay.innerHTML = `${uiIcon("calendar", Math.round(18 * HUD_SCALE))} DAY ${state.day}`;
   const waveFraction = state.totalZombiesForDay > 0 ? state.killedZombies / state.totalZombiesForDay : 0;
   const activeBadges = WAVE_BADGES.filter((b) => state.dayWaveComposition[b.key] > 0);
+  const waveBarWidth = Math.round(90 * HUD_SCALE);
   topBarWave.innerHTML = [
-    uiIcon("hazard", 16),
+    uiIcon("hazard", Math.round(16 * HUD_SCALE)),
     `<span class="top-bar-wave-label">${state.killedZombies} / ${state.totalZombiesForDay} ZOMBIES</span>`,
-    `<span class="bar" style="width:90px"><span class="bar-fill" style="width:${(waveFraction * 100).toFixed(0)}%;background:var(--accent-green)"></span></span>`,
+    `<span class="bar" style="width:${waveBarWidth}px"><span class="bar-fill" style="width:${(waveFraction * 100).toFixed(0)}%;background:var(--accent-green)"></span></span>`,
     ...activeBadges.map(
       (b) =>
         `<span class="top-bar-wave-badge" style="color:${b.color};border-color:${b.color}">${b.label} x${state.dayWaveComposition[b.key]}</span>`,
@@ -1355,11 +1389,11 @@ const updateTopBar = (state: StateMessage): void => {
   const wallText = state.wallLevel > 0 ? `Lv${state.wallLevel} ${state.wallHp}/${state.wallMaxHp}` : "none";
   const wallClass = state.wallLevel > 0 ? fractionClass(state.wallHp, state.wallMaxHp) : "hud-value-critical";
   hudStatusBox.innerHTML = [
-    `<div class="player-card-row">${uiIcon("heart", 14)} ${miniBar("bar-hp", state.baseHp, state.baseMaxHp, `${state.baseHp}/${state.baseMaxHp}`)}</div>`,
-    `<div class="player-card-row">${uiIcon("shield", 14)} <span class="player-card-value ${wallClass}">${wallText}</span></div>`,
+    `<div class="player-card-row">${uiIcon("heart", Math.round(14 * HUD_SCALE))} ${miniBar("bar-hp", state.baseHp, state.baseMaxHp, `${state.baseHp}/${state.baseMaxHp}`)}</div>`,
+    `<div class="player-card-row">${uiIcon("shield", Math.round(14 * HUD_SCALE))} <span class="player-card-value ${wallClass}">${wallText}</span></div>`,
     `<div class="player-card-row">Turrets <span class="player-card-value">${state.turrets.length}/${MAX_TURRETS}</span></div>`,
   ].join("");
-  hudXpValue.innerHTML = `${uiIcon("coin", 16)} XP ${state.sharedXp}`;
+  hudXpValue.innerHTML = `${uiIcon("coin", Math.round(16 * HUD_SCALE))} XP ${state.sharedXp}`;
 
   rejectionEl.textContent = rejectionNotice ?? "";
 };

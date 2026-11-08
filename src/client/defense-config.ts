@@ -10,11 +10,16 @@ export interface Vec2 {
 
 export const WORLD_SIZE = 1000;
 export const BASE_POS: Vec2 = { x: WORLD_SIZE / 2, y: WORLD_SIZE / 2 };
-export const BASE_ATTACK_RANGE = 40;
-export const WALL_PULSE_RADIUS = 110;
-export const BASE_INTERACT_RANGE = 80;
-export const TURRET_INTERACT_RANGE = 80;
-export const TURRET_BUILD_RADIUS = 150;
+// Base/wall/turret-ring geometry below is x0.85 of its original value
+// (2026-11-06 footprint shrink, "leave more room for zombies") — mirrors
+// src/server/game-state.ts's own copy; see that file's comment for the
+// full rationale. Combat-balance numbers (turret min-separation, revive
+// range, zombie speed/damage, turret damage/range) are untouched.
+export const BASE_ATTACK_RANGE = 34; // was 40
+export const WALL_PULSE_RADIUS = 94; // was 110
+export const BASE_INTERACT_RANGE = 68; // was 80
+export const TURRET_INTERACT_RANGE = 68; // was 80
+export const TURRET_BUILD_RADIUS = 128; // was 150
 export const TURRET_MIN_SEPARATION = 40;
 export const MAX_TURRETS = 4;
 export const REVIVE_RANGE = 40;

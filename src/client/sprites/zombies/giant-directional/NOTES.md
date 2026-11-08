@@ -83,17 +83,18 @@ project's `sprites/` tree)
 
 ## Left/right mirroring
 
-Per the LPC format's own convention (confirmed by direct pixel comparison:
-the source body sheet's "left" and "right" rows are genuinely identical
-art, both drawn facing left — this is standard LPC practice, not a defect),
-`left-*.png` and `right-*.png` are the same leftward-facing frames.
-`render.ts`'s existing `ctx.scale(face.dir === "left" ? -1 : 1, 1)` (already
-applied to every other LPC zombie/player sheet in this project, e.g.
-`zombies/zombie-walk-left.png`/`-right.png`) mirrors the "right" sheet at
-draw time to produce the true right-facing pose — so `right-*.png` here is
-deliberately the same un-mirrored source art as `left-*.png`; no separate
-mirrored PNG was baked, consistent with how every other directional sheet
-in this project already works.
+Corrected 2026-11-08: an earlier revision of this note claimed `left-*.png`
+and `right-*.png` were the same leftward-facing frames (standard LPC
+practice elsewhere in this project, e.g. `zombies/zombie-walk-left.png`/
+`-right.png`), mirrored at draw time by `render.ts`'s
+`ctx.scale(face.dir === "left" ? -1 : 1, 1)`. That claim was wrong for
+these files: a direct pixel comparison shows `left-*.png` and `right-*.png`
+are genuinely distinct, already-correct mirror pairs for every frame of
+every anim (slicing/tinting evidently baked a true right-facing variant
+rather than reusing the left-facing one), so applying that same extra flip
+re-mirrored an already-correct sheet — the actual cause of a reported bug
+("giant walks backward when approaching from the right"). `render.ts`'s
+giant branch now draws `giantSheetFor(anim, face.dir)` unflipped.
 
 ## What's NOT covered by real art
 

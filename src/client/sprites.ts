@@ -160,6 +160,13 @@ export const ROAD_LIGHT_TILE = loadImage("/sprites/lpc/terrain/road-light.png");
 // --- Buildings (32x32 fill tiles, tiled across each obstacle rectangle) ---
 export const BUILDING_BRICK_TILE = loadImage("/sprites/lpc/buildings/building-brick.png");
 export const BUILDING_STONE_TILE = loadImage("/sprites/lpc/buildings/building-stone.png");
+// Red-tile roof fill (2026-11-06 cottage-style rebuild — see NOTES.md),
+// plus a door/window crop composited once per building onto its street-
+// facing (south) side so each footprint reads as an actual cottage facade
+// rather than a flat tiled rectangle with a colour-band "roof".
+export const BUILDING_ROOF_TILE = loadImage("/sprites/lpc/buildings/building-roof.png");
+export const BUILDING_DOOR_IMAGE = loadImage("/sprites/lpc/buildings/building-door.png");
+export const BUILDING_WINDOW_IMAGE = loadImage("/sprites/lpc/buildings/building-window.png");
 
 // --- Decorative props ---
 export const PROP_IMAGES = {
@@ -167,6 +174,9 @@ export const PROP_IMAGES = {
   bush: loadImage("/sprites/lpc/props/bush.png"),
   barrel: loadImage("/sprites/lpc/props/barrel.png"),
   chest: loadImage("/sprites/lpc/props/chest.png"),
+  rock: loadImage("/sprites/lpc/props/rock.png"),
+  ruin: loadImage("/sprites/lpc/props/ruin.png"),
+  "broken-column": loadImage("/sprites/lpc/props/broken-column.png"),
 } as const;
 
 // --- The purchasable Wall's own tiles (obstacles.ts's wallRectsForPlayers)
@@ -183,27 +193,24 @@ export const FORTRESS_TILES = {
   floorPad: loadImage("/sprites/lpc/fortress/floor-pad.png"),
 } as const;
 
-// --- Per-wall-level textures (2026-11-02 wall visual redesign) — five
-// genuinely distinct materials (wood barricade -> reinforced wood -> stone ->
-// reinforced concrete -> armoured fortress-grade), not a colour/thickness
-// reskin of one tile. Each level ships two hand-varied crops (A/B) of the
-// same material so a long wall run reads as built from distinct sections
-// instead of one tile stamped repeatedly — render.ts's renderWallSegment
-// picks between them per-segment the same way renderBuilding already picks
-// per-building damage variants (a position hash, not per-frame randomness).
-// Sourcing/licensing: see sprites/lpc/NOTES.md's "Wall levels" entry.
-export type WallTileVariant = "a" | "b";
-const WALL_LEVEL_TILE_SHEETS: Record<number, Record<WallTileVariant, HTMLImageElement>> = {
-  1: { a: loadImage("/sprites/lpc/fortress/wall-level-1-a.png"), b: loadImage("/sprites/lpc/fortress/wall-level-1-b.png") },
-  2: { a: loadImage("/sprites/lpc/fortress/wall-level-2-a.png"), b: loadImage("/sprites/lpc/fortress/wall-level-2-b.png") },
-  3: { a: loadImage("/sprites/lpc/fortress/wall-level-3-a.png"), b: loadImage("/sprites/lpc/fortress/wall-level-3-b.png") },
-  4: { a: loadImage("/sprites/lpc/fortress/wall-level-4-a.png"), b: loadImage("/sprites/lpc/fortress/wall-level-4-b.png") },
-  5: { a: loadImage("/sprites/lpc/fortress/wall-level-5-a.png"), b: loadImage("/sprites/lpc/fortress/wall-level-5-b.png") },
+// --- Per-wall-level artwork (2026-11-08 replacement) — five user-supplied
+// AI-generated panel images (one per WALL_LEVELS tier), replacing both the
+// tile fill above and wall-render.ts's procedural Canvas renderer. Not LPC/
+// CC0 sourced — kept out of sprites/lpc/ for that reason, same precedent as
+// sprites/base/base-structure.png. See sprites/wall-ai-gen/NOTES.md for full
+// provenance/licensing and the exact processing applied (bounding-box crop
+// only — no redraw of the source pixels). wall-render.ts's
+// renderWallImageLevel draws each one directly with drawImage, not tiled.
+const WALL_LEVEL_IMAGES: Record<number, HTMLImageElement> = {
+  1: loadImage("/sprites/wall-ai-gen/wall-level-1.png"),
+  2: loadImage("/sprites/wall-ai-gen/wall-level-2.png"),
+  3: loadImage("/sprites/wall-ai-gen/wall-level-3.png"),
+  4: loadImage("/sprites/wall-ai-gen/wall-level-4.png"),
+  5: loadImage("/sprites/wall-ai-gen/wall-level-5.png"),
 };
 
-export function wallLevelTile(level: number, variant: WallTileVariant): HTMLImageElement {
-  const sheets = WALL_LEVEL_TILE_SHEETS[level] ?? WALL_LEVEL_TILE_SHEETS[1];
-  return sheets[variant];
+export function wallLevelImage(level: number): HTMLImageElement {
+  return WALL_LEVEL_IMAGES[level] ?? WALL_LEVEL_IMAGES[1];
 }
 
 // --- The base structure's own artwork — a user-supplied painted sci-fi
@@ -218,6 +225,91 @@ export const BASE_STRUCTURE_IMAGE = loadImage("/sprites/base/base-structure.png"
 export function baseStructureAspect(): number {
   return isReady(BASE_STRUCTURE_IMAGE) ? BASE_STRUCTURE_IMAGE.naturalWidth / BASE_STRUCTURE_IMAGE.naturalHeight : 1;
 }
+
+// --- Map background (2026-11-08 map-visual pass) — a single user-supplied
+// AI-generated top-down painting of the whole 1000x1000 world (crossroads
+// town: grass, 4 roads meeting at a central plaza, 4 ruined buildings, car
+// wrecks/crates/trees scattered throughout), drawn directly as the terrain
+// layer's base image instead of the old procedural tile-stamped ground (see
+// render.ts's buildTerrainLayer). Not LPC/CC0, kept out of sprites/lpc/ for
+// that reason, same precedent as sprites/base/base-structure.png and
+// sprites/wall-ai-gen/*. See sprites/map-ai-gen/NOTES.md for full
+// provenance/licensing and the exact cleanup applied (residue/inpainting
+// only — no redraw of the source art). The image is square and is always
+// drawn scaled to fill the full WORLD_SIZE x WORLD_SIZE world, so its
+// naturalWidth/Height ratio is not consulted anywhere (unlike
+// baseStructureAspect/wall images, which can be non-square).
+export const MAP_BACKGROUND_IMAGE = loadImage("/sprites/map-ai-gen/map-background.png");
+
+// --- Ruin building cutouts (2026-11-08) — the same four ruined structures
+// already painted into MAP_BACKGROUND_IMAGE, re-cut as individual alpha-
+// cutout sprites (background grass erased) so render.ts's renderBuilding can
+// draw each one directly over its own TOWN_BUILDINGS rect, Y-sorted against
+// zombies/players, instead of redrawing it with the old procedural tile/
+// door/window building art. Keyed by compass quadrant, matching
+// obstacles.ts's TOWN_BUILDINGS ordering/comments (NW, NE, SW, SE). See
+// sprites/map-ai-gen/NOTES.md for provenance/licensing.
+export const RUIN_BUILDING_IMAGES = {
+  nw: loadImage("/sprites/map-ai-gen/ruin-nw-cutout.png"),
+  ne: loadImage("/sprites/map-ai-gen/ruin-ne-cutout.png"),
+  sw: loadImage("/sprites/map-ai-gen/ruin-sw-cutout.png"),
+  se: loadImage("/sprites/map-ai-gen/ruin-se-cutout.png"),
+} as const;
+export type RuinQuadrant = keyof typeof RUIN_BUILDING_IMAGES;
+
+// --- Car wreck cutouts (2026-11-08) — two of the painted car wrecks visible
+// in MAP_BACKGROUND_IMAGE, re-cut as alpha cutouts purely so render.ts CAN
+// draw them as ordinary Y-sorted decorative props if ever needed; currently
+// they are left baked into the background image itself (not drawn
+// separately) since they already read correctly as part of the static
+// ground art and have no collision (car wrecks are decorative, same as
+// every other DECORATIVE_PROPS wreck). Exported for completeness/future use,
+// not currently referenced by render.ts.
+export const CAR_WRECK_IMAGES = {
+  ne: loadImage("/sprites/map-ai-gen/car-ne-cutout.png"),
+  sw: loadImage("/sprites/map-ai-gen/car-sw-cutout.png"),
+} as const;
+
+// --- Courtyard floor tile (2026-11-08) — a small tileable flagstone crop
+// sampled directly from MAP_BACKGROUND_IMAGE's own plaza pavement, replacing
+// FORTRESS_TILES.floorPad (an LPC pixel tile that read as a stylistic
+// mismatch once laid over the new painted/semi-realistic map art — a
+// cartoony blue-grey tile next to photoreal stone). Drawn the same tiled way
+// the old floorPad was (renderFortressCourtyardFloor in render.ts), just
+// with this sample instead, so the base's interior courtyard floor matches
+// the plaza stone already visible everywhere else on the map.
+export const COURTYARD_FLOOR_TILE = loadImage("/sprites/map-ai-gen/courtyard-floor.png");
+
+// --- Base menu icons + fortress-interior infrastructure art (2026-11-08 base
+// redesign) — cropped/cutout from the user's two uploaded reference images,
+// see sprites/base-ai-gen/NOTES.md for provenance/processing. Kept as a
+// separate small icon set from UI_ICON_NAMES/uiIconUrl below rather than
+// extending that list, since these only replace icons inside the base/turret
+// X-menu specifically — the HUD keeps the original flat Kenney-style icons
+// everywhere else, which wasn't part of this request. ---
+export const BASE_MENU_ICON_NAMES = ["fortress", "wall", "turret", "medkit", "xp"] as const;
+export type BaseMenuIconName = (typeof BASE_MENU_ICON_NAMES)[number];
+
+export function baseMenuIconUrl(name: BaseMenuIconName): string {
+  return `/sprites/base-ai-gen/icon-${name}.png`;
+}
+
+// Fixed-position fortress-interior decoration art (fortress-decor.ts) —
+// replaces the previous procedural Canvas-drawn sandbag/crate/light-tower/
+// wire-coil/barrier shapes with real cropped sprite artwork. Deliberately
+// EXCLUDES any wall/barrier-shaped crop from the source image — the game's
+// own separate 5-level Wall (sprites/wall-ai-gen/) is the only wall art path;
+// see fortress-decor.ts's own comment.
+export const FORTRESS_INFRA_IMAGES = {
+  dish: loadImage("/sprites/base-ai-gen/dish.png"),
+  mast: loadImage("/sprites/base-ai-gen/mast.png"),
+  elecpanel: loadImage("/sprites/base-ai-gen/elecpanel.png"),
+  genpanel: loadImage("/sprites/base-ai-gen/genpanel.png"),
+  floodlight: loadImage("/sprites/base-ai-gen/floodlight.png"),
+  medcrate: loadImage("/sprites/base-ai-gen/medcrate.png"),
+  supplySw: loadImage("/sprites/base-ai-gen/supply-sw.png"),
+  barrels: loadImage("/sprites/base-ai-gen/barrels.png"),
+} as const;
 
 // --- Turret level artwork (2026-11-02 turret visual redesign) — five
 // user-supplied top-down turret designs (not LPC/CC0, see
