@@ -61,6 +61,13 @@
         /* the canvas draws its own crosshair at the mouse position; the OS
            pointer would just be a redundant second one on top of it */
         cursor: none;
+        /* Stops the browser's own scroll/pinch-zoom/double-tap-zoom
+           gestures from competing with touch-controls.ts's drag-to-aim
+           (its pointerdown handler also calls preventDefault(), but
+           touch-action is what stops the gesture recognizer from ever
+           treating the drag as a scroll in the first place — the two are
+           complementary, not redundant, on most mobile browsers). */
+        touch-action: none;
       }
 
       /* --- Panel chrome: a clipped-corner glass pane (gives every HUD
@@ -1053,6 +1060,283 @@
         font-weight: 700;
         letter-spacing: 0.02em;
         box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      }
+
+      /* --- Mobile HUD reflow (COMP4020 marking viewport: 390x844) ---------
+         Pure CSS, width-triggered (not gated on touch) — a narrow DESKTOP
+         window gets the same legible, non-overflowing HUD for free, since
+         this is a layout fix, not a touch feature. The four corner panels
+         (#hud-top-left, #top-bar-center, #hud-top-right, #top-bar-players)
+         previously used a single shared --hud-scale (1.45) tuned for a
+         1920x1080 desktop reading distance; at 390px wide, #hud-top-right
+         ALONE (status box + xp box + 3 icon buttons laid out in one row)
+         measures well over 390px, which is the overflow this fixes — see
+         FINAL_A3_AUDIT_REPORT.md's screenshot evidence. Nothing here is
+         inside a class/selector that only applies above 480px, so desktop
+         (1920x1080, the other marking viewport) is completely unaffected —
+         confirmed via screenshot after this change (see PROCESS.md). ---- */
+      @media (max-width: 480px) {
+        :root {
+          /* Shrinks the four corner panels + their bars (the ONLY things
+             --hud-scale touches — #interact-menu/#phase-banner/#enemy-intro/
+             #character-select deliberately opt out already, see that
+             variable's own comment above) without needing a second parallel
+             set of hand-tuned sizes for every element that uses it. */
+          --hud-scale: 0.85;
+        }
+        /* #hud-top-left's own children (portrait beside a name/HP/XP
+           column) were never the overflow — a single narrow row already.
+           Only its PANEL position/max-width need to shrink to leave the
+           other corner room. #hud-top-right is the actual overflow source:
+           its 3 children (status box, xp box, icon buttons) sit side by
+           side separated by dividers, in a row that at 1.45-scale sizing
+           runs well past 390px — stacked into a column instead, trading
+           width for height (this viewport is 844px tall, plenty to spare). */
+        #hud-top-left {
+          top: 6px;
+          left: 6px;
+          max-width: 55vw;
+        }
+        #hud-top-right {
+          top: 6px;
+          right: 6px;
+          max-width: 40vw;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: calc(4px * var(--hud-scale));
+        }
+        /* Status box / XP box no longer sit side-by-side with a divider
+           between them (that divider assumed a row layout) — stacked, each
+           is its own full-width block within the panel instead. */
+        .hud-status-box,
+        .hud-xp-box {
+          border-right: none;
+          padding-right: 0;
+          align-items: flex-end;
+        }
+        .hud-icon-buttons {
+          /* Play/pause/menu stay one row (compact already) but need a real
+             minimum touch-target size regardless of how far --hud-scale
+             shrank them — 36px * 0.85 = 30.6px, under the ~40-44px a finger
+             can reliably hit. */
+          justify-content: flex-end;
+        }
+        .hud-icon-btn {
+          min-width: 42px;
+          min-height: 42px;
+        }
+        /* Day/wave moves down to clear the now-TALLER (stacked) top-left/
+           top-right panels instead of overlapping them. */
+        #top-bar-center {
+          top: 104px;
+          max-width: 92vw;
+        }
+        #top-bar-center .top-bar-wave-label {
+          white-space: normal;
+        }
+        /* Team roster relocates from bottom-left (where the virtual D-pad
+           now lives — see touch-controls.ts's own CSS below) to just under
+           the local player's own card, and drops each teammate's portrait
+           image (saves ~60px/card width) — name/status/HP text alone is
+           still "readable team status," just without the per-player
+           thumbnail this width can't spare. */
+        #top-bar-players {
+          top: 70px;
+          left: 6px;
+          bottom: auto;
+          max-width: 70vw;
+          flex-wrap: wrap;
+        }
+        #top-bar-players .player-portrait-frame {
+          display: none;
+        }
+        #top-bar-players .player-slot-empty {
+          width: calc(44px * var(--hud-scale));
+        }
+        /* Clears the touch-controls row (see below) instead of sitting
+           inside it; on a non-touch narrow window this simply keeps the
+           prompt comfortably above the bottom edge. */
+        #prompt {
+          bottom: 210px;
+        }
+      }
+
+      /* --- Touch controls (virtual D-pad, ATTACK, contextual action
+         buttons) — created and appended by touch-controls.ts, ONLY on a
+         device it detects as touch-capable (coarse pointer + maxTouchPoints
+         > 0); see that file's isTouchCapable(). These rules only ever match
+         once touch-controls.ts has added the "touch-ui" class to <body>, so
+         a desktop mouse/keyboard session never sees this overlay at all —
+         satisfies "do not display the mobile touch-control overlay for
+         normal desktop use" by construction (no class added -> no rule
+         matches -> nothing rendered), not just by nobody happening to tap
+         invisible buttons. Unlike the reflow above, these are NOT inside
+         the width media query — a touch-capable device reports touch
+         capability regardless of its current window width. ---- */
+      body.touch-ui #prompt {
+        /* The contextual action buttons below replace the keyboard-hint
+           text version of the same information — showing both would be
+           redundant and the text one has no tap target anyway. */
+        display: none;
+      }
+      /* #interact-menu is `pointer-events: none` by design for desktop
+         (X/Esc/number keys are the only input — a mouse click passes
+         straight through the floating panel to the canvas underneath,
+         e.g. to keep aiming while it's open). A touch session has no
+         keyboard at all, so it needs the menu's own close button and rows
+         to actually be tappable — re-enabling pointer-events only for
+         touch sessions (not desktop) keeps that existing click-through
+         behaviour completely unchanged for mouse/keyboard. */
+      body.touch-ui #interact-menu {
+        pointer-events: auto;
+      }
+      .touch-dpad {
+        position: fixed;
+        left: 18px;
+        bottom: 18px;
+        width: 168px;
+        height: 168px;
+        display: grid;
+        grid-template-columns: 54px 54px 54px;
+        grid-template-rows: 54px 54px 54px;
+        gap: 3px;
+        z-index: 25;
+        touch-action: none;
+      }
+      .touch-dpad-up {
+        grid-column: 2;
+        grid-row: 1;
+      }
+      .touch-dpad-left {
+        grid-column: 1;
+        grid-row: 2;
+      }
+      .touch-dpad-down {
+        grid-column: 2;
+        grid-row: 3;
+      }
+      .touch-dpad-right {
+        grid-column: 3;
+        grid-row: 2;
+      }
+      .touch-dpad-btn {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        border: 2px solid var(--border-light);
+        border-radius: 10px;
+        background: rgba(43, 34, 25, 0.78);
+        color: var(--text);
+        font-size: 22px;
+        font-family: inherit;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .touch-dpad-btn.held {
+        background: rgba(212, 175, 55, 0.4);
+        border-color: var(--accent-gold);
+      }
+      .touch-attack {
+        position: fixed;
+        right: 22px;
+        bottom: 26px;
+        width: 92px;
+        height: 92px;
+        border-radius: 50%;
+        border: 3px solid var(--accent-red);
+        background: rgba(181, 84, 63, 0.32);
+        color: var(--text);
+        font-weight: 800;
+        font-size: 14px;
+        font-family: inherit;
+        letter-spacing: 0.04em;
+        z-index: 25;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .touch-attack.held {
+        background: rgba(181, 84, 63, 0.62);
+      }
+      /* Contextual action row (MENU / HOLD REVIVE / MEDKIT) — positioned
+         above BOTH the D-pad (168px tall + 18px margin = 186px from the
+         bottom edge) and the ATTACK button (92px + 26px = 118px), so it
+         never overlaps either regardless of which ones are visible at
+         once. Each button's own [hidden] mirrors exactly the condition
+         main.ts's updatePrompt() already uses for the equivalent keyboard
+         hint — one source of truth for "is this action available now". */
+      .touch-actions {
+        position: fixed;
+        left: 50%;
+        bottom: 198px;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 10px;
+        z-index: 25;
+      }
+      .touch-action-btn {
+        padding: 10px 16px;
+        border: 2px solid var(--accent-gold);
+        border-radius: 8px;
+        background: rgba(20, 16, 11, 0.88);
+        color: var(--text);
+        font-family: inherit;
+        font-weight: 800;
+        font-size: 11px;
+        line-height: 1.3;
+        letter-spacing: 0.02em;
+        text-align: center;
+        text-transform: uppercase;
+        /* Preserves the "\n" in the REVIVE button's own "HOLD\nREVIVE"
+           textContent as a real line break — textContent never interprets
+           "\n" as <br> on its own, only CSS white-space can make it render
+           as one. */
+        white-space: pre-line;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .touch-action-btn[hidden] {
+        display: none;
+      }
+      .touch-action-btn.held {
+        background: rgba(212, 175, 55, 0.3);
+      }
+      /* A tappable close affordance inside #interact-menu — the existing
+         "[X / Esc] Close" hint at the bottom of the menu has no tap target
+         of its own (X/Esc are keyboard-only), so a touch session needs a
+         real button; harmless and equally clickable on desktop too, it's
+         just redundant there with the Esc key. */
+      .menu-close-btn {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        width: 26px;
+        height: 26px;
+        border: 1px solid var(--border-light);
+        background: rgba(0, 0, 0, 0.35);
+        color: var(--text);
+        font-size: 14px;
+        font-family: inherit;
+        line-height: 1;
+        cursor: pointer;
+        touch-action: none;
+      }
+      /* Menu rows become real tap targets on a touch session — same rows,
+         same computeMenuChoices data, main.ts just also listens for a tap
+         on one (see dispatchMenuChoice) instead of only a matching number
+         key. A slightly taller row gives a touch session a comfortable
+         target without changing anything for desktop's existing look. */
+      body.touch-ui .menu-row {
+        padding: calc(7px + 4px) 6px;
+        cursor: pointer;
       }
     </style>
   </head>

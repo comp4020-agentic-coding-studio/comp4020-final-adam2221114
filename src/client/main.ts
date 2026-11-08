@@ -19,6 +19,7 @@ import {
 import { WALL_HALF_EXTENT } from "./obstacles.ts";
 import type { ClientMessage, ControlMessage, GamePhase, InteractAction, PlayerSnapshot, ServerMessage, StateMessage, TurretAction, ZombieSnapshot, ZombieType } from "./protocol.ts";
 import { InputController } from "./input.ts";
+import { isTouchCapable, TouchControls } from "./touch-controls.ts";
 import { interpolateState } from "./interpolate.ts";
 import { LocalPlayerPrediction } from "./prediction.ts";
 import {
@@ -846,9 +847,16 @@ const rowIcon = (o: MenuChoice): string => {
   return uiIcon(o.icon, 22);
 };
 
+// A tappable "x" in the corner — X/Esc are keyboard-only, so a touch session
+// needs a real close button; harmless and equally clickable on desktop too
+// (just redundant there with the Esc key). Included on both menu states
+// (placement mode and the choice list) since both need a way to back out.
+const closeButtonHtml = `<button type="button" class="menu-close-btn" data-menu-close>×</button>`;
+
 const renderMenu = (state: StateMessage | undefined): void => {
   if (placementMode) {
     menu.innerHTML = [
+      closeButtonHtml,
       `<div class="menu-heading">${baseMenuIcon("turret")} PLACING TURRET</div>`,
       `<div class="menu-hint">Click a valid spot (dashed ring around the base)</div>`,
       `<div class="menu-hint">[X / Esc] Cancel</div>`,
@@ -864,8 +872,13 @@ const renderMenu = (state: StateMessage | undefined): void => {
   const heading = menuContext.kind === "base" ? `${baseMenuIcon("fortress")} BASE` : `${baseMenuIcon("turret")} TURRET`;
   const rows = menuChoices.map((o) => {
     const affordable = state.sharedXp >= o.cost;
+    // data-menu-key, not an inline onclick, so the single delegated
+    // listener added once below (not re-added every renderMenu call) can
+    // look the choice back up in the CURRENT menuChoices array — the same
+    // array the keyboard path already reads from, so a tap and a keypress
+    // can never pick a stale/different choice.
     return [
-      `<div class="menu-row${affordable ? "" : " menu-row-disabled"}">`,
+      `<div class="menu-row${affordable ? "" : " menu-row-disabled"}" data-menu-key="${o.key}">`,
       `<span class="menu-key">[${o.key}]</span>`,
       `<span class="menu-row-icon">${rowIcon(o)}</span>`,
       `<span class="menu-label">${o.label}</span>`,
@@ -873,9 +886,28 @@ const renderMenu = (state: StateMessage | undefined): void => {
       `</div>`,
     ].join("");
   });
-  menu.innerHTML = [`<div class="menu-heading">${heading}</div>`, ...rows, `<div class="menu-hint">[X / Esc] Close</div>`].join("");
+  menu.innerHTML = [closeButtonHtml, `<div class="menu-heading">${heading}</div>`, ...rows, `<div class="menu-hint">[X / Esc] Close</div>`].join("");
   menu.hidden = false;
 };
+
+// One delegated listener for the menu's whole lifetime (not re-bound on
+// every renderMenu innerHTML rewrite) — covers the close button and every
+// choice row, for both a mouse click and a touch tap (pointerdown bubbles
+// the same way click does, and this project's buttons already use
+// pointerdown elsewhere — see touch-controls.ts — for a consistent,
+// zero-click-delay response on touch).
+menu.addEventListener("pointerdown", (e) => {
+  const target = e.target as HTMLElement;
+  if (target.closest("[data-menu-close]")) {
+    if (placementMode) cancelPlacement();
+    else if (menuOpen) closeMenu();
+    return;
+  }
+  const row = target.closest<HTMLElement>("[data-menu-key]");
+  if (!row || row.classList.contains("menu-row-disabled")) return;
+  const chosen = menuChoices.find((o) => o.key === row.dataset.menuKey);
+  if (chosen) dispatchMenuChoice(chosen);
+});
 
 const closeMenu = (): void => {
   menuOpen = false;
@@ -888,29 +920,96 @@ const cancelPlacement = (): void => {
   menu.hidden = true;
 };
 
+// Opens whichever menu [X] would open right now (turret takes priority over
+// base — nearestTurretInRange/playerInBaseRange's own existing precedence),
+// or does nothing if neither is in range. Shared by the keyboard X handler
+// and touch-controls.ts's MENU button (via the onOpenMenu callback passed
+// to its constructor below) so there is exactly one "what does opening the
+// menu actually do" decision, not a second mobile-only copy of it.
+const openContextMenu = (): void => {
+  if (placementMode || menuOpen) return;
+  const turretId = nearestTurretInRange(currentState);
+  if (turretId) {
+    menuOpen = true;
+    menuContext = { kind: "turret", turretId };
+    renderMenu(currentState);
+  } else if (playerInBaseRange()) {
+    menuOpen = true;
+    menuContext = { kind: "base" };
+    renderMenu(currentState);
+  }
+};
+
+// Applies whichever MenuChoice was picked — by its keyboard number key (the
+// existing path) or by a tap on its own rendered row (dispatchMenuChoice's
+// new caller, the click listener #interact-menu gains below). Exactly the
+// same three-way branch the keyboard handler always ran; extracted so a tap
+// and a keypress can't ever disagree about what choosing an option does.
+const dispatchMenuChoice = (chosen: MenuChoice): void => {
+  if (chosen.kind === "place_turret") {
+    closeMenu();
+    placementMode = true;
+    renderMenu(currentState);
+  } else if (chosen.kind === "interact") {
+    sendInteract(chosen.action);
+  } else {
+    sendTurretInteract(chosen.turretId, chosen.action);
+  }
+};
+
+// Mobile touch controls — created ONLY on a device touch-controls.ts's own
+// isTouchCapable() detects as touch-capable (never on a desktop mouse/
+// keyboard session, regardless of window width; see that file's own
+// comment). undefined on desktop, so every call site below uses
+// touchControls?. — "no touch controls exist" and "touch controls exist but
+// have nothing to show right now" are both perfectly normal states, not
+// errors. onOpenMenu/onUseMedkit reuse the EXACT SAME functions the
+// keyboard's X/H shortcuts already call, so there is no second, mobile-only
+// menu-opening or medkit-using code path.
+const touchControls: TouchControls | undefined = isTouchCapable()
+  ? new TouchControls({ input, canvas, onOpenMenu: openContextMenu, onUseMedkit: sendUseMedkit })
+  : undefined;
+
 // A passive "here's what you can do" hint — every action it names already
 // exists (X-menu, hold E, H); this only surfaces them contextually instead of
 // requiring the player to remember keybinds. Hidden whenever the menu/
-// placement overlay is already showing its own instructions.
+// placement overlay is already showing its own instructions. Also drives
+// touch-controls.ts's 3 contextual buttons (menuLabel/canRevive/
+// canUseMedkit below), from the EXACT SAME turretId/playerInBaseRange/
+// nearestDownedTeammate/medkit checks this function already makes for the
+// keyboard-hint text — touch and desktop can never disagree about when an
+// action is actually available, since both read the same booleans computed
+// once, right here.
 const updatePrompt = (state: StateMessage | undefined): void => {
   if (!state || state.phase !== "running" || menuOpen || placementMode) {
     prompt.hidden = true;
+    touchControls?.updateActions({ menuLabel: undefined, canRevive: false, canUseMedkit: false });
     return;
   }
   const self = findSelf(state);
-  const hints: string[] = [];
   const turretId = nearestTurretInRange(state);
+  const inBaseRange = playerInBaseRange();
+  const canRevive = self?.status === "alive" && nearestDownedTeammate(state) !== undefined;
+  const canUseMedkit = self?.status === "alive" && self.medkits > 0 && self.hp < self.maxHp;
+
+  const hints: string[] = [];
   if (turretId) hints.push("[X] Turret Menu");
-  else if (playerInBaseRange()) hints.push("[X] Base Menu");
-  if (self?.status === "alive" && nearestDownedTeammate(state)) hints.push("[Hold E] Revive");
-  if (self?.status === "alive" && self.medkits > 0 && self.hp < self.maxHp) hints.push("[H] Use Medkit");
+  else if (inBaseRange) hints.push("[X] Base Menu");
+  if (canRevive) hints.push("[Hold E] Revive");
+  if (canUseMedkit) hints.push("[H] Use Medkit");
 
   if (hints.length === 0) {
     prompt.hidden = true;
-    return;
+  } else {
+    prompt.innerHTML = hints.map((h) => `<span class="prompt-hint">${h}</span>`).join("");
+    prompt.hidden = false;
   }
-  prompt.innerHTML = hints.map((h) => `<span class="prompt-hint">${h}</span>`).join("");
-  prompt.hidden = false;
+
+  touchControls?.updateActions({
+    menuLabel: turretId ? "TURRET\nMENU" : inBaseRange ? "BASE\nMENU" : undefined,
+    canRevive,
+    canUseMedkit,
+  });
 };
 
 window.addEventListener("keydown", (e) => {
@@ -938,31 +1037,13 @@ window.addEventListener("keydown", (e) => {
     } else if (menuOpen) {
       closeMenu();
     } else {
-      const turretId = nearestTurretInRange(currentState);
-      if (turretId) {
-        menuOpen = true;
-        menuContext = { kind: "turret", turretId };
-        renderMenu(currentState);
-      } else if (playerInBaseRange()) {
-        menuOpen = true;
-        menuContext = { kind: "base" };
-        renderMenu(currentState);
-      }
+      openContextMenu();
     }
     return;
   }
   if (menuOpen) {
     const chosen = menuChoices.find((o) => o.key === key);
-    if (!chosen) return;
-    if (chosen.kind === "place_turret") {
-      closeMenu();
-      placementMode = true;
-      renderMenu(currentState);
-    } else if (chosen.kind === "interact") {
-      sendInteract(chosen.action);
-    } else {
-      sendTurretInteract(chosen.turretId, chosen.action);
-    }
+    if (chosen) dispatchMenuChoice(chosen);
   }
 });
 

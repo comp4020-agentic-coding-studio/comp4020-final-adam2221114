@@ -1,11 +1,22 @@
 import type { ClientMessage } from "./protocol.ts";
 import { screenToWorld, type Camera } from "./camera.ts";
 
-// Reads keyboard + mouse and sends what the server asked for (input/shoot).
-// Never moves anything locally and never decides a hit — position, HP, XP
-// all come back from the server's own state broadcast. getAimAngle() and
-// getMouseWorldPos() are exposed only so the renderer can draw local cues
-// (aim line, crosshair, the oriented character); neither is a game decision.
+// Reads keyboard + mouse (desktop) AND touch (mobile virtual D-pad/ATTACK
+// button/drag-to-aim, wired up by touch-controls.ts) and sends what the
+// server asked for (input/shoot). Never moves anything locally and never
+// decides a hit — position, HP, XP all come back from the server's own
+// state broadcast. getAimAngle() and getMouseWorldPos() are exposed only so
+// the renderer can draw local cues (aim line, crosshair, the oriented
+// character); neither is a game decision.
+//
+// Touch integration deliberately reuses this exact class rather than a
+// parallel mobile input path: setDirectionHeld/setReviving mutate the SAME
+// #keys object keyboard already drives (so #sendInput's 50ms broadcast and
+// movePlayer/prediction's diagonal-normalisation math need no mobile-aware
+// branch at all), and setAimWorldPos/triggerShot reuse the SAME
+// #mouseWorldPos/#onClick desktop mouse input already uses. A touch session
+// and a desktop session are indistinguishable from this class's own state
+// outward — only touch-controls.ts's event wiring differs.
 export class InputController {
   readonly #canvas: HTMLCanvasElement;
   readonly #getCamera: () => Camera;
@@ -84,6 +95,55 @@ export class InputController {
     return this.#mouseWorldPos;
   }
 
+  // --- Touch entry points (touch-controls.ts calls these; desktop code
+  // never does) — each one sets EXACTLY the same private state its
+  // keyboard/mouse equivalent already sets above, so #sendInput, getAimAngle
+  // and #onClick behave identically regardless of which input device drove
+  // them. ---
+
+  // The virtual D-pad's 4 buttons each map to one of these — same four
+  // booleans #onKey's "w/s/a/d/arrow*" cases set, so holding two at once
+  // (diagonal) normalises through movePlayer/prediction.ts's existing
+  // dx/dy/hypot math with no touch-specific branch.
+  setDirectionHeld(dir: "up" | "down" | "left" | "right", held: boolean): void {
+    this.#keys[dir] = held;
+  }
+
+  // The revive-hold button's press/release — same boolean #onKey's "e" case
+  // sets, polled by #sendInput exactly like a held E key.
+  setReviving(held: boolean): void {
+    this.#keys.reviving = held;
+  }
+
+  // Drag-to-aim on the canvas: touch-controls.ts calls screenPointToWorld
+  // (below) on the touch point, then hands the already-converted WORLD
+  // position here — kept as a world position (not screen pixels) so this
+  // setter needs no camera reference of its own.
+  setAimWorldPos(pos: { x: number; y: number }): void {
+    this.#mouseWorldPos = pos;
+  }
+
+  // The exact clientX/clientY -> world conversion #onMouseMove uses below,
+  // exposed so touch-controls.ts's pointer handlers convert a touch point
+  // identically (same CSS-pixel/backing-store-pixel ratio, same camera) —
+  // one conversion routine for both input devices, not a second copy.
+  screenPointToWorld(clientX: number, clientY: number): { x: number; y: number } {
+    const rect = this.#canvas.getBoundingClientRect();
+    const cssToBackingX = this.#canvas.width / rect.width;
+    const cssToBackingY = this.#canvas.height / rect.height;
+    const canvasX = (clientX - rect.left) * cssToBackingX;
+    const canvasY = (clientY - rect.top) * cssToBackingY;
+    return screenToWorld(this.#getCamera(), canvasX, canvasY);
+  }
+
+  // The ATTACK button's hold-to-fire loop (touch-controls.ts's own setInterval,
+  // since the fire RATE is a touch-UI choice, not something this class should
+  // own) calls this once per shot — identical to a desktop click's #onClick,
+  // down to firing the same onShoot callback for the tracer/muzzle-flash.
+  triggerShot(): void {
+    this.#onClick();
+  }
+
   #clearHeldKeys(): void {
     this.#keys.up = false;
     this.#keys.down = false;
@@ -127,19 +187,7 @@ export class InputController {
   }
 
   #onMouseMove(e: MouseEvent): void {
-    const rect = this.#canvas.getBoundingClientRect();
-    // getBoundingClientRect() is in CSS pixels, which can differ from the
-    // canvas's own backing-store width/height if CSS ever scales it — divide
-    // out that ratio before converting through the camera, whose origin/
-    // scale are expressed in backing-store pixels (canvas.width/height).
-    // Computed per axis (not one shared ratio) since the canvas now fills
-    // the whole, possibly non-square, window — width and height can scale
-    // differently.
-    const cssToBackingX = this.#canvas.width / rect.width;
-    const cssToBackingY = this.#canvas.height / rect.height;
-    const canvasX = (e.clientX - rect.left) * cssToBackingX;
-    const canvasY = (e.clientY - rect.top) * cssToBackingY;
-    this.#mouseWorldPos = screenToWorld(this.#getCamera(), canvasX, canvasY);
+    this.#mouseWorldPos = this.screenPointToWorld(e.clientX, e.clientY);
   }
 
   #onClick(): void {
